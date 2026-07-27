@@ -1,0 +1,30 @@
+
+
+## Codely Structured Memories
+
+### User
+- [2026-07-26 01:07:17] User: Acc. Mohamed Abdou — system designer/owner of the Mobile Shop ERP spec. Wants a non-accountant-friendly desktop app (no complex double-entry journal entries). Arabic UI with RTL. Values: simplicity for data entry staff, strict cross-module linking (every operation affects related balances), audit trail (notes are append-only with user attribution).
+
+### Feedback
+- [2026-07-26 15:33:09] End users should never be asked for developer credentials. Activation codes alone are sufficient proof of authorization — requiring a dev password at activation is a design flaw.
+- [2026-07-26 16:15:28] License activation flow: users activate from Settings > License page, NOT from dev console. Dev console is for code generation only. Code generation must require customer device ID — never generate unbound codes. Dev password fields must never show the actual password as a placeholder hint.
+
+### Project
+- [2026-07-26 00:51:18] User environment has NODE_ENV=production set globally, which causes npm to skip devDependencies (electron, electron-forge, etc.). Must prefix npm commands with `$env:NODE_ENV="development"` in PowerShell.
+- [2026-07-26 00:51:18] Electron Forge Vite plugin: main entry in package.json must be ".vite/build/index.js" (not main.js). Native modules like better-sqlite3 must be externalized in vite.main.config.ts via build.rollupOptions.external. AutoUnpackNativesPlugin needed for asar packaging.
+- [2026-07-26 16:15:01] Project: Mobile Shop ERP — Electron + React + TypeScript + SQLite + Tailwind (RTL). 110+ source files. Login: admin / admin123. Dev: zerocold / 014253. Developer: محاسب / محمد عبدة, phone 01207770329, email conta.shepo@gmail.com. 35+ DB tables auto-migrate (includes asset_transfers table). Full license system: AES-256-CBC encrypted (random IV per encryption), device ID, 7-day trial on first launch (trial.dat, cannot be repeated/extended/skipped), activation codes bound to customer device ID (dev must enter customer's device ID when generating code), no dev password needed for activation, anti-tamper hash, date rollback detection (lastaccess.dat + trial.dat cross-check), error state blocks app (no bypass). DevTools no longer auto-opens. Dev console (Ctrl+Shift+5) is a standalone route accessible even when license expired. User activates/renews license from Settings > License page (not dev console). Dev console password hint removed (no placeholder). All modules: sales/POS (service items + cost + transfer cost + overpayment + customer balance + profit per line + simplified payment + preview invoice button + cancel resets form + cash customer must pay full + negative stock prevention via settings), purchases (auto stock + IMEI + overpayment), services (transfer/bill/topup/electronic + custom types + profit calc + machine deduction), maintenance (receive/deliver/return with discount + final price + simplified payment like sales + overpayment handling + profit calc), vouchers, payroll (issue separate from pay + employee statement), rent, inventory (items/IMEI/categories with defaults + barcode scan + quick add + empty barcode→NULL fix + stock check before sale), HR (customers/suppliers auto-color), assets (separate cash + payment methods + transfers between accounts with transfer cost + negative balance prevention), settings (general with negative balance toggles for stock/customer/cash + appearance + print 58mm/80mm/A5/A4 + preview/print default + 5 templates + users+permissions + database management + backup), dashboard, 9 report types + financial position + accurate P&L (net sales-returns + maintenance + other income + rent income - COGS - parts - general expenses - salaries - advances - rent - deductions), fiscal year, settlement (applies to DB + history + details), backup/restore, opening balances (all + owner capital), customer/supplier/employee statements (4-card layout with paid-in-invoice as credit), database management (CSV export, auto-backup hourly, network sharing, cloud sync, custom DB path), print system (thermal + A5 + A4 + preview + quick override dropdown + 5 templates), dev console (Ctrl+Shift+5, 3 tabs: about/license/codes), about page. Main process has error logging + auto-backup + license checks. React Router future flags enabled.
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Reference
+

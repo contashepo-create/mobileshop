@@ -87,18 +87,24 @@ const defaultItems: MenuItem[] = [
       { path: '/reports/employee-statement', label: 'كشف حساب موظف', icon: UserCircle },
     ],
   },
-  { path: '/settings', label: 'الإعدادات', icon: Settings },
-  { path: '/settings/database', label: 'قاعدة البيانات', icon: Database },
-  { path: '/settings/license', label: 'الترخيص والاشتراك', icon: Shield },
-  { path: '/settings/backup', label: 'النسخ الاحتياطي', icon: HardDrive },
-  { path: '/about', label: 'حول البرنامج', icon: Info },
+  {
+    label: 'الإعدادات',
+    icon: Settings,
+    children: [
+      { path: '/settings', label: 'الإعدادات العامة', icon: Settings },
+      { path: '/settings/database', label: 'قاعدة البيانات', icon: Database },
+      { path: '/settings/license', label: 'الترخيص والاشتراك', icon: Shield },
+      { path: '/settings/backup', label: 'النسخ الاحتياطي', icon: HardDrive },
+      { path: '/about', label: 'حول البرنامج', icon: Info },
+    ],
+  },
 ];
 
 // Map of standalone labels to their path + icon
 const standaloneMeta: Record<string, { path: string; icon: LucideIcon; label: string }> = {
   'لوحة التحكم': { path: '/', icon: LayoutDashboard, label: 'لوحة التحكم' },
   'المخازن والأصناف': { path: '/inventory', icon: Package, label: 'المخازن والأصناف' },
-  'الإعدادات': { path: '/settings', icon: Settings, label: 'الإعدادات' },
+  'الإعدادات العامة': { path: '/settings', icon: Settings, label: 'الإعدادات العامة' },
   'قاعدة البيانات': { path: '/settings/database', icon: Database, label: 'قاعدة البيانات' },
   'الترخيص والاشتراك': { path: '/settings/license', icon: Shield, label: 'الترخيص والاشتراك' },
   'النسخ الاحتياطي': { path: '/settings/backup', icon: HardDrive, label: 'النسخ الاحتياطي' },

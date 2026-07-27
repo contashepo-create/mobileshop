@@ -45,20 +45,11 @@ const defaultMainOrder = [
   'الأصول',
   'التقارير',
   'الإعدادات',
-  'قاعدة البيانات',
-  'الترخيص والاشتراك',
-  'النسخ الاحتياطي',
-  'حول البرنامج',
 ];
 
 const standalonePaths: Record<string, string> = {
   'لوحة التحكم': '/',
   'المخازن والأصناف': '/inventory',
-  'الإعدادات': '/settings',
-  'قاعدة البيانات': '/settings/database',
-  'الترخيص والاشتراك': '/settings/license',
-  'النسخ الاحتياطي': '/settings/backup',
-  'حول البرنامج': '/about',
 };
 
 const defaultChildrenOrder: Record<string, string[]> = {
@@ -90,6 +81,13 @@ const defaultChildrenOrder: Record<string, string[]> = {
     '/reports/supplier-statement',
     '/reports/employee-statement',
   ],
+  'الإعدادات': [
+    '/settings',
+    '/settings/database',
+    '/settings/license',
+    '/settings/backup',
+    '/about',
+  ],
 };
 
 function getFrozenDefaults(): SidebarConfig | null {
@@ -110,6 +108,20 @@ function getFrozenDefaults(): SidebarConfig | null {
   return null;
 }
 
+function migrateConfig(config: SidebarConfig): SidebarConfig {
+  const oldSettingsStandalone = ['قاعدة البيانات', 'الترخيص والاشتراك', 'النسخ الاحتياطي', 'حول البرنامج'];
+  const hasOldSettings = oldSettingsStandalone.some((label) => config.mainOrder.includes(label));
+  if (!hasOldSettings) return config;
+
+  const newMainOrder = config.mainOrder.filter((label) => !oldSettingsStandalone.includes(label));
+  if (!newMainOrder.includes('الإعدادات')) {
+    newMainOrder.splice(newMainOrder.length, 0, 'الإعدادات');
+  }
+  const settingsChildren = ['/settings', '/settings/database', '/settings/license', '/settings/backup', '/about'];
+  const newChildrenOrder = { ...config.childrenOrder, 'الإعدادات': settingsChildren };
+  return { ...config, mainOrder: newMainOrder, childrenOrder: newChildrenOrder };
+}
+
 function loadConfig(): SidebarConfig {
   // First check if frozen defaults are set (for production builds)
   const frozen = getFrozenDefaults();
@@ -118,13 +130,14 @@ function loadConfig(): SidebarConfig {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
-      return {
+      const config = {
         mainOrder: parsed.mainOrder || [...defaultMainOrder],
         childrenOrder: { ...defaultChildrenOrder, ...(parsed.childrenOrder || {}) },
         hidden: [], // hiding is no longer supported
         customSections: parsed.customSections || {},
         customLabels: parsed.customLabels || {},
       };
+      return migrateConfig(config);
     }
   } catch {}
   return {
@@ -350,7 +363,7 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
       // Standalone paths (may appear as children when moved to a section)
       '/': 'لوحة التحكم',
       '/inventory': 'المخازن والأصناف',
-      '/settings': 'الإعدادات',
+      '/settings': 'الإعدادات العامة',
       '/settings/database': 'قاعدة البيانات',
       '/settings/license': 'الترخيص والاشتراك',
       '/settings/backup': 'النسخ الاحتياطي',

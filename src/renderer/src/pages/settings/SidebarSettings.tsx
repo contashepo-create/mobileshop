@@ -43,6 +43,16 @@ const defaultSections: { label: string; children: { path: string; label: string 
       { path: '/reports/employee-statement', label: 'كشف حساب موظف' },
     ],
   },
+  {
+    label: 'الإعدادات',
+    children: [
+      { path: '/settings', label: 'الإعدادات العامة' },
+      { path: '/settings/database', label: 'قاعدة البيانات' },
+      { path: '/settings/license', label: 'الترخيص والاشتراك' },
+      { path: '/settings/backup', label: 'النسخ الاحتياطي' },
+      { path: '/about', label: 'حول البرنامج' },
+    ],
+  },
 ];
 
 export function SidebarSettings() {

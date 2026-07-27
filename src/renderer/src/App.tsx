@@ -33,6 +33,7 @@ import { DevConsolePage } from './pages/dev/DevConsolePage';
 import { AboutPage } from './pages/settings/AboutPage';
 import { ServicesPage } from './pages/accounting/ServicesPage';
 import { ToastContainer } from './components/ui/Toast';
+import { NoticeCenter } from './components/shared/NoticeCenter';
 import { useAuthStore } from './stores/auth.store';
 import { useThemeStore } from './stores/theme.store';
 
@@ -147,6 +148,12 @@ export default function App() {
         )}
       </Routes>
       <ToastContainer />
+      {/*
+        Only once the user is inside the app. Showing a renewal dialog over the
+        login box or the activation screen would cover the very field they need
+        to type into, and those screens already state the licence situation.
+      */}
+      {isLicensed && isAuthenticated && <NoticeCenter />}
     </>
   );
 }

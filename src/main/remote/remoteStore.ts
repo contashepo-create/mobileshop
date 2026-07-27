@@ -39,6 +39,14 @@ export function ensureRemoteTables() {
       Value TEXT
     );
   `);
+
+  // Anchor for the "please connect" reminder. Without it, an install that has
+  // NEVER reached the server would have no reference point and could never be
+  // reminded. `INSERT OR IGNORE` means it is written exactly once, on the first
+  // run, and every later boot leaves the original value alone.
+  db.prepare(`
+    INSERT OR IGNORE INTO remote_state (Key, Value) VALUES ('installed_at', ?)
+  `).run(new Date().toISOString());
 }
 
 // ---------------------------------------------------------------- config
@@ -134,6 +142,28 @@ export function listRemoteMessages() {
       FROM remote_messages
       WHERE ExpiresAt IS NULL OR ExpiresAt > datetime('now')
       ORDER BY (ReadAt IS NOT NULL), CreatedAt DESC
+    `).all();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Messages the customer has not acknowledged yet, oldest first.
+ *
+ * Oldest-first is deliberate: they are shown one after another, and reading
+ * them in the order the developer sent them is the only order that makes sense
+ * (e.g. "maintenance tonight" then "maintenance finished").
+ */
+export function listUnreadMessages() {
+  const db = getDb();
+  try {
+    return db.prepare(`
+      SELECT MessageID, Title, Body, Severity, CreatedAt
+      FROM remote_messages
+      WHERE ReadAt IS NULL
+        AND (ExpiresAt IS NULL OR ExpiresAt > datetime('now'))
+      ORDER BY CreatedAt ASC, MessageID ASC
     `).all();
   } catch {
     return [];

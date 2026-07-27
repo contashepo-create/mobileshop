@@ -1,10 +1,14 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import {
-  ensureRemoteTables, listRemoteMessages, markMessageRead, getRemoteOverrides,
+  ensureRemoteTables, listRemoteMessages, listUnreadMessages, markMessageRead,
+  getRemoteOverrides, getRemoteState, setRemoteState,
 } from '../remote/remoteStore';
 import { lastSyncInfo, runHeartbeat, telemetryEnabled } from '../remote/heartbeat';
 import { REMOTE_MANAGED_KEYS } from '../remote/remoteConfig';
+import {
+  evaluateOfflineNotice, evaluateExpiryNotice, OFFLINE_REMINDER_DAYS,
+} from '../remote/notices';
 
 /**
  * Renderer-facing surface for the remote-management feature.
@@ -26,6 +30,62 @@ export function registerRemoteHandlers(
   ipcMain.handle('remote:markRead', async (_event, messageId: number) => {
     if (typeof messageId !== 'number') return { success: false };
     markMessageRead(messageId);
+    return { success: true };
+  });
+
+  /**
+   * Everything the app should pop up right now, in one call.
+   *
+   * Returned as data rather than pushed from the main process: the renderer
+   * owns the dialog, so it can queue them, style them, and respect whatever
+   * screen the user is on. The main process never forces a window open.
+   *
+   * Ordering is by urgency — an expiring subscription is shown before a
+   * general notice, because it is the only one with a deadline.
+   */
+  ipcMain.handle('remote:pendingNotices', async () => {
+    ensureRemoteTables();
+    const now = new Date();
+    const sync = lastSyncInfo();
+    const license = getLicense();
+
+    const expiry = evaluateExpiryNotice({
+      now,
+      status: license?.status,
+      expiry: license?.expiry ?? null,
+      lastShown: getRemoteState('expiry_notice_shown'),
+    });
+
+    const offline = evaluateOfflineNotice({
+      now,
+      lastSync: sync.lastSync,
+      installedAt: getRemoteState('installed_at'),
+      lastShown: getRemoteState('offline_notice_shown'),
+      remoteEnabled: sync.enabled,
+    });
+
+    return {
+      messages: listUnreadMessages(),
+      expiry: expiry.show ? expiry : null,
+      offline: offline.show ? { ...offline, reminderDays: OFFLINE_REMINDER_DAYS } : null,
+    };
+  });
+
+  /**
+   * Records that a non-message dialog was dismissed, so it stays quiet for its
+   * snooze window instead of reappearing on the next screen change.
+   */
+  ipcMain.handle('remote:dismissNotice', async (_event, kind: string) => {
+    const allowed: Record<string, string> = {
+      offline: 'offline_notice_shown',
+      expiry: 'expiry_notice_shown',
+    };
+    const stateKey = allowed[String(kind)];
+    // Whitelisted, not interpolated: the renderer must never be able to choose
+    // an arbitrary remote_state key to overwrite.
+    if (!stateKey) return { success: false };
+    ensureRemoteTables();
+    setRemoteState(stateKey, new Date().toISOString());
     return { success: true };
   });
 

@@ -94,6 +94,11 @@ const AUTHENTICATED_ONLY = new Set<string>([
   'remote:syncInfo',
   'remote:privacyReport',
   'remote:managedKeys',
+  // Popups the customer must be able to see and dismiss regardless of role:
+  // a renewal warning that only an admin could read would be useless to the
+  // cashier who is actually standing at the counter when it expires.
+  'remote:pendingNotices',
+  'remote:dismissNotice',
   'statement:getOperationDetail',
   'capital:get',
 ]);

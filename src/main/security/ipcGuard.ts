@@ -64,6 +64,9 @@ const AUTHENTICATED_ONLY = new Set<string>([
   'notifications:dismissed',
   'notifications:snooze',
   'notifications:clearExpired',
+  // Reading the alert preferences is needed to render the bell for everyone;
+  // changing them is a settings action and is permission-mapped below.
+  'notifications:getPrefs',
   'warehouses:list',
   'categories:list',
   'cashAccounts:list',
@@ -257,6 +260,10 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'settings:set': 'settings.edit',
   'remote:syncNow': 'settings.edit',
   'remote:setTelemetry': 'settings.edit',
+  // Retuning the alert rules changes what every user of this install sees,
+  // so it is an administrative action rather than a personal preference.
+  'notifications:setPrefs': 'settings.edit',
+  'notifications:resetPrefs': 'settings.edit',
   'settings:setMany': 'settings.edit',
   'settings:resetDatabase': 'settings.edit',
   'users:create': 'settings.users',

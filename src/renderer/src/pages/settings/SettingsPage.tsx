@@ -1,18 +1,20 @@
 import { useState } from 'react';
-import { Settings as SettingsIcon, Palette, Printer, Users, Building2, Menu } from 'lucide-react';
+import { Settings as SettingsIcon, Palette, Printer, Users, Building2, Menu, Bell } from 'lucide-react';
 import { GeneralSettings } from './GeneralSettings';
 import { AppearanceSettings } from './AppearanceSettings';
 import { PrintSettings } from './PrintSettings';
 import { UsersSettings } from './UsersSettings';
 import { SidebarSettings } from './SidebarSettings';
+import { NotificationSettings } from './NotificationSettings';
 
-type Tab = 'general' | 'appearance' | 'print' | 'users' | 'sidebar';
+type Tab = 'general' | 'appearance' | 'print' | 'users' | 'sidebar' | 'notifications';
 
 const tabs = [
   { key: 'general' as Tab, label: 'إعدادات عامة', icon: Building2 },
   { key: 'appearance' as Tab, label: 'المظهر', icon: Palette },
   { key: 'print' as Tab, label: 'الطباعة والفواتير', icon: Printer },
   { key: 'sidebar' as Tab, label: 'القائمة الجانبية', icon: Menu },
+  { key: 'notifications' as Tab, label: 'التنبيهات الذكية', icon: Bell },
   { key: 'users' as Tab, label: 'المستخدمين والصلاحيات', icon: Users },
 ];
 
@@ -53,6 +55,7 @@ export function SettingsPage() {
         {activeTab === 'appearance' && <AppearanceSettings />}
         {activeTab === 'print' && <PrintSettings />}
         {activeTab === 'sidebar' && <SidebarSettings />}
+        {activeTab === 'notifications' && <NotificationSettings />}
         {activeTab === 'users' && <UsersSettings />}
       </div>
     </div>

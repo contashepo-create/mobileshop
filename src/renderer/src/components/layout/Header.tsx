@@ -9,13 +9,16 @@ export function Header() {
   const [searchQuery, setSearchQuery] = useState('');
   const [notifications, setNotifications] = useState<any>(null);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [refreshMs, setRefreshMs] = useState(60000);
   const notifRef = useRef<HTMLDivElement>(null);
 
+  // The refresh cadence is the shop's choice, so the timer is rebuilt whenever
+  // the engine reports a different value (saved on the settings screen).
   useEffect(() => {
-    fetchNotifications();
-    const interval = setInterval(fetchNotifications, 60000); // Refresh every minute
+    void fetchNotifications();
+    const interval = setInterval(() => { void fetchNotifications(); }, refreshMs);
     return () => clearInterval(interval);
-  }, []);
+  }, [refreshMs]);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -31,6 +34,13 @@ export function Header() {
     try {
       const result = await window.api.invoke('notifications:smart');
       setNotifications(result);
+      const mins = Number(result?.refreshMinutes);
+      if (Number.isFinite(mins) && mins >= 1) {
+        const ms = mins * 60000;
+        // Only trigger a re-subscribe when it actually changed, otherwise the
+        // effect would tear down and rebuild the timer on every poll.
+        setRefreshMs(prev => (prev === ms ? prev : ms));
+      }
     } catch {}
   };
 
@@ -84,7 +94,17 @@ export function Header() {
               </div>
 
                   {notifications.notifications.length === 0 ? (
-                <div className="p-8 text-center text-slate-500 dark:text-slate-400 text-sm">لا توجد إشعارات - كل شيء على ما يرام ✅</div>
+                <div className="p-8 text-center text-slate-500 dark:text-slate-400 text-sm">
+                  {/* An empty bell has three very different meanings. Saying
+                      "all good" when alerts are switched off would be a lie. */}
+                  {notifications.suppressionReason === 'off'
+                    ? 'نظام التنبيهات موقوف من الإعدادات'
+                    : notifications.suppressionReason === 'quiet'
+                    ? 'ساعات الهدوء مفعّلة الآن 🌙'
+                    : notifications.suppressionReason === 'day'
+                    ? 'التنبيهات موقوفة في هذا اليوم'
+                    : 'لا توجد إشعارات - كل شيء على ما يرام ✅'}
+                </div>
               ) : (
                 <div>
                   <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-700/50 flex gap-1">

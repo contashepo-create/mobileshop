@@ -1,6 +1,8 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { getCallerUserId } from '../security/ipcGuard';
 import { nextDocNumber } from '../database/docNumber';
+import { deductStock, restoreStock } from '../database/stock';
 
 const statusLabels: Record<string, string> = {
   received: 'مستلم', inspecting: 'فحص', in_progress: 'قيد العمل',
@@ -153,7 +155,8 @@ export function registerMaintenanceHandlers() {
   });
 
   // Update ticket status - REQUIRES notes
-  ipcMain.handle('maintenance:updateStatus', async (_event, ticketId: number, status: string, notes: string, userId: number) => {
+  ipcMain.handle('maintenance:updateStatus', async (event, ticketId: number, status: string, notes: string, _userId?: number) => {
+    const userId = getCallerUserId(event, _userId);
     if (!notes.trim()) {
       return { success: false, message: 'الملاحظات إجبارية عند تغيير الحالة' };
     }
@@ -174,11 +177,19 @@ export function registerMaintenanceHandlers() {
     UnitCost?: number; SalePrice?: number; WarehouseID: number; userId: number;
   }) => {
     const db = getDb();
-    let unitCost = data.UnitCost ?? 0;
-    if (!unitCost) {
-      const stock = db.prepare('SELECT CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(data.ItemID, data.WarehouseID) as any;
-      unitCost = stock?.CostPrice || 0;
-    }
+    // COST INTEGRITY: the cost booked against the ticket MUST equal the value
+    // actually leaving inventory, otherwise the balance sheet silently drifts
+    // by the difference on every repair (assets drop by CostPrice while P&L is
+    // charged the caller-supplied UnitCost).
+    // The caller may no longer override this; UnitCost is accepted only as a
+    // fallback when the item has no costed stock row yet.
+    const stockRow = db.prepare(
+      'SELECT CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?'
+    ).get(data.ItemID, data.WarehouseID) as any;
+    const stockCost = stockRow?.CostPrice ?? null;
+    const unitCost = (stockCost !== null && stockCost > 0)
+      ? stockCost
+      : (data.UnitCost ?? (db.prepare('SELECT CostPrice FROM items WHERE ItemID = ?').get(data.ItemID) as any)?.CostPrice ?? 0);
     const salePrice = data.SalePrice ?? 0;
     const totalCost = unitCost * data.Quantity;
     const totalSale = salePrice * data.Quantity;
@@ -198,10 +209,8 @@ export function registerMaintenanceHandlers() {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(data.TicketID, data.ItemID, data.Quantity, unitCost, totalCost, salePrice, data.WarehouseID, data.userId);
 
-      const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(data.ItemID, data.WarehouseID) as any;
-      if (stock) {
-        db.prepare('UPDATE stock_quantities SET Quantity = Quantity - ? WHERE ID = ?').run(data.Quantity, stock.ID);
-      }
+      // Deduct from the exact warehouse the cost was read from.
+      deductStock(db, data.ItemID, data.WarehouseID, data.Quantity);
 
       db.prepare('UPDATE maintenance_tickets SET PartsCost = PartsCost + ?, TotalCost = TotalCost + ? WHERE TicketID = ?')
         .run(totalCost, totalSale || totalCost, data.TicketID);
@@ -211,7 +220,8 @@ export function registerMaintenanceHandlers() {
   });
 
   // Remove a part from a ticket (restore stock)
-  ipcMain.handle('maintenance:removePart', async (_event, partId: number, ticketId: number, userId: number) => {
+  ipcMain.handle('maintenance:removePart', async (event, partId: number, ticketId: number, _userId?: number) => {
+    const userId = getCallerUserId(event, _userId);
     const db = getDb();
     const part = db.prepare('SELECT * FROM maintenance_parts WHERE PartID = ?').get(partId) as any;
     if (!part) return { success: false, message: 'القطعة غير موجودة' };
@@ -219,10 +229,7 @@ export function registerMaintenanceHandlers() {
     db.transaction(() => {
       db.prepare('DELETE FROM maintenance_parts WHERE PartID = ?').run(partId);
 
-      const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(part.ItemID, part.WarehouseID) as any;
-      if (stock) {
-        db.prepare('UPDATE stock_quantities SET Quantity = Quantity + ? WHERE ID = ?').run(part.Quantity, stock.ID);
-      }
+      restoreStock(db, part.ItemID, part.WarehouseID, part.Quantity, part.UnitCost || 0);
 
       db.prepare('UPDATE maintenance_tickets SET PartsCost = MAX(0, PartsCost - ?), TotalCost = MAX(0, TotalCost - ?) WHERE TicketID = ?')
         .run(part.TotalCost, part.TotalCost, ticketId);
@@ -557,12 +564,7 @@ export function registerMaintenanceHandlers() {
       // Restore parts to stock
       const parts = db.prepare('SELECT * FROM maintenance_parts WHERE TicketID = ?').all(data.TicketID) as any[];
       for (const p of parts) {
-        const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(p.ItemID, p.WarehouseID) as any;
-        if (stock) {
-          db.prepare('UPDATE stock_quantities SET Quantity = Quantity + ? WHERE ID = ?').run(p.Quantity, stock.ID);
-        } else {
-          db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(p.ItemID, p.WarehouseID, p.Quantity, p.UnitCost);
-        }
+        restoreStock(db, p.ItemID, p.WarehouseID, p.Quantity, p.UnitCost || 0);
       }
 
       db.prepare("UPDATE maintenance_tickets SET Status = 'cancelled' WHERE TicketID = ?").run(data.TicketID);
@@ -624,12 +626,7 @@ export function registerMaintenanceHandlers() {
       if (data.PartsRestored === 1) {
         const parts = db.prepare('SELECT * FROM maintenance_parts WHERE TicketID = ?').all(data.TicketID) as any[];
         for (const part of parts) {
-          const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(part.ItemID, part.WarehouseID) as any;
-          if (stock) {
-            db.prepare('UPDATE stock_quantities SET Quantity = Quantity + ? WHERE ID = ?').run(part.Quantity, stock.ID);
-          } else {
-            db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(part.ItemID, part.WarehouseID, part.Quantity, part.UnitCost);
-          }
+          restoreStock(db, part.ItemID, part.WarehouseID, part.Quantity, part.UnitCost || 0);
         }
       }
 

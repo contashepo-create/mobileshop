@@ -235,9 +235,11 @@ export function registerPurchasesHandlers() {
 
     const tx = db.transaction(() => {
       const result = db.prepare(`
-        INSERT INTO purchase_returns (ReturnNumber, PurchaseID, Date, TotalAmount, Reason, UserID, CashAccountID)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(returnNumber, data.PurchaseID, dateStr, totalAmount, data.Reason ?? null, data.userId, data.CashAccountID ?? null);
+        INSERT INTO purchase_returns (ReturnNumber, PurchaseID, Date, TotalAmount, Reason, UserID, CashAccountID,
+          DebtRelief, CashRefund)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(returnNumber, data.PurchaseID, dateStr, totalAmount, data.Reason ?? null, data.userId,
+             data.CashAccountID ?? null, debtRelief, cashRefund);
 
       const returnId = result.lastInsertRowid;
 

@@ -362,18 +362,28 @@ export function registerInventoryHandlers() {
           VALUES (?, ?, ?, ?, ?)
         `).run(transferId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitCost ?? null);
 
-        // Deduct from source warehouse
-        const existingFrom = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(item.ItemID, data.FromWarehouseID) as any;
+        // === VALUE-NEUTRAL TRANSFER ===
+        // Moving stock between warehouses must not create or destroy value.
+        // Previously the destination kept its own CostPrice, so goods worth 100
+        // arriving in a warehouse valued at 60 silently wrote off the 40
+        // difference on every transfer. The goods now carry their source cost
+        // and the destination is re-averaged.
+        const existingFrom = db.prepare('SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(item.ItemID, data.FromWarehouseID) as any;
+        const movedCost = existingFrom?.CostPrice ?? item.UnitCost ?? 0;
         if (existingFrom) {
           db.prepare('UPDATE stock_quantities SET Quantity = Quantity - ? WHERE ID = ?').run(item.Quantity, existingFrom.ID);
         }
 
-        // Add to destination warehouse
-        const existingTo = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(item.ItemID, data.ToWarehouseID) as any;
+        // Add to destination warehouse at a weighted-average cost
+        const existingTo = db.prepare('SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(item.ItemID, data.ToWarehouseID) as any;
         if (existingTo) {
-          db.prepare('UPDATE stock_quantities SET Quantity = Quantity + ? WHERE ID = ?').run(item.Quantity, existingTo.ID);
+          const newQty = (existingTo.Quantity || 0) + item.Quantity;
+          const newCost = newQty > 0
+            ? (((existingTo.CostPrice || 0) * (existingTo.Quantity || 0)) + (movedCost * item.Quantity)) / newQty
+            : movedCost;
+          db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?').run(newQty, newCost, existingTo.ID);
         } else {
-          db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(item.ItemID, data.ToWarehouseID, item.Quantity, item.UnitCost ?? 0);
+          db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(item.ItemID, data.ToWarehouseID, item.Quantity, movedCost);
         }
 
         // If serial item, move the serial

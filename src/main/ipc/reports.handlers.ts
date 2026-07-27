@@ -388,8 +388,14 @@ export function registerReportsHandlers() {
     // filtering on it silently dropped issued-but-unpaid salaries from the
     // income statement while the balance sheet still counted them, making the
     // two reports disagree. `Month` is the accrual period ('YYYY-MM').
+    // The expense is the GROSS entitlement, not the net cash paid.
+    // `NetSalary` is already net of advances, but an advance is a prepayment of
+    // this same salary that left the till earlier and sits in the balance sheet
+    // as an asset. Charging only the net amount made that asset disappear with
+    // no matching expense, so profit was overstated by every advance deducted.
+    // Deductions (damage/absence) genuinely reduce the cost, so they stay netted.
     const salariesExpense = db.prepare(`
-      SELECT COALESCE(SUM(NetSalary),0) as total FROM salaries
+      SELECT COALESCE(SUM(NetSalary + COALESCE(AdvancesTotal,0)),0) as total FROM salaries
       WHERE 1=1
         ${filters.fromDate ? "AND Month >= substr(?,1,7)" : ''}
         ${filters.toDate ? "AND Month <= substr(?,1,7)" : ''}
@@ -528,7 +534,8 @@ export function registerReportsHandlers() {
 
     // PartyType='rent' excluded here — rent comes from rent_payments below.
     const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND (PartyType='general' OR PartyType IS NULL)").get() as any;
-    const salariesExpense = db.prepare('SELECT COALESCE(SUM(NetSalary),0) as total FROM salaries').get() as any;
+    // Gross entitlement — see the note in reports:profitLoss.
+    const salariesExpense = db.prepare('SELECT COALESCE(SUM(NetSalary + COALESCE(AdvancesTotal,0)),0) as total FROM salaries').get() as any;
     const rentExpenses = db.prepare("SELECT COALESCE(SUM(rp.Amount),0) as total FROM rent_payments rp JOIN rents r ON rp.RentID=r.RentID WHERE rp.Status='paid' AND r.RentType='expense'").get() as any;
 
     const netRevenue = salesRevenue.total - salesReturns.total + maintenanceRevenue.total - maintenanceReturns.total

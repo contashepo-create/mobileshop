@@ -1,4 +1,6 @@
-import { ipcMain } from 'electron';
+import { ipcMain, app } from 'electron';
+import path from 'node:path';
+import fs from 'node:fs';
 import { getDb } from '../database/connection';
 import bcrypt from 'bcryptjs';
 import { devLogin, revokeDevToken } from '../security/devAuth';
@@ -24,9 +26,20 @@ export function registerSettingsHandlers() {
   // the sidebar config lives in the renderer, so the renderer repairs it
   // locally now (see sidebar.store.ts `repairConfig`). Channel removed.
   // Get all settings
+  /**
+   * SECURITY: this channel is reachable BEFORE login (the login screen needs
+   * the shop name/logo), so it must never return secrets. Cloud credentials
+   * and sync tokens live in the same table and were previously handed to any
+   * caller. Use `db:getCloudSettings` (permission-gated) for those.
+   */
   ipcMain.handle('settings:getAll', async () => {
     const db = getDb();
-    const rows = db.prepare('SELECT Key, Value FROM settings').all() as any[];
+    const rows = db.prepare(`
+      SELECT Key, Value FROM settings
+      WHERE Key NOT LIKE 'cloud_%'
+        AND Key NOT LIKE 'sync_%'
+        AND Key NOT IN ('db_path')
+    `).all() as any[];
     const settings: Record<string, string> = {};
     for (const row of rows) {
       settings[row.Key] = row.Value;
@@ -68,15 +81,33 @@ export function registerSettingsHandlers() {
     return { complete: row?.Value === '1' };
   });
 
+  /**
+   * SECURITY: unauthenticated (first-run wizard) and it wrote ARBITRARY setting
+   * keys, so a caller could flip `allow_negative_stock`, rewrite
+   * `owner_capital`, or repoint `db_path`. It is now closed after setup and
+   * restricted to the company-profile keys the wizard actually collects.
+   */
+  const SETUP_ALLOWED_KEYS = new Set([
+    'company_name', 'owner_name', 'phone', 'email', 'address',
+    'tax_number', 'logo_path', 'currency', 'app_name',
+  ]);
+
   ipcMain.handle('setup:complete', async (_event, data: Record<string, string>) => {
     const db = getDb();
+    const done = db.prepare("SELECT Value FROM settings WHERE Key = 'setup_completed'").get() as any;
+    if (done?.Value === '1') {
+      return { success: false, message: 'تم إعداد النظام بالفعل' };
+    }
+    const rejected = Object.keys(data || {}).filter(k => !SETUP_ALLOWED_KEYS.has(k));
     const tx = db.transaction(() => {
-      for (const [key, value] of Object.entries(data)) {
-        db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)').run(key, value);
+      for (const [key, value] of Object.entries(data || {})) {
+        if (!SETUP_ALLOWED_KEYS.has(key)) continue;
+        db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)').run(key, String(value ?? ''));
       }
       db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('setup_completed', '1')").run();
     });
     tx();
+    if (rejected.length) console.warn('[Setup] ignored non-profile keys:', rejected.join(', '));
     return { success: true };
   });
 
@@ -87,9 +118,24 @@ export function registerSettingsHandlers() {
     admin: { username: string; password: string; employeeName: string; position: string; phone: string };
   }) => {
     const db = getDb();
+
+    // SECURITY: this channel is callable without authentication (it runs the
+    // first-run wizard) AND it upserts the admin password
+    // (ON CONFLICT ... DO UPDATE SET PasswordHash). Without this guard anyone
+    // able to reach IPC could re-run it with username 'admin' and take over the
+    // account. Once setup is done, it is permanently closed.
+    const done = db.prepare("SELECT Value FROM settings WHERE Key = 'setup_completed'").get() as any;
+    if (done?.Value === '1') {
+      return { success: false, message: 'تم إعداد النظام بالفعل - استخدم صفحة المستخدمين لتغيير كلمة المرور' };
+    }
+
     const company = data.company;
     const customer = data.customer;
     const admin = data.admin;
+
+    if (!admin?.username?.trim() || typeof admin.password !== 'string' || admin.password.length < 6) {
+      return { success: false, message: 'اسم المستخدم مطلوب وكلمة المرور 6 أحرف على الأقل' };
+    }
 
     const tx = db.transaction(() => {
       // Save company settings
@@ -138,6 +184,17 @@ export function registerSettingsHandlers() {
     if (!user) return { success: false, message: 'المستخدم غير موجود' };
     const valid = bcrypt.compareSync(data.password, user.PasswordHash);
     if (!valid) return { success: false, message: 'كلمة المرور غير صحيحة' };
+
+    // Safety net: this wipes every transactional table, so take a snapshot the
+    // user can fall back on. Without it a mis-click is unrecoverable.
+    try {
+      const backupDir = path.join(app.getPath('userData'), 'backups');
+      if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      await db.backup(path.join(backupDir, `before_reset_${stamp}.db`));
+    } catch (err) {
+      return { success: false, message: `تعذّر إنشاء نسخة احتياطية قبل التصفير: ${err}` };
+    }
 
     // Tables to preserve (system config only)
     const systemTables = ['users', 'roles', 'role_permissions', 'permissions', 'settings', 'fiscal_years'];

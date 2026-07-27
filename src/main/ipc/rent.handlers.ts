@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { getCallerUserId } from '../security/ipcGuard';
 
 export function registerRentHandlers() {
   ipcMain.handle('rents:list', async () => {
@@ -85,7 +86,8 @@ export function registerRentHandlers() {
   });
 
   // Generate rent payments for a period
-  ipcMain.handle('rents:generatePayments', async (_event, rentId: number, months: number, userId: number, fiscalYearId: number) => {
+  ipcMain.handle('rents:generatePayments', async (event, rentId: number, months: number, _userId: number, fiscalYearId: number) => {
+    const userId = getCallerUserId(event, _userId);
     const db = getDb();
     const rent = db.prepare('SELECT * FROM rents WHERE RentID = ?').get(rentId) as any;
     if (!rent) return { success: false, message: 'الإيجار غير موجود' };

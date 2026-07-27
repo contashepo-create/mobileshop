@@ -14,3 +14,7 @@ electron_out.txt
 # Codely CLI workspace state (chat transcripts, clipboard captures)
 .codely/
 .codely-cli/
+
+# Python bytecode from the verification scripts
+__pycache__/
+*.pyc

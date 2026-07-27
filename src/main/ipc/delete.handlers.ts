@@ -2,6 +2,28 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { restoreStock, resolveSourceWarehouse } from '../database/stock';
 
+/**
+ * Refuses a delete when other documents still reference the record.
+ *
+ * Deleting a parent row used to silently orphan its children: a sale with a
+ * registered return left the return pointing at a missing invoice, so the
+ * return kept affecting reports while its source was gone, and every balance
+ * derived from the pair drifted permanently. Blocking the delete (rather than
+ * cascading) is the safe choice for accounting data — the user reverses the
+ * dependent document first, which keeps a visible audit trail.
+ */
+function blockIfReferenced(
+  db: ReturnType<typeof getDb>,
+  checks: { sql: string; params: unknown[]; label: string }[],
+): string | null {
+  for (const c of checks) {
+    const row = db.prepare(c.sql).get(...(c.params as any[])) as any;
+    const n = row ? (row.n ?? 0) : 0;
+    if (n > 0) return `${c.label} (${n})`;
+  }
+  return null;
+}
+
 export function registerDeleteHandlers() {
   // Delete sale - reverse all effects
   ipcMain.handle('delete:sale', async (_event, saleId: number) => {
@@ -9,6 +31,15 @@ export function registerDeleteHandlers() {
     try {
       const sale = db.prepare('SELECT * FROM sales WHERE SaleID = ?').get(saleId) as any;
       if (!sale) return { success: false, message: 'الفاتورة غير موجودة' };
+
+      const blocked = blockIfReferenced(db, [
+        { sql: 'SELECT COUNT(*) as n FROM sale_returns WHERE SaleID = ?', params: [saleId], label: 'مرتجعات مرتبطة' },
+        { sql: 'SELECT COUNT(*) as n FROM maintenance_deliveries WHERE SaleID = ?', params: [saleId], label: 'تسليم صيانة مرتبط' },
+        { sql: "SELECT COUNT(*) as n FROM vouchers WHERE ReferenceType = 'sale' AND ReferenceID = ?", params: [saleId], label: 'سندات مرتبطة' },
+      ]);
+      if (blocked) {
+        return { success: false, message: `لا يمكن حذف الفاتورة - توجد ${blocked}. احذفها أولاً.` };
+      }
 
       const tx = db.transaction(() => {
         // Get sale details
@@ -59,6 +90,14 @@ export function registerDeleteHandlers() {
     try {
       const purchase = db.prepare('SELECT * FROM purchases WHERE PurchaseID = ?').get(purchaseId) as any;
       if (!purchase) return { success: false, message: 'الفاتورة غير موجودة' };
+
+      const blockedPur = blockIfReferenced(db, [
+        { sql: 'SELECT COUNT(*) as n FROM purchase_returns WHERE PurchaseID = ?', params: [purchaseId], label: 'مرتجعات مرتبطة' },
+        { sql: "SELECT COUNT(*) as n FROM vouchers WHERE ReferenceType = 'purchase' AND ReferenceID = ?", params: [purchaseId], label: 'سندات مرتبطة' },
+      ]);
+      if (blockedPur) {
+        return { success: false, message: `لا يمكن حذف فاتورة الشراء - توجد ${blockedPur}. احذفها أولاً.` };
+      }
 
       const tx = db.transaction(() => {
         const details = db.prepare('SELECT * FROM purchase_details WHERE PurchaseID = ?').all(purchaseId) as any[];
@@ -247,6 +286,13 @@ export function registerDeleteHandlers() {
       const delivery = db.prepare('SELECT * FROM maintenance_deliveries WHERE DeliveryID = ?').get(deliveryId) as any;
       if (!delivery) return { success: false, message: 'التسليم غير موجود' };
 
+      const blockedMd = blockIfReferenced(db, [
+        { sql: 'SELECT COUNT(*) as n FROM maintenance_returns WHERE DeliveryID = ?', params: [deliveryId], label: 'مرتجع صيانة مرتبط' },
+      ]);
+      if (blockedMd) {
+        return { success: false, message: `لا يمكن حذف التسليم - يوجد ${blockedMd}. احذفه أولاً.` };
+      }
+
       const tx = db.transaction(() => {
         // Reverse customer balance
         if (delivery.CustomerID && delivery.RemainingAmount > 0) {
@@ -333,6 +379,17 @@ export function registerDeleteHandlers() {
           db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(transfer.ReceivedAmount, transfer.ToID);
         } else {
           db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(transfer.ReceivedAmount, transfer.ToID);
+        }
+
+        // The transfer wrote a 'TRC-' expense voucher for its commission; remove
+        // it too, otherwise the fee stays on the P&L after the transfer is gone.
+        if (transfer.TransferCost > 0) {
+          const trcNumber = `TRC-${String(transfer.Date || '').replace(/-/g, '')}`;
+          db.prepare(`
+            DELETE FROM vouchers
+            WHERE VoucherType = 'payment' AND PartyType = 'general'
+              AND Date = ? AND Amount = ? AND VoucherNumber LIKE ?
+          `).run(transfer.Date, transfer.TransferCost, `${trcNumber}%`);
         }
 
         db.prepare('DELETE FROM asset_transfers WHERE TransferID = ?').run(transferId);

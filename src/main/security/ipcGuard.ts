@@ -359,6 +359,20 @@ export function installIpcGuard() {
   }) as typeof ipcMain.handle;
 }
 
+/**
+ * Trusted user id for handlers that receive `userId` as a POSITIONAL argument
+ * rather than inside an object payload. The blanket rewrite in
+ * `installIpcGuard` can only reach object payloads, so those handlers must ask
+ * for the caller explicitly instead of trusting their parameter.
+ *
+ * Falls back to the supplied value only when there is no session (which the
+ * guard already rejects for non-public channels).
+ */
+export function getCallerUserId(event: IpcMainInvokeEvent, fallback?: number): number {
+  const s = getSession(event.sender.id);
+  return s ? s.userId : (fallback ?? 0);
+}
+
 /** Exposed so the caller context can be read by handlers that need more than userId. */
 export function getCaller(event: IpcMainInvokeEvent): CallerContext | null {
   const s = getSession(event.sender.id);

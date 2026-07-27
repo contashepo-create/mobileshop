@@ -253,9 +253,11 @@ export function registerSalesHandlers() {
     try {
       const tx = db.transaction(() => {
         const result = db.prepare(`
-          INSERT INTO sale_returns (ReturnNumber, SaleID, Date, TotalAmount, Reason, UserID, CashAccountID)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(returnNumber, data.SaleID, dateStr, totalAmount, data.Reason ?? null, data.userId, data.CashAccountID ?? null);
+          INSERT INTO sale_returns (ReturnNumber, SaleID, Date, TotalAmount, Reason, UserID, CashAccountID,
+            DebtRelief, CashRefund)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(returnNumber, data.SaleID, dateStr, totalAmount, data.Reason ?? null, data.userId,
+               data.CashAccountID ?? null, debtRelief, cashRefund);
 
         const returnId = result.lastInsertRowid;
 

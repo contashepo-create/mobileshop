@@ -1,6 +1,125 @@
 import type Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 
+/** Column names currently present on a table. */
+function columnsOf(db: Database.Database, table: string): string[] {
+  try {
+    return (db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name as string);
+  } catch {
+    return [];
+  }
+}
+
+/** True when `table.column` is declared NOT NULL. */
+function isNotNull(db: Database.Database, table: string, column: string): boolean {
+  try {
+    const row = (db.prepare(`PRAGMA table_info(${table})`).all() as any[]).find(r => r.name === column);
+    return !!row && row.notnull === 1;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rebuilds a table safely: creates the target, copies the INTERSECTION of the
+ * old and new column sets by name, then swaps. Copying by name (instead of
+ * `SELECT *`) means an extra column on either side can never shift values into
+ * the wrong column or abort the copy.
+ *
+ * The whole swap runs in one transaction so a failure can never leave the
+ * database with the original table dropped and no replacement.
+ */
+function rebuildTable(
+  db: Database.Database,
+  table: string,
+  tempName: string,
+  createTempSql: string,
+): boolean {
+  const oldCols = columnsOf(db, table);
+  if (oldCols.length === 0) return false;
+
+  // Clean up any orphan left behind by an older, non-transactional attempt.
+  try { db.exec(`DROP TABLE IF EXISTS ${tempName}`); } catch { /* ignore */ }
+
+  const swap = db.transaction(() => {
+    db.exec(createTempSql);
+    const newCols = columnsOf(db, tempName);
+    const shared = oldCols.filter(c => newCols.includes(c));
+    if (shared.length === 0) throw new Error(`no shared columns between ${table} and ${tempName}`);
+    const list = shared.join(', ');
+    db.exec(`INSERT INTO ${tempName} (${list}) SELECT ${list} FROM ${table}`);
+    db.exec(`DROP TABLE ${table}`);
+    db.exec(`ALTER TABLE ${tempName} RENAME TO ${table}`);
+  });
+
+  try {
+    swap();
+    return true;
+  } catch (err) {
+    console.error(`[Migration] rebuild of ${table} failed, original left intact:`, err);
+    try { db.exec(`DROP TABLE IF EXISTS ${tempName}`); } catch { /* ignore */ }
+    return false;
+  }
+}
+
+/** sale_details.ItemID must allow NULL so service lines can be stored. */
+function rebuildSaleDetailsIfNeeded(db: Database.Database) {
+  if (columnsOf(db, 'sale_details').length === 0) return;   // fresh DB, already correct
+  if (!isNotNull(db, 'sale_details', 'ItemID')) return;      // already migrated
+  rebuildTable(db, 'sale_details', 'sale_details_migrate', `
+    CREATE TABLE sale_details_migrate (
+      DetailID        INTEGER PRIMARY KEY AUTOINCREMENT,
+      SaleID          INTEGER NOT NULL,
+      ItemID          INTEGER,
+      SerialID        INTEGER,
+      IMEI            TEXT,
+      Quantity        REAL DEFAULT 1,
+      UnitPrice       REAL NOT NULL,
+      UnitCost        REAL,
+      Total           REAL NOT NULL,
+      IsWarranty      INTEGER DEFAULT 0,
+      WarrantyMonths  INTEGER,
+      Description     TEXT,
+      WarehouseID     INTEGER,
+      FOREIGN KEY (SaleID) REFERENCES sales(SaleID),
+      FOREIGN KEY (ItemID) REFERENCES items(ItemID),
+      FOREIGN KEY (SerialID) REFERENCES item_serials(SerialID)
+    )`);
+}
+
+/** service_sales.CustomerID must allow NULL (walk-in customers). */
+function rebuildServiceSalesIfNeeded(db: Database.Database) {
+  if (columnsOf(db, 'service_sales').length === 0) return;
+  if (!isNotNull(db, 'service_sales', 'CustomerID')) return;
+  rebuildTable(db, 'service_sales', 'service_sales_migrate', `
+    CREATE TABLE service_sales_migrate (
+      ServiceSaleID    INTEGER PRIMARY KEY AUTOINCREMENT,
+      ServiceNumber    TEXT UNIQUE NOT NULL,
+      FiscalYearID     INTEGER NOT NULL,
+      Date             TEXT NOT NULL,
+      CustomerID       INTEGER,
+      CustomerName     TEXT,
+      CustomerPhone    TEXT,
+      ServiceType      TEXT NOT NULL,
+      Provider         TEXT,
+      TargetPhone      TEXT,
+      Amount           REAL DEFAULT 0,
+      ServiceCost      REAL DEFAULT 0,
+      ChargeAmount     REAL DEFAULT 0,
+      PaidAmount       REAL DEFAULT 0,
+      RemainingAmount  REAL DEFAULT 0,
+      Profit           REAL DEFAULT 0,
+      PaymentMethod    TEXT,
+      CashAccountID    INTEGER,
+      PaymentMethodID  INTEGER,
+      TransferCost     REAL DEFAULT 0,
+      Status           TEXT DEFAULT 'completed',
+      Notes            TEXT,
+      UserID           INTEGER NOT NULL,
+      CreatedAt        TEXT DEFAULT (datetime('now','localtime'))
+    )`);
+}
+
 export function runMigrations(db: Database.Database) {
   // Enable foreign keys
   db.pragma('foreign_keys = ON');
@@ -774,28 +893,17 @@ export function runMigrations(db: Database.Database) {
   // SCHEMA MIGRATIONS (for existing databases)
   // =============================================
 
-  // Allow NULL ItemID in sale_details (for service items)
-  try {
-    db.exec(`CREATE TABLE IF NOT EXISTS sale_details_new (
-      DetailID        INTEGER PRIMARY KEY AUTOINCREMENT,
-      SaleID          INTEGER NOT NULL,
-      ItemID          INTEGER,
-      SerialID        INTEGER,
-      IMEI            TEXT,
-      Quantity        REAL DEFAULT 1,
-      UnitPrice       REAL NOT NULL,
-      UnitCost        REAL,
-      Total           REAL NOT NULL,
-      IsWarranty      INTEGER DEFAULT 0,
-      WarrantyMonths  INTEGER,
-      FOREIGN KEY (SaleID) REFERENCES sales(SaleID),
-      FOREIGN KEY (ItemID) REFERENCES items(ItemID),
-      FOREIGN KEY (SerialID) REFERENCES item_serials(SerialID)
-    )`);
-    db.exec(`INSERT INTO sale_details_new SELECT * FROM sale_details`);
-    db.exec(`DROP TABLE sale_details`);
-    db.exec(`ALTER TABLE sale_details_new RENAME TO sale_details`);
-  } catch {}
+  // Allow NULL ItemID in sale_details (service lines have no stock item).
+  //
+  // This used to run a blind CREATE/INSERT/DROP/RENAME rebuild on EVERY start.
+  // Two things were wrong with that:
+  //   1. `INSERT ... SELECT *` breaks as soon as the live table gains a column
+  //      the rebuild template does not know about (Description, WarehouseID),
+  //      leaving `sale_details_new` behind as a permanent orphan table;
+  //   2. the DROP sits after the INSERT in the same try block, so a future
+  //      column-order change could drop the real table after a partial copy.
+  // We now only rebuild when it is actually needed, and copy columns by NAME.
+  rebuildSaleDetailsIfNeeded(db);
 
   // Add Source and SourceID to sales (for maintenance invoices)
   try {
@@ -820,37 +928,9 @@ export function runMigrations(db: Database.Database) {
   } catch {}
 
   // Allow NULL PaymentMethod in service_sales (for credit/no-payment)
-  try {
-    db.exec(`CREATE TABLE IF NOT EXISTS service_sales_new (
-      ServiceSaleID    INTEGER PRIMARY KEY AUTOINCREMENT,
-      ServiceNumber    TEXT UNIQUE NOT NULL,
-      FiscalYearID     INTEGER NOT NULL,
-      Date             TEXT NOT NULL,
-      CustomerID       INTEGER,
-      CustomerName     TEXT,
-      CustomerPhone    TEXT,
-      ServiceType      TEXT NOT NULL,
-      Provider         TEXT,
-      TargetPhone      TEXT,
-      Amount           REAL NOT NULL,
-      ServiceCost      REAL DEFAULT 0,
-      ChargeAmount     REAL NOT NULL,
-      PaidAmount       REAL DEFAULT 0,
-      RemainingAmount  REAL DEFAULT 0,
-      Profit           REAL DEFAULT 0,
-      PaymentMethod    TEXT DEFAULT 'credit',
-      CashAccountID    INTEGER,
-      PaymentMethodID  INTEGER,
-      TransferCost     REAL DEFAULT 0,
-      Status           TEXT DEFAULT 'completed',
-      Notes            TEXT,
-      UserID           INTEGER NOT NULL,
-      CreatedAt        TEXT DEFAULT (datetime('now','localtime'))
-    )`);
-    db.exec(`INSERT OR IGNORE INTO service_sales_new SELECT * FROM service_sales`);
-    db.exec(`DROP TABLE IF EXISTS service_sales`);
-    db.exec(`ALTER TABLE service_sales_new RENAME TO service_sales`);
-  } catch {}
+  // service_sales rebuild — see the note above. Guarded the same way so an
+  // added column can never orphan the table or drop live rows.
+  rebuildServiceSalesIfNeeded(db);
 
   // Fix empty barcodes (convert '' to NULL to avoid UNIQUE constraint issues)
   try {
@@ -991,6 +1071,23 @@ export function runMigrations(db: Database.Database) {
   } catch {}
   try {
     db.exec(`ALTER TABLE sale_return_details ADD COLUMN WarehouseID INTEGER`);
+  } catch {}
+
+  // Record HOW a return was settled: how much cancelled outstanding debt vs how
+  // much was handed back in cash. The customer statement needs this to know
+  // whether the return touched the customer balance at all — a cash refund on a
+  // fully-paid invoice must NOT appear as a credit on their account.
+  try {
+    db.exec(`ALTER TABLE sale_returns ADD COLUMN DebtRelief REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE sale_returns ADD COLUMN CashRefund REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE purchase_returns ADD COLUMN DebtRelief REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE purchase_returns ADD COLUMN CashRefund REAL DEFAULT 0`);
   } catch {}
 
   // =============================================

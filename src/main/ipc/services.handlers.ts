@@ -52,10 +52,24 @@ export function registerServicesHandlers() {
 
       // Check sufficient balance in payment method for service cost (unless negative cash allowed)
       const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
-      if (allowNegCash?.Value !== '1' && data.PaymentMethodID && data.Amount > 0) {
-        const pm = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(data.PaymentMethodID) as any;
-        if (!pm || (pm.Balance || 0) < data.Amount) {
-          return { success: false, message: `الرصيد غير كافٍ في طريقة الدفع: المتاح ${(pm?.Balance || 0).toFixed(2)}، المطلوب ${data.Amount.toFixed(2)}` };
+      // Total leaving the funding source = principal + provider fee + transfer fee.
+      // Checking only the principal let an operation overdraw by the fees.
+      const totalOutflow = (data.Amount || 0) + (data.ServiceCost || 0) + (data.TransferCost || 0);
+      if (allowNegCash?.Value !== '1' && totalOutflow > 0) {
+        if (data.PaymentMethodID) {
+          const pm = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(data.PaymentMethodID) as any;
+          if (!pm || (pm.Balance || 0) < totalOutflow) {
+            return { success: false, message: `الرصيد غير كافٍ في طريقة الدفع: المتاح ${(pm?.Balance || 0).toFixed(2)}، المطلوب ${totalOutflow.toFixed(2)}` };
+          }
+        } else if (data.CashAccountID && (data.ServiceCost || data.TransferCost)) {
+          // Fees fall back to the cash account when no machine is used. The
+          // customer's payment lands in the same account, so only the net
+          // shortfall matters.
+          const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+          const netNeeded = (data.ServiceCost || 0) + (data.TransferCost || 0) - (data.PaidAmount || 0);
+          if (netNeeded > 0 && (!acc || (acc.Balance || 0) < netNeeded)) {
+            return { success: false, message: `الرصيد غير كافٍ في الخزينة: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${netNeeded.toFixed(2)}` };
+          }
         }
       }
 
@@ -87,8 +101,26 @@ export function registerServicesHandlers() {
           db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(data.PaidAmount, data.CashAccountID);
         }
 
+        // The principal we push out of the machine/wallet to the target line.
         if (data.PaymentMethodID && data.Amount > 0) {
           db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(data.Amount, data.PaymentMethodID);
+        }
+
+        // === REAL COST OUTFLOW ===
+        // ServiceCost (what the provider charges us) and TransferCost (the
+        // network/commission fee) are genuine outflows. They were recorded on
+        // the service row and subtracted in the profit figure, but no account
+        // was ever debited — so every service invented `ServiceCost +
+        // TransferCost` of cash out of nothing and the balance sheet drifted.
+        // We book them against the funding source and record a matching expense
+        // voucher so the income statement and the cash movement agree.
+        const realCost = (data.ServiceCost || 0) + (data.TransferCost || 0);
+        if (realCost > 0) {
+          if (data.PaymentMethodID) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(realCost, data.PaymentMethodID);
+          } else if (data.CashAccountID) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(realCost, data.CashAccountID);
+          }
         }
       });
 

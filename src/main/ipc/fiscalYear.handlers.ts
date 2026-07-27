@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { getCallerUserId } from '../security/ipcGuard';
 
 export function registerFiscalYearHandlers() {
   ipcMain.handle('fiscalYear:list', async () => {
@@ -18,7 +19,9 @@ export function registerFiscalYearHandlers() {
     return { success: true, id: result.lastInsertRowid };
   });
 
-  ipcMain.handle('fiscalYear:close', async (_event, fiscalYearId: number, userId: number) => {
+  ipcMain.handle('fiscalYear:close', async (event, fiscalYearId: number, _userId?: number) => {
+    // Identity comes from the session, never from the renderer argument.
+    const userId = getCallerUserId(event, _userId);
     const db = getDb();
     const fy = db.prepare('SELECT * FROM fiscal_years WHERE FiscalYearID = ?').get(fiscalYearId) as any;
     if (!fy) return { success: false, message: 'السنة المالية غير موجودة' };

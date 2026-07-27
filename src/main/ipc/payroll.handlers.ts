@@ -48,7 +48,7 @@ export function registerPayrollHandlers() {
     const netSalary = emp.BaseSalary + emp.Allowances + commissionsTotal - deductionsTotal - advancesTotal;
 
     const tx = db.transaction(() => {
-      db.prepare(`
+      const ins = db.prepare(`
         INSERT INTO salaries (EmployeeID, Month, FiscalYearID, BaseSalary, Allowances,
           CommissionsTotal, DeductionsTotal, AdvancesTotal, NetSalary, PaidAmount, Status, UserID)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?)
@@ -58,6 +58,28 @@ export function registerPayrollHandlers() {
         commissionsTotal, deductionsTotal, advancesTotal,
         netSalary, data.userId
       );
+      const salaryId = ins.lastInsertRowid as number;
+
+      // ACCRUAL: issuing a salary creates an obligation to the employee even
+      // though no cash has moved yet. The P&L recognises the expense at issue
+      // time (filtered on `Month`), so without the matching liability the
+      // balance sheet was short by every unpaid salary.
+      //
+      // The obligation is booked GROSS (before advances) and the outstanding
+      // advances are settled against it in the same step. That keeps the
+      // liability, the expense and the advance asset consistent: the advance
+      // stops being an asset exactly when it starts reducing what we still owe.
+      db.prepare('UPDATE employees SET Balance = Balance + ? WHERE EmployeeID = ?')
+        .run(netSalary + advancesTotal, data.EmployeeID);
+      if (advancesTotal > 0) {
+        db.prepare('UPDATE employees SET Balance = Balance - ? WHERE EmployeeID = ?')
+          .run(advancesTotal, data.EmployeeID);
+        // Mark them settled now — they have been applied to this salary.
+        db.prepare(`
+          UPDATE employee_advances SET IsDeducted = 1, DeductedFromSalaryID = ?
+          WHERE EmployeeID = ? AND IsDeducted = 0
+        `).run(salaryId, data.EmployeeID);
+      }
     });
     tx();
 
@@ -121,14 +143,15 @@ export function registerPayrollHandlers() {
         db.prepare('UPDATE employee_deductions SET IsDeducted = 1, DeductedFromSalaryID = ? WHERE DeductionID = ?').run(data.SalaryID, d.DeductionID);
       }
 
-      // Mark advances as deducted
-      const advances = db.prepare("SELECT * FROM employee_advances WHERE EmployeeID = ? AND IsDeducted = 0").all(salary.EmployeeID) as any[];
-      for (const a of advances) {
-        db.prepare('UPDATE employee_advances SET IsDeducted = 1, DeductedFromSalaryID = ? WHERE AdvanceID = ?').run(data.SalaryID, a.AdvanceID);
-      }
+      // Advances were already applied and settled by `salaries:issue` (they are
+      // part of AdvancesTotal on this row), so nothing to do here. Re-settling
+      // them would swallow advances taken AFTER this salary was issued.
 
-      // Update employee balance
-      db.prepare('UPDATE employees SET Balance = Balance + ? WHERE EmployeeID = ?').run(netSalary - paidAmount, salary.EmployeeID);
+      // Settle the liability that `salaries:issue` recorded. Paying reduces what
+      // we owe by exactly the amount handed over; any unpaid remainder stays on
+      // the employee account. (This used to ADD `netSalary - paidAmount`, which
+      // double-counted the obligation once issue started booking it.)
+      db.prepare('UPDATE employees SET Balance = Balance - ? WHERE EmployeeID = ?').run(paidAmount, salary.EmployeeID);
 
       // Deduct from cash account
       if (data.CashAccountID && paidAmount > 0) {

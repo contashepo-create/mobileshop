@@ -330,8 +330,12 @@ export function registerCustomerStatementHandlers() {
     const fDel = df('d.Date');
     const fVR = df('v.Date');
     const fVP = df('v.Date');
+    const fSrv = df('ss.Date');
 
     // Sales (debit = full invoice amount, credit = amount paid at time of sale)
+    // Maintenance deliveries write a mirror invoice into `sales` for printing;
+    // that same charge is listed below from `maintenance_deliveries`, so it must
+    // be excluded here or the customer is billed twice on their own statement.
     const sales = db.prepare(`
       SELECT SaleID as RefID, SaleNumber as RefNumber, Date,
              TotalAmount as Debit,
@@ -339,13 +343,25 @@ export function registerCustomerStatementHandlers() {
              'sale' as OpType,
              'فاتورة بيع' as Description,
              PaymentMethod, PaidAmount, RemainingAmount, Status
-      FROM sales WHERE CustomerID = ? AND IsVoided = 0 ${fSales.sql}
+      FROM sales
+      WHERE CustomerID = ? AND IsVoided = 0
+        AND COALESCE(Source,'direct') <> 'maintenance' ${fSales.sql}
     `).all(customerId, ...fSales.vals);
     operations.push(...sales);
 
-    // Sale returns (credit - decreases customer balance)
+    // Sale returns — only the portion that CANCELLED DEBT belongs on the
+    // customer account. The cash-refunded portion left the till instead and
+    // never touched their balance, so crediting the full return value made the
+    // statement disagree with customers.Balance by exactly the refunded amount.
+    // Legacy rows (before DebtRelief existed) fall back to the old behaviour
+    // only when the invoice actually had an unpaid portion.
     const returns = db.prepare(`
-      SELECT r.ReturnID as RefID, r.ReturnNumber as RefNumber, r.Date, 0 as Debit, r.TotalAmount as Credit,
+      SELECT r.ReturnID as RefID, r.ReturnNumber as RefNumber, r.Date, 0 as Debit,
+             COALESCE(r.DebtRelief,
+               CASE WHEN COALESCE(s.PaidAmount,0) >= COALESCE(s.TotalAmount,0) THEN 0 ELSE r.TotalAmount END
+             ) as Credit,
+             r.TotalAmount as ReturnTotal,
+             COALESCE(r.CashRefund, 0) as CashRefund,
              'sale_return' as OpType, 'مرتجع مبيعات' as Description,
              NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, NULL as Status
       FROM sale_returns r
@@ -365,6 +381,22 @@ export function registerCustomerStatementHandlers() {
       WHERE d.CustomerID = ? AND d.VoidedSaleID IS NULL ${fDel.sql}
     `).all(customerId, ...fDel.vals);
     operations.push(...deliveries);
+
+    // Service sales (balance transfers, bill payments, top-ups).
+    // These charge the customer and can be left partly unpaid, so they move
+    // customers.Balance — yet they were missing from the statement entirely,
+    // making it disagree with the actual account balance.
+    const services = db.prepare(`
+      SELECT ss.ServiceSaleID as RefID, ss.ServiceNumber as RefNumber, ss.Date,
+             ss.ChargeAmount as Debit,
+             ss.PaidAmount as Credit,
+             'service_sale' as OpType,
+             COALESCE(ss.ServiceType,'خدمة') as Description,
+             ss.PaymentMethod, ss.PaidAmount, ss.RemainingAmount, ss.Status
+      FROM service_sales ss
+      WHERE ss.CustomerID = ? ${fSrv.sql}
+    `).all(customerId, ...fSrv.vals);
+    operations.push(...services);
 
     // Receipt vouchers (credit - customer pays, reduces balance)
     const receipts = db.prepare(`
@@ -448,9 +480,16 @@ export function registerCustomerStatementHandlers() {
     `).all(supplierId, ...fPur.vals);
     operations.push(...purchases);
 
-    // Purchase returns (debit)
+    // Purchase returns — mirror of the sale-return rule: only the part that
+    // cancelled what we still owed belongs on the supplier account.
     const returns = db.prepare(`
-      SELECT r.ReturnID as RefID, r.ReturnNumber as RefNumber, r.Date, r.TotalAmount as Debit, 0 as Credit,
+      SELECT r.ReturnID as RefID, r.ReturnNumber as RefNumber, r.Date,
+             COALESCE(r.DebtRelief,
+               CASE WHEN COALESCE(p.PaidAmount,0) >= COALESCE(p.TotalAmount,0) THEN 0 ELSE r.TotalAmount END
+             ) as Debit,
+             0 as Credit,
+             r.TotalAmount as ReturnTotal,
+             COALESCE(r.CashRefund, 0) as CashRefund,
              'purchase_return' as OpType, 'مرتجع مشتريات' as Description,
              NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, NULL as Status
       FROM purchase_returns r

@@ -912,6 +912,17 @@ export function runMigrations(db: Database.Database) {
     )
   `);
 
+  // Add IsVoided to sales and PreviousSaleID/VoidedSaleID to maintenance_deliveries
+  // NOTE: these must live OUTSIDE seedData() so they run for existing databases too
+  try { db.exec(`ALTER TABLE sales ADD COLUMN IsVoided INTEGER DEFAULT 0`); } catch {}
+  try { db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN PreviousSaleID INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN VoidedSaleID INTEGER`); } catch {}
+
+  // Warranty/Rework maintenance flow columns
+  try { db.exec(`ALTER TABLE maintenance_tickets ADD COLUMN MaintenanceType TEXT DEFAULT 'normal'`); } catch {}
+  try { db.exec(`ALTER TABLE maintenance_tickets ADD COLUMN ReferenceTicketID INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE sales ADD COLUMN IsWarranty INTEGER DEFAULT 0`); } catch {}
+
   // =============================================
   // SEED DATA
   // =============================================
@@ -1086,28 +1097,6 @@ function seedData(db: Database.Database) {
   for (const [key, name, module] of permissions) {
     insertPerm.run(key, name, module);
   }
-
-  // Add IsVoided to sales and PreviousSaleID to maintenance_deliveries for return flow
-  try {
-    db.exec(`ALTER TABLE sales ADD COLUMN IsVoided INTEGER DEFAULT 0`);
-  } catch {}
-  try {
-    db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN PreviousSaleID INTEGER`);
-  } catch {}
-  try {
-    db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN VoidedSaleID INTEGER`);
-  } catch {}
-
-  // Warranty/Rework maintenance flow
-  try {
-    db.exec(`ALTER TABLE maintenance_tickets ADD COLUMN MaintenanceType TEXT DEFAULT 'normal'`);
-  } catch {}
-  try {
-    db.exec(`ALTER TABLE maintenance_tickets ADD COLUMN ReferenceTicketID INTEGER`);
-  } catch {}
-  try {
-    db.exec(`ALTER TABLE sales ADD COLUMN IsWarranty INTEGER DEFAULT 0`);
-  } catch {}
 
   // Grant all permissions to admin role (RoleID = 1)
   const allPerms = db.prepare('SELECT PermissionID FROM permissions').all() as any[];

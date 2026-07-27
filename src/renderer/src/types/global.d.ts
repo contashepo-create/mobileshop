@@ -8,8 +8,6 @@
  * is compiled into a separate Electron bundle, and the previous
  * `import ... from '../preload/index'` pointed at a path that does not exist,
  * so `window.api` silently fell back to `any`.
- *
- * `invoke` is writable because main.tsx wraps it to intercept auth failures.
  */
 // With the automatic JSX runtime (`jsx: "react-jsx"`) files do not import
 // React, yet many of them annotate handlers with `React.ChangeEvent<...>`.
@@ -25,6 +23,11 @@ declare global {
     api: {
       invoke: (channel: string, ...args: unknown[]) => Promise<any>;
       on: (channel: string, callback: (...args: unknown[]) => void) => void;
+      /**
+       * Registers a callback fired when the main process reports the session
+       * is gone. Declared optional so older preload builds do not break typing.
+       */
+      onSessionExpired?: (handler: () => void) => void;
     };
   }
 }

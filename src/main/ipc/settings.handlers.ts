@@ -1,32 +1,28 @@
-import { BrowserWindow, ipcMain } from 'electron';
+import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import bcrypt from 'bcryptjs';
+import { devLogin, revokeDevToken } from '../security/devAuth';
 
 export function registerSettingsHandlers() {
-  // Fix sidebar config: clear hidden items from localStorage
-  ipcMain.handle('sidebar:repairConfig', async () => {
-    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-    if (!win) return { success: false, error: 'No window' };
-    const result = await win.webContents.executeJavaScript(`
-      (() => {
-        try {
-          const raw = localStorage.getItem('sidebarConfig');
-          if (!raw) return { success: false, error: 'No config found' };
-          const cfg = JSON.parse(raw);
-          const customKeys = Object.keys(cfg.customSections || {});
-          const labelKeys = Object.keys(cfg.customLabels || {});
-          const allCustom = [...customKeys, ...labelKeys];
-          const protectedKeys = ['الإعدادات', '/settings'];
-          cfg.hidden = (cfg.hidden || []).filter(h => !allCustom.includes(h) && !protectedKeys.includes(h));
-          localStorage.setItem('sidebarConfig', JSON.stringify(cfg));
-          return { success: true, data: cfg };
-        } catch (e) {
-          return { success: false, error: e.message };
-        }
-      })();
-    `);
-    return result;
+  // ===== DEVELOPER AUTHENTICATION =====
+  // Verifying developer credentials in the MAIN process (bcrypt + lockout) and
+  // handing back a short-lived token. Previously the renderer compared a
+  // base64-obfuscated password itself and simply set
+  // `sessionStorage.dev_unlocked = 'true'`, which anyone could do from DevTools.
+  ipcMain.handle('dev:login', async (_event, data: { username: string; password: string }) => {
+    return devLogin(data?.username ?? '', data?.password ?? '');
   });
+
+  ipcMain.handle('dev:logout', async (_event, data: { devToken?: string }) => {
+    revokeDevToken(data?.devToken);
+    return { success: true };
+  });
+
+  // NOTE: the previous `sidebar:repairConfig` implementation called
+  // `webContents.executeJavaScript(...)` from the main process to rewrite
+  // localStorage. That is an arbitrary-code-execution pattern with no upside —
+  // the sidebar config lives in the renderer, so the renderer repairs it
+  // locally now (see sidebar.store.ts `repairConfig`). Channel removed.
   // Get all settings
   ipcMain.handle('settings:getAll', async () => {
     const db = getDb();

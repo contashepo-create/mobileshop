@@ -219,21 +219,36 @@ export function registerReportsHandlers() {
   // Profit & Loss report
   ipcMain.handle('reports:profitLoss', async (_event, filters: { fromDate?: string; toDate?: string }) => {
     const db = getDb();
-    const params: any[] = [];
-    let dateFilter = '';
-    if (filters.fromDate) { dateFilter += ' AND Date >= ?'; params.push(filters.fromDate); }
-    if (filters.toDate) { dateFilter += ' AND Date <= ?'; params.push(filters.toDate); }
 
-    // Helper: date filter for JOIN queries (replaces ALL occurrences of 'Date')
-    const joinFilter = dateFilter.replace(/Date/g, 't.Date');
-    const joinFilterSales = dateFilter.replace(/Date/g, 's.Date');
-    const joinFilterReturn = dateFilter.replace(/Date/g, 'r.Date');
-    const joinFilterTicket = dateFilter.replace(/Date/g, 't.Date');
+    // Build an explicit predicate per column instead of string-replacing the
+    // word "Date". The old `dateFilter.replace(/Date/g, 't.Date')` approach also
+    // rewrote unrelated identifiers (e.g. `PaymentDate` -> `Paymentt.Date`) and
+    // produced references to table aliases that did not exist in every query.
+    const from = typeof filters?.fromDate === 'string' && filters.fromDate ? filters.fromDate : null;
+    const to = typeof filters?.toDate === 'string' && filters.toDate ? filters.toDate : null;
+    const df = (col: string) => {
+      let sql = '';
+      const vals: string[] = [];
+      if (from) { sql += ` AND ${col} >= ?`; vals.push(from); }
+      if (to) { sql += ` AND ${col} <= ?`; vals.push(to); }
+      return { sql, vals };
+    };
+    // Back-compat aliases used by the queries below.
+    const fDate = df('Date');
+    const dateFilter = fDate.sql;
+    const params = fDate.vals;
+    const joinFilterSales = df('s.Date').sql;
+    const joinFilterReturn = df('r.Date').sql;
+    const joinFilterTicket = df('t.Date').sql;
 
     // ===== REVENUE (الإيرادات) =====
 
     // 1. Net Sales = Sales - Sale Returns (exclude voided and warranty invoices)
-    const salesGross = db.prepare(`SELECT COALESCE(SUM(TotalAmount),0) as total FROM sales WHERE IsVoided = 0 AND IsWarranty = 0 ${dateFilter}`).get(...params) as any;
+    // IMPORTANT: maintenance deliveries also write a row into `sales` (Source =
+    // 'maintenance') so the customer gets a printable invoice. That same money
+    // is reported below as `maintenanceRevenue`, so those rows MUST be excluded
+    // here or every maintenance job is counted as revenue twice.
+    const salesGross = db.prepare(`SELECT COALESCE(SUM(TotalAmount),0) as total FROM sales WHERE IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance' ${dateFilter}`).get(...params) as any;
     const salesReturns = db.prepare(`
       SELECT COALESCE(SUM(r.TotalAmount),0) as total
       FROM sale_returns r
@@ -249,11 +264,19 @@ export function registerReportsHandlers() {
 
     // 3. Maintenance Returns (refunds given to customers - deduct from revenue)
     const maintenanceReturns = db.prepare(`
-      SELECT COALESCE(SUM(TotalRefund),0) as total FROM maintenance_returns WHERE 1=1 ${joinFilter}
+      SELECT COALESCE(SUM(TotalRefund),0) as total FROM maintenance_returns WHERE 1=1 ${dateFilter}
     `).get(...params) as any;
 
-    // 4. Service Sales Revenue (ChargeAmount is what customer paid)
+    // 4. Service Sales Revenue — NET of the principal that merely passes through.
+    // For a balance transfer of 100 with a 5 fee the customer pays 105 and we
+    // push 100 out of the machine. Only the 5 is our revenue (agent, not
+    // principal). Reporting the full 105 inflated turnover enormously for shops
+    // that move large transfer volumes.
     const serviceRevenue = db.prepare(`
+      SELECT COALESCE(SUM(ChargeAmount - COALESCE(Amount,0)),0) as total FROM service_sales WHERE 1=1 ${dateFilter}
+    `).get(...params) as any;
+    // Kept for display so the UI can still show gross turnover if desired.
+    const serviceGross = db.prepare(`
       SELECT COALESCE(SUM(ChargeAmount),0) as total FROM service_sales WHERE 1=1 ${dateFilter}
     `).get(...params) as any;
 
@@ -279,19 +302,35 @@ export function registerReportsHandlers() {
     // ===== DIRECT COSTS (التكاليف المباشرة) =====
 
     // 1. Cost of Goods Sold (from sale_details - exclude voided and warranty sales)
+    // Maintenance-sourced invoices are excluded here because the cost of the
+    // parts they contain is already captured by `partsCost` below (from
+    // maintenance_parts). Counting both would deduct the same cost twice.
     const cogs = db.prepare(`
       SELECT COALESCE(SUM(COALESCE(sd.UnitCost,0) * sd.Quantity),0) as total
       FROM sale_details sd
       JOIN sales s ON sd.SaleID = s.SaleID
-      WHERE s.IsVoided = 0 AND s.IsWarranty = 0 ${joinFilterSales}
+      WHERE s.IsVoided = 0 AND s.IsWarranty = 0 AND COALESCE(s.Source,'direct') <> 'maintenance' ${joinFilterSales}
     `).get(...params) as any;
 
     // 2. COGS Reversal for Sale Returns (cost of returned items added back to inventory)
+    // Must be driven by sale_return_details — joining sale_details on SaleID
+    // pulled in EVERY line of the original invoice, so a partial return
+    // reversed the cost of the whole invoice.
     const cogsReturns = db.prepare(`
-      SELECT COALESCE(SUM(COALESCE(sd.UnitCost,0) * sd.Quantity),0) as total
-      FROM sale_details sd
-      JOIN sale_returns sr ON sd.SaleID = sr.SaleID
-      WHERE 1=1 ${dateFilter.replace(/Date/g, 'sr.Date')}
+      SELECT COALESCE(SUM(
+               COALESCE(
+                 (SELECT sd.UnitCost
+                    FROM sale_details sd
+                   WHERE sd.SaleID = sr.SaleID
+                     AND sd.ItemID IS srd.ItemID
+                   LIMIT 1),
+                 (SELECT i.CostPrice FROM items i WHERE i.ItemID = srd.ItemID),
+                 0
+               ) * srd.Quantity
+             ),0) as total
+      FROM sale_return_details srd
+      JOIN sale_returns sr ON srd.ReturnID = sr.ReturnID
+      WHERE 1=1 ${df('sr.Date').sql}
     `).get(...params) as any;
 
     // 3. Maintenance Parts Cost (cost of parts from revenue-bearing tickets only — exclude warranty)
@@ -312,9 +351,11 @@ export function registerReportsHandlers() {
       AND t.MaintenanceType IN ('warranty', 'rework')
     `).get(...params) as any;
 
-    // 4. Service Sales Cost (our cost for providing services)
+    // 4. Service Sales Cost — excludes `Amount` (the pass-through principal),
+    // which is now netted out of serviceRevenue above. Only our real costs
+    // (provider fee + transfer commission) remain.
     const serviceCost = db.prepare(`
-      SELECT COALESCE(SUM(COALESCE(ServiceCost,0) + COALESCE(Amount,0) + COALESCE(TransferCost,0)),0) as total
+      SELECT COALESCE(SUM(COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)),0) as total
       FROM service_sales WHERE 1=1 ${dateFilter}
     `).get(...params) as any;
 
@@ -334,17 +375,24 @@ export function registerReportsHandlers() {
     // ===== OPERATING EXPENSES (المصروفات التشغيلية) =====
 
     // 1. General Expenses (voucher payments that are general)
+    // `PartyType = 'rent'` is deliberately EXCLUDED: rent is reported from the
+    // rent_payments table below. Including it in both places charged rent twice.
     const generalExpenses = db.prepare(`
       SELECT COALESCE(SUM(Amount),0) as total FROM vouchers
-      WHERE VoucherType = 'payment' AND (PartyType = 'general' OR PartyType IS NULL OR PartyType = 'rent')
+      WHERE VoucherType = 'payment' AND (PartyType = 'general' OR PartyType IS NULL)
       ${dateFilter}
     `).get(...params) as any;
 
-    // 2. Salaries Expense (GROSS salaries before deductions - the true employment cost)
-    // Using NetSalary (gross pay after deductions but before tax/etc) as the expense base
+    // 2. Salaries Expense — recognised on an ACCRUAL basis (when the salary is
+    // issued), not when it is paid. `PaymentDate` stays NULL until payment, so
+    // filtering on it silently dropped issued-but-unpaid salaries from the
+    // income statement while the balance sheet still counted them, making the
+    // two reports disagree. `Month` is the accrual period ('YYYY-MM').
     const salariesExpense = db.prepare(`
       SELECT COALESCE(SUM(NetSalary),0) as total FROM salaries
-      WHERE 1=1 ${filters.fromDate ? 'AND PaymentDate >= ?' : ''} ${filters.toDate ? 'AND PaymentDate <= ?' : ''}
+      WHERE 1=1
+        ${filters.fromDate ? "AND Month >= substr(?,1,7)" : ''}
+        ${filters.toDate ? "AND Month <= substr(?,1,7)" : ''}
     `).get(...(filters.fromDate ? [filters.fromDate] : []), ...(filters.toDate ? [filters.toDate] : [])) as any;
 
     // 3. Rent Expenses (rent we pay out)
@@ -369,6 +417,7 @@ export function registerReportsHandlers() {
         maintenance: maintenanceRevenue.total,
         maintenanceReturns: maintenanceReturns.total,
         services: serviceRevenue.total,
+        servicesGross: serviceGross.total,
         otherIncome: otherIncome.total,
         rentIncome: rentIncome.total,
         total: totalRevenue,
@@ -378,6 +427,8 @@ export function registerReportsHandlers() {
         cogsReturns: cogsReturns.total,
         parts: partsCost.total,
         serviceCosts: serviceCost.total,
+        // NOTE: warranty parts are an operating EXPENSE (see `expenses` below),
+        // they are intentionally NOT part of `total` here. Exposed for display.
         warrantyParts: warrantyPartsCost.total,
         total: totalDirectCosts,
       },
@@ -448,14 +499,17 @@ export function registerReportsHandlers() {
     const explicitCapital = capitalSetting ? parseFloat(capitalSetting.Value) : 0;
 
     // Net profit - using SAME methodology as P&L (all-time, exclude voided/warranty)
-    const salesRevenue = db.prepare('SELECT COALESCE(SUM(TotalAmount),0) as total FROM sales WHERE IsVoided = 0 AND IsWarranty = 0').get() as any;
+    // Maintenance-sourced sales rows are excluded (counted via maintenance_deliveries),
+    // and service revenue is net of the pass-through principal — mirroring reports:profitLoss.
+    const salesRevenue = db.prepare("SELECT COALESCE(SUM(TotalAmount),0) as total FROM sales WHERE IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance'").get() as any;
     const salesReturns = db.prepare('SELECT COALESCE(SUM(r.TotalAmount),0) as total FROM sale_returns r JOIN sales s ON r.SaleID = s.SaleID WHERE s.IsVoided = 0').get() as any;
     const maintenanceRevenue = db.prepare('SELECT COALESCE(SUM(TotalCost),0) as total FROM maintenance_deliveries WHERE VoidedSaleID IS NULL').get() as any;
     const maintenanceReturns = db.prepare('SELECT COALESCE(SUM(TotalRefund),0) as total FROM maintenance_returns').get() as any;
-    const serviceRevenue = db.prepare('SELECT COALESCE(SUM(ChargeAmount),0) as total FROM service_sales').get() as any;
+    const serviceRevenue = db.prepare('SELECT COALESCE(SUM(ChargeAmount - COALESCE(Amount,0)),0) as total FROM service_sales').get() as any;
     const otherIncome = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='receipt' AND (PartyType='general' OR PartyType IS NULL)").get() as any;
+    const rentIncomeAll = db.prepare("SELECT COALESCE(SUM(rp.Amount),0) as total FROM rent_payments rp JOIN rents r ON rp.RentID=r.RentID WHERE rp.Status='paid' AND r.RentType='income'").get() as any;
 
-    const cogs = db.prepare('SELECT COALESCE(SUM(COALESCE(sd.UnitCost,0) * sd.Quantity),0) as total FROM sale_details sd JOIN sales s ON sd.SaleID = s.SaleID WHERE s.IsVoided = 0 AND s.IsWarranty = 0').get() as any;
+    const cogs = db.prepare("SELECT COALESCE(SUM(COALESCE(sd.UnitCost,0) * sd.Quantity),0) as total FROM sale_details sd JOIN sales s ON sd.SaleID = s.SaleID WHERE s.IsVoided = 0 AND s.IsWarranty = 0 AND COALESCE(s.Source,'direct') <> 'maintenance'").get() as any;
     const partsCost = db.prepare(`
       SELECT COALESCE(SUM(mp.TotalCost),0) as total
       FROM maintenance_parts mp
@@ -468,21 +522,33 @@ export function registerReportsHandlers() {
       JOIN maintenance_tickets t ON mp.TicketID = t.TicketID
       WHERE t.MaintenanceType IN ('warranty', 'rework')
     `).get() as any;
-    const serviceCost = db.prepare("SELECT COALESCE(SUM(COALESCE(ServiceCost,0)+COALESCE(Amount,0)+COALESCE(TransferCost,0)),0) as total FROM service_sales").get() as any;
+    // `Amount` excluded — it is the pass-through principal, already netted out
+    // of serviceRevenue above (agent vs principal).
+    const serviceCost = db.prepare("SELECT COALESCE(SUM(COALESCE(ServiceCost,0)+COALESCE(TransferCost,0)),0) as total FROM service_sales").get() as any;
 
-    const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND (PartyType='general' OR PartyType IS NULL OR PartyType='rent')").get() as any;
+    // PartyType='rent' excluded here — rent comes from rent_payments below.
+    const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND (PartyType='general' OR PartyType IS NULL)").get() as any;
     const salariesExpense = db.prepare('SELECT COALESCE(SUM(NetSalary),0) as total FROM salaries').get() as any;
     const rentExpenses = db.prepare("SELECT COALESCE(SUM(rp.Amount),0) as total FROM rent_payments rp JOIN rents r ON rp.RentID=r.RentID WHERE rp.Status='paid' AND r.RentType='expense'").get() as any;
 
     const netRevenue = salesRevenue.total - salesReturns.total + maintenanceRevenue.total - maintenanceReturns.total
-      + serviceRevenue.total + otherIncome.total;
+      + serviceRevenue.total + otherIncome.total + rentIncomeAll.total;
     const totalCosts = cogs.total + partsCost.total + serviceCost.total;
     const totalExpenses = generalExpenses.total + salariesExpense.total + rentExpenses.total + warrantyPartsCost.total;
     const netProfit = netRevenue - totalCosts - totalExpenses;
 
-    const calculatedCapital = explicitCapital + netProfit;
+    // === BALANCE CHECK ===
+    // Accounting identity: Assets = Liabilities + Equity.
+    // `equity` is what the books say (capital contributed + profit earned);
+    // `difference` is the unexplained gap. It should be 0 — any other value
+    // means balances drifted (e.g. an opening balance edited without a matching
+    // capital entry) and must be investigated rather than silently hidden.
+    const equity = explicitCapital + netProfit;
     const balanceCheck = totalAssets - totalLiabilities;
     const retainedEarnings = balanceCheck - explicitCapital;
+    const difference = +(totalAssets - (totalLiabilities + equity)).toFixed(2);
+    const isBalanced = Math.abs(difference) < 0.01;
+    const calculatedCapital = equity;
 
     return {
       assets: {
@@ -511,6 +577,10 @@ export function registerReportsHandlers() {
         retainedEarnings,
         balanceCheck,
         warrantyPartsCost: warrantyPartsCost.total,
+        // Self-check so the report can surface drift instead of hiding it.
+        equity,
+        difference,
+        isBalanced,
       },
     };
   });
@@ -531,91 +601,138 @@ export function registerReportsHandlers() {
   // ===== OPERATIONS LOG (comprehensive chronological log) =====
   ipcMain.handle('operations:log', async (_event, filters?: { fromDate?: string; toDate?: string; limit?: number }) => {
     const db = getDb();
-    const limit = filters?.limit || 200;
-    const df = (field: string) => {
+    const rawLimit = Number(filters?.limit);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 5000) : 200;
+
+    // SECURITY: dates are bound as parameters, never interpolated. The previous
+    // implementation spliced `filters.fromDate` straight into the SQL string,
+    // which allowed SQL injection through the IPC channel.
+    const from = typeof filters?.fromDate === 'string' && filters.fromDate ? filters.fromDate : null;
+    const to = typeof filters?.toDate === 'string' && filters.toDate ? filters.toDate : null;
+
+    /** Builds a `WHERE`/`AND` date predicate plus the matching bound values. */
+    const df = (field: string, keyword: 'WHERE' | 'AND' = 'WHERE') => {
       const parts: string[] = [];
-      if (filters?.fromDate) parts.push(`${field} >= '${filters.fromDate}'`);
-      if (filters?.toDate) parts.push(`${field} <= '${filters.toDate}'`);
-      return parts.length > 0 ? `WHERE ${parts.join(' AND ')}` : '';
+      const vals: string[] = [];
+      if (from) { parts.push(`${field} >= ?`); vals.push(from); }
+      if (to) { parts.push(`${field} <= ?`); vals.push(to); }
+      return { sql: parts.length ? `${keyword} ${parts.join(' AND ')}` : '', vals };
     };
 
     const ops: any[] = [];
+    const run = (sql: string, vals: string[]) => ops.push(...db.prepare(sql).all(...vals));
 
-    // Sales
-    ops.push(...db.prepare(`
-      SELECT Date, SaleNumber as RefNum, CustomerName as Party, TotalAmount as Amount,
-        'فاتورة بيع' as OpType, 'sale' as OpKey, SaleID as RefID
-      FROM sales WHERE IsVoided = 0 ${df('Date')}
-    `).all());
+    // Sales (exclude maintenance-generated invoices — the delivery itself is logged)
+    {
+      const f = df('Date', 'AND');
+      run(`
+        SELECT Date, SaleNumber as RefNum, CustomerName as Party, TotalAmount as Amount,
+          'فاتورة بيع' as OpType, 'sale' as OpKey, SaleID as RefID
+        FROM sales WHERE IsVoided = 0 AND COALESCE(Source,'direct') <> 'maintenance' ${f.sql}
+      `, f.vals);
+    }
 
-    // Sale returns
-    ops.push(...db.prepare(`
-      SELECT r.Date, r.ReturnNumber as RefNum, c.Name as Party, r.TotalAmount as Amount,
-        'مرتجع مبيعات' as OpType, 'sale_return' as OpKey, r.ReturnID as RefID
-      FROM sale_returns r LEFT JOIN customers c ON r.SaleID = c.CustomerID ${df('r.Date')}
-    `).all());
+    // Sale returns — join through `sales` to reach the customer.
+    // The old query joined `customers c ON r.SaleID = c.CustomerID`, matching an
+    // invoice id against a customer id and showing the wrong customer name.
+    {
+      const f = df('r.Date');
+      run(`
+        SELECT r.Date, r.ReturnNumber as RefNum, c.Name as Party, r.TotalAmount as Amount,
+          'مرتجع مبيعات' as OpType, 'sale_return' as OpKey, r.ReturnID as RefID
+        FROM sale_returns r
+        JOIN sales s ON r.SaleID = s.SaleID
+        LEFT JOIN customers c ON s.CustomerID = c.CustomerID
+        ${f.sql}
+      `, f.vals);
+    }
 
     // Purchases
-    ops.push(...db.prepare(`
-      SELECT Date, PurchaseNumber as RefNum, s.Name as Party, TotalAmount as Amount,
-        'فاتورة شراء' as OpType, 'purchase' as OpKey, PurchaseID as RefID
-      FROM purchases p JOIN suppliers s ON p.SupplierID = s.SupplierID ${df('Date')}
-    `).all());
+    {
+      const f = df('p.Date');
+      run(`
+        SELECT p.Date, p.PurchaseNumber as RefNum, s.Name as Party, p.TotalAmount as Amount,
+          'فاتورة شراء' as OpType, 'purchase' as OpKey, p.PurchaseID as RefID
+        FROM purchases p JOIN suppliers s ON p.SupplierID = s.SupplierID ${f.sql}
+      `, f.vals);
+    }
 
     // Purchase returns
-    ops.push(...db.prepare(`
-      SELECT r.Date, r.ReturnNumber as RefNum, s.Name as Party, r.TotalAmount as Amount,
-        'مرتجع مشتريات' as OpType, 'purchase_return' as OpKey, r.ReturnID as RefID
-      FROM purchase_returns r JOIN purchases p ON r.PurchaseID = p.PurchaseID
-      JOIN suppliers s ON p.SupplierID = s.SupplierID ${df('r.Date')}
-    `).all());
+    {
+      const f = df('r.Date');
+      run(`
+        SELECT r.Date, r.ReturnNumber as RefNum, s.Name as Party, r.TotalAmount as Amount,
+          'مرتجع مشتريات' as OpType, 'purchase_return' as OpKey, r.ReturnID as RefID
+        FROM purchase_returns r JOIN purchases p ON r.PurchaseID = p.PurchaseID
+        JOIN suppliers s ON p.SupplierID = s.SupplierID ${f.sql}
+      `, f.vals);
+    }
 
     // Maintenance tickets received
-    ops.push(...db.prepare(`
-      SELECT Date, TicketNumber as RefNum, CustomerName as Party, 0 as Amount,
-        'استقبال صيانة' as OpType, 'maintenance_receive' as OpKey, TicketID as RefID
-      FROM maintenance_tickets ${df('Date')}
-    `).all());
+    {
+      const f = df('Date');
+      run(`
+        SELECT Date, TicketNumber as RefNum, CustomerName as Party, 0 as Amount,
+          'استقبال صيانة' as OpType, 'maintenance_receive' as OpKey, TicketID as RefID
+        FROM maintenance_tickets ${f.sql}
+      `, f.vals);
+    }
 
     // Maintenance deliveries
-    ops.push(...db.prepare(`
-      SELECT Date, DeliveryNumber as RefNum, CustomerName as Party, TotalCost as Amount,
-        'تسليم صيانة' as OpType, 'maintenance_delivery' as OpKey, DeliveryID as RefID
-      FROM maintenance_deliveries ${df('Date')}
-    `).all());
+    {
+      const f = df('Date');
+      run(`
+        SELECT Date, DeliveryNumber as RefNum, CustomerName as Party, TotalCost as Amount,
+          'تسليم صيانة' as OpType, 'maintenance_delivery' as OpKey, DeliveryID as RefID
+        FROM maintenance_deliveries ${f.sql}
+      `, f.vals);
+    }
 
     // Maintenance returns
-    ops.push(...db.prepare(`
-      SELECT Date, ReturnNumber as RefNum, d.CustomerName as Party, TotalRefund as Amount,
-        'مرتجع صيانة' as OpType, 'maintenance_return' as OpKey, ReturnID as RefID
-      FROM maintenance_returns r JOIN maintenance_deliveries d ON r.DeliveryID = d.DeliveryID ${df('r.Date')}
-    `).all());
+    {
+      const f = df('r.Date');
+      run(`
+        SELECT r.Date, r.ReturnNumber as RefNum, d.CustomerName as Party, r.TotalRefund as Amount,
+          'مرتجع صيانة' as OpType, 'maintenance_return' as OpKey, r.ReturnID as RefID
+        FROM maintenance_returns r JOIN maintenance_deliveries d ON r.DeliveryID = d.DeliveryID ${f.sql}
+      `, f.vals);
+    }
 
     // Vouchers
-    ops.push(...db.prepare(`
-      SELECT Date, VoucherNumber as RefNum, PartyName as Party, Amount as Amount,
-        CASE WHEN VoucherType='receipt' THEN 'سند قبض' ELSE 'سند صرف' END as OpType,
-        VoucherType as OpKey, VoucherID as RefID
-      FROM vouchers ${df('Date')}
-    `).all());
+    {
+      const f = df('Date');
+      run(`
+        SELECT Date, VoucherNumber as RefNum, PartyName as Party, Amount as Amount,
+          CASE WHEN VoucherType='receipt' THEN 'سند قبض' ELSE 'سند صرف' END as OpType,
+          VoucherType as OpKey, VoucherID as RefID
+        FROM vouchers ${f.sql}
+      `, f.vals);
+    }
 
     // Service sales
-    ops.push(...db.prepare(`
-      SELECT Date, ServiceNumber as RefNum, CustomerName as Party, ChargeAmount as Amount,
-        'خدمة' as OpType, 'service_sale' as OpKey, ServiceSaleID as RefID
-      FROM service_sales ${df('Date')}
-    `).all());
+    {
+      const f = df('Date');
+      run(`
+        SELECT Date, ServiceNumber as RefNum, CustomerName as Party, ChargeAmount as Amount,
+          'خدمة' as OpType, 'service_sale' as OpKey, ServiceSaleID as RefID
+        FROM service_sales ${f.sql}
+      `, f.vals);
+    }
 
     // Salaries
-    ops.push(...db.prepare(`
-      SELECT PaymentDate as Date, 'SAL-' || SalaryID as RefNum, e.Name as Party, PaidAmount as Amount,
-        'راتب' as OpType, 'salary' as OpKey, SalaryID as RefID
-      FROM salaries s JOIN employees e ON s.EmployeeID = e.EmployeeID
-      WHERE PaidAmount > 0 ${df('PaymentDate')?.replace('WHERE', 'AND') || ''}
-    `).all());
+    {
+      const f = df('s.PaymentDate', 'AND');
+      run(`
+        SELECT s.PaymentDate as Date, 'SAL-' || s.SalaryID as RefNum, e.Name as Party, s.PaidAmount as Amount,
+          'راتب' as OpType, 'salary' as OpKey, s.SalaryID as RefID
+        FROM salaries s JOIN employees e ON s.EmployeeID = e.EmployeeID
+        WHERE s.PaidAmount > 0 ${f.sql}
+      `, f.vals);
+    }
 
     // Sort by date descending, limit
-    ops.sort((a, b) => b.Date.localeCompare(a.Date));
+    // Guard against NULL dates (e.g. an unpaid salary) which would throw on .localeCompare
+    ops.sort((a, b) => String(b.Date ?? '').localeCompare(String(a.Date ?? '')));
     return ops.slice(0, limit);
   });
 }

@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { currentUserId } from '../../stores/auth.store';
 
 const serviceTypes = [
   { value: 'balance_transfer', label: 'تحويل رصيد' },
@@ -95,7 +96,7 @@ export function ServicesPage() {
         PaymentMethodID: form.PaymentMethodID ? parseInt(form.PaymentMethodID) : undefined,
         TransferCost: transferCost,
         Notes: form.Notes,
-        userId: 1,
+        userId: currentUserId(),
         fiscalYearId: activeFy.FiscalYearID,
       });
 

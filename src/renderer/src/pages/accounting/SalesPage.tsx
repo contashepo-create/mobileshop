@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { currentUserId } from '../../stores/auth.store';
 
 interface CartItem {
   ItemID?: number; ItemName: string; SerialID?: number; IMEI?: string;
@@ -205,7 +206,7 @@ export function SalesPage() {
         CashAccountID: cashAccountId ? parseInt(cashAccountId) : undefined,
         PaymentMethodID: paymentMethodId ? parseInt(paymentMethodId) : undefined,
         Notes: notes,
-        userId: 1,
+        userId: currentUserId(),
         fiscalYearId: activeFy.FiscalYearID,
       });
 
@@ -550,14 +551,22 @@ export function SalesPage() {
               {/* مصدر الاستلام - يظهر فقط إذا دفع مبلغ */}
               {parseFloat(paidAmount) > 0 && (
                 <>
-                  <Select label="مصدر استلام المبلغ" value={cashAccountId} onChange={(e) => setCashAccountId(e.target.value)}>
+                  {/* The money lands in ONE account. Choosing a machine/wallet
+                      clears the safe selection (and vice-versa) so the invoice
+                      can never credit two accounts for a single payment. */}
+                  <Select label="مصدر استلام المبلغ" value={cashAccountId}
+                    onChange={(e) => { setCashAccountId(e.target.value); if (e.target.value) { setPaymentMethodId(''); setPaymentMethod('cash'); } }}>
                     <option value="">— اختر الخزنة/البنك —</option>
                     {cashAccounts.map((ca: any) => <option key={ca.CashAccountID} value={ca.CashAccountID}>{ca.AccountName} ({ca.Balance?.toFixed(2)})</option>)}
                   </Select>
-                  <Select label="أو ماكينة/محفظة دفع" value={paymentMethodId} onChange={(e) => { setPaymentMethodId(e.target.value); if (e.target.value) setPaymentMethod('wallet'); }}>
+                  <Select label="أو ماكينة/محفظة دفع" value={paymentMethodId}
+                    onChange={(e) => { setPaymentMethodId(e.target.value); if (e.target.value) { setCashAccountId(''); setPaymentMethod('wallet'); } }}>
                     <option value="">— بدون —</option>
                     {paymentMethods.map((pm: any) => <option key={pm.PaymentMethodID} value={pm.PaymentMethodID}>{pm.MethodName} ({pm.Balance?.toFixed(2)})</option>)}
                   </Select>
+                  <div className="text-xs text-slate-500 dark:text-slate-400">
+                    يتم استلام المبلغ في حساب واحد فقط — اختيار الماكينة يلغي اختيار الخزنة.
+                  </div>
                   {(paymentMethod === 'transfer' || paymentMethod === 'wallet' || paymentMethod === 'card') && (
                     <Input label="تكلفة التحويل/العمولة" type="number" value={transferCost} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTransferCost(e.target.value)} hint="عمولة الماكينة أو المحفظة" />
                   )}

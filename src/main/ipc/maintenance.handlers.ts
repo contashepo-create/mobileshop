@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { nextDocNumber } from '../database/docNumber';
 
 const statusLabels: Record<string, string> = {
   received: 'مستلم', inspecting: 'فحص', in_progress: 'قيد العمل',
@@ -99,10 +100,14 @@ export function registerMaintenanceHandlers() {
   }) => {
     const db = getDb();
     const dateStr = new Date().toISOString().split('T')[0];
-    const numResult = db.prepare("SELECT COUNT(*) as count FROM maintenance_tickets WHERE Date = ?").get(dateStr) as any;
-    const ticketNumber = `MNT-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+    const ticketNumber = nextDocNumber(db, 'maintenance_tickets', 'TicketNumber', 'MNT', dateStr);
     const maintenanceType = data.MaintenanceType || 'normal';
 
+    // Single transaction: customer creation, ticket and status log must all
+    // succeed or all roll back. Previously these were three independent writes,
+    // so a mid-way failure could leave an orphan customer or a ticket with no
+    // status history.
+    const tx = db.transaction(() => {
     // Auto-register customer if not selected but name is provided
     let customerId = data.CustomerID ?? null;
     if (!customerId && data.CustomerName?.trim()) {
@@ -140,7 +145,11 @@ export function registerMaintenanceHandlers() {
       VALUES (?, 'received', ?, ?)
     `).run(ticketId, receiveNote, data.userId);
 
-    return { success: true, ticketId, ticketNumber };
+      return ticketId;
+    });
+
+    const ticketId2 = tx();
+    return { success: true, ticketId: ticketId2, ticketNumber };
   });
 
   // Update ticket status - REQUIRES notes
@@ -379,12 +388,10 @@ export function registerMaintenanceHandlers() {
     const totalProfit = isWarranty ? (0 - totalCostOnUs) : (totalCost - totalCostOnUs);
 
     const dateStr = new Date().toISOString().split('T')[0];
-    const numResult = db.prepare("SELECT COUNT(*) as count FROM maintenance_deliveries WHERE Date = ?").get(dateStr) as any;
-    const deliveryNumber = `DLV-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+    const deliveryNumber = nextDocNumber(db, 'maintenance_deliveries', 'DeliveryNumber', 'DLV', dateStr);
 
     // Sale number
-    const saleNumResult = db.prepare("SELECT COUNT(*) as count FROM sales WHERE Date = ?").get(dateStr) as any;
-    const saleNumber = `INV-${dateStr.replace(/-/g, '')}-${(saleNumResult.count + 1).toString().padStart(4, '0')}`;
+    const saleNumber = nextDocNumber(db, 'sales', 'SaleNumber', 'INV', dateStr);
 
     const tx = db.transaction(() => {
       // 1. Create delivery record — use ticket.CustomerID as fallback
@@ -399,7 +406,8 @@ export function registerMaintenanceHandlers() {
       `).run(
         deliveryNumber, data.TicketID, dateStr, effectiveCustomerId, effectiveCustomerName,
         partsCost, isWarranty ? 0 : data.LaborCost, isWarranty ? 0 : additionalTotal, totalCost, paidAmount, remaining,
-        isWarranty ? 'warranty' : data.PaymentMethod, data.CashAccountID ?? null, data.PaymentMethodID ?? null, data.userId,
+        isWarranty ? 'warranty' : data.PaymentMethod,
+        data.PaymentMethodID ? null : (data.CashAccountID ?? null), data.PaymentMethodID ?? null, data.userId,
         serviceCostTotal, totalCostOnUs, totalProfit
       );
 
@@ -429,7 +437,12 @@ export function registerMaintenanceHandlers() {
 
       const saleId = saleResult.lastInsertRowid;
 
-      // Add sale detail items
+      // Add sale detail items.
+      // These rows are for PRINTING the customer invoice only — the parts were
+      // already deducted from stock by maintenance:issuePart, and are restored
+      // from `maintenance_parts` by cancel/return. They intentionally carry a
+      // NULL WarehouseID so the generic sale-reversal logic skips them and does
+      // not credit the same parts to stock a second time.
       const parts = db.prepare('SELECT mp.*, i.ItemName FROM maintenance_parts mp JOIN items i ON mp.ItemID = i.ItemID WHERE mp.TicketID = ?').all(data.TicketID) as any[];
       for (const p of parts) {
         const unitPrice = isWarranty ? 0 : (p.SalePrice || p.UnitCost);
@@ -499,12 +512,14 @@ export function registerMaintenanceHandlers() {
       }
 
       // 6. Cash account (skip for warranty — no payment)
+      // The money lands in exactly ONE account. These used to be two separate
+      // `if`s, so choosing both a cash account and a machine credited the paid
+      // amount twice and invented cash.
       if (!isWarranty && paidAmount > 0) {
-        if (data.CashAccountID) {
-          db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(paidAmount, data.CashAccountID);
-        }
         if (data.PaymentMethodID) {
           db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(paidAmount, data.PaymentMethodID);
+        } else if (data.CashAccountID) {
+          db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(paidAmount, data.CashAccountID);
         }
       }
 
@@ -589,8 +604,7 @@ export function registerMaintenanceHandlers() {
     const db = getDb();
     if (!data.Reason.trim()) return { success: false, message: 'سبب المرتجع مطلوب' };
     const dateStr = new Date().toISOString().split('T')[0];
-    const numResult = db.prepare("SELECT COUNT(*) as count FROM maintenance_returns WHERE Date = ?").get(dateStr) as any;
-    const returnNumber = `MRT-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+    const returnNumber = nextDocNumber(db, 'maintenance_returns', 'ReturnNumber', 'MRT', dateStr);
 
     // Check sufficient cash for refund (unless negative cash allowed)
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;

@@ -10,7 +10,8 @@
     "package": "electron-forge package",
     "make": "electron-forge make",
     "lint": "eslint src --ext .ts,.tsx",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify": "python3 scripts/verify_accounting.py && python3 scripts/verify_security.py && python3 scripts/verify_ipc_coverage.py"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.4.0",
@@ -36,7 +37,6 @@
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.1.2",
-    "knex": "^3.1.0",
     "lucide-react": "^0.408.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

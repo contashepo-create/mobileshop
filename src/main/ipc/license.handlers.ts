@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { verifyDevToken } from '../security/devAuth';
 
 // ===== LICENSE SYSTEM =====
 // Encrypted license management - cannot be tampered with
@@ -323,10 +324,13 @@ export function registerLicenseHandlers() {
     days: number; // 0 = unlimited
     type?: string; // 'trial' | 'full'
     customerDeviceId: string; // required: bind code to customer's device
-    devPassword: string;
+    devToken: string;
   }) => {
-    if (data.devPassword !== '014253') {
-      return { success: false, message: 'الرقم السري للمطور غير صحيح' };
+    // SECURITY: verified against a short-lived token issued by `dev:login`
+    // (main-process bcrypt check + rate limiting) instead of comparing a
+    // plaintext password that shipped inside the packaged app.
+    if (!verifyDevToken(data.devToken)) {
+      return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
     }
 
     if (!data.customerDeviceId || data.customerDeviceId.trim().length < 8) {
@@ -367,9 +371,12 @@ export function registerLicenseHandlers() {
   });
 
   // List all generated codes (dev only)
-  ipcMain.handle('license:listCodes', async (_event, data: { devPassword: string }) => {
-    if (data.devPassword !== '014253') {
-      return { success: false, message: 'الرقم السري للمطور غير صحيح' };
+  ipcMain.handle('license:listCodes', async (_event, data: { devToken: string }) => {
+    // SECURITY: verified against a short-lived token issued by `dev:login`
+    // (main-process bcrypt check + rate limiting) instead of comparing a
+    // plaintext password that shipped inside the packaged app.
+    if (!verifyDevToken(data.devToken)) {
+      return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
     }
 
     const codesPath = path.join(app.getPath('userData'), 'activation_codes.dat');
@@ -384,10 +391,13 @@ export function registerLicenseHandlers() {
   // Revoke code (dev only)
   ipcMain.handle('license:revokeCode', async (_event, data: {
     code: string;
-    devPassword: string;
+    devToken: string;
   }) => {
-    if (data.devPassword !== '014253') {
-      return { success: false, message: 'الرقم السري للمطور غير صحيح' };
+    // SECURITY: verified against a short-lived token issued by `dev:login`
+    // (main-process bcrypt check + rate limiting) instead of comparing a
+    // plaintext password that shipped inside the packaged app.
+    if (!verifyDevToken(data.devToken)) {
+      return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
     }
 
     const codesPath = path.join(app.getPath('userData'), 'activation_codes.dat');
@@ -405,9 +415,12 @@ export function registerLicenseHandlers() {
   });
 
   // Deactivate license (dev only - for transferring to new device)
-  ipcMain.handle('license:deactivate', async (_event, data: { devPassword: string }) => {
-    if (data.devPassword !== '014253') {
-      return { success: false, message: 'الرقم السري للمطور غير صحيح' };
+  ipcMain.handle('license:deactivate', async (_event, data: { devToken: string }) => {
+    // SECURITY: verified against a short-lived token issued by `dev:login`
+    // (main-process bcrypt check + rate limiting) instead of comparing a
+    // plaintext password that shipped inside the packaged app.
+    if (!verifyDevToken(data.devToken)) {
+      return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
     }
 
     const licensePath = path.join(app.getPath('userData'), LICENSE_FILE);

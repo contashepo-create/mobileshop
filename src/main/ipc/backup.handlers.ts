@@ -1,5 +1,5 @@
 import { ipcMain, dialog, app } from 'electron';
-import { getDb, closeDb } from '../database/connection';
+import { getDb, closeDb, getDbPath } from '../database/connection';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -20,8 +20,10 @@ export function registerBackupHandlers() {
     }
 
     try {
-      // Copy the database file directly
-      fs.copyFileSync(dbPath, result.filePath);
+      // Use SQLite's own backup API. The database runs in WAL mode, so a plain
+      // file copy can miss everything still sitting in the -wal file and
+      // produce a silently truncated/corrupt backup.
+      await db.backup(result.filePath);
       return { success: true, path: result.filePath };
     } catch (err: any) {
       return { success: false, message: err.message };
@@ -41,13 +43,35 @@ export function registerBackupHandlers() {
     }
 
     const backupPath = result.filePaths[0];
-    const dbPath = path.join(app.getPath('userData'), 'mobile_shop.db');
+    // Restore over the ACTIVE database, which may be a custom/network path.
+    // Hardcoding userData/mobile_shop.db meant the restore appeared to succeed
+    // while the app kept reading the old database.
+    const dbPath = getDbPath();
 
     try {
+      // Sanity-check the chosen file really is a SQLite database.
+      const header = Buffer.alloc(16);
+      const fd = fs.openSync(backupPath, 'r');
+      fs.readSync(fd, header, 0, 16, 0);
+      fs.closeSync(fd);
+      if (header.toString('utf-8', 0, 15) !== 'SQLite format 3') {
+        return { success: false, message: 'الملف المختار ليس قاعدة بيانات صالحة' };
+      }
+
       closeDb();
 
-      // Copy backup file over current DB
+      // Keep a rollback copy of the current database before overwriting it.
+      if (fs.existsSync(dbPath)) {
+        try { fs.copyFileSync(dbPath, `${dbPath}.before-restore`); } catch { /* best effort */ }
+      }
+
       fs.copyFileSync(backupPath, dbPath);
+      // Stale WAL/SHM belonging to the replaced database must go, otherwise
+      // SQLite may replay them on top of the restored file.
+      for (const suffix of ['-wal', '-shm']) {
+        const p = `${dbPath}${suffix}`;
+        if (fs.existsSync(p)) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+      }
 
       return { success: true, message: 'تمت الاستعادة - يرجى إعادة تشغيل التطبيق' };
     } catch (err: any) {

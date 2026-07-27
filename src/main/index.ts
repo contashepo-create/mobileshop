@@ -19,7 +19,7 @@ import { registerFiscalYearHandlers } from './ipc/fiscalYear.handlers';
 import { registerReportsHandlers } from './ipc/reports.handlers';
 import { registerBackupHandlers } from './ipc/backup.handlers';
 import { registerOpeningBalanceHandlers } from './ipc/openingBalance.handlers';
-import { registerCustomerStatementHandlers } from './ipc/statement.handlers';
+import { registerStatementHandlers, registerCustomerStatementHandlers } from './ipc/statement.handlers';
 import { registerDatabaseHandlers } from './ipc/database.handlers';
 import { registerSettlementHandlers } from './ipc/settlement.handlers';
 import { registerPrintHandlers } from './ipc/print.handlers';
@@ -29,6 +29,7 @@ import { registerSmartNotificationsHandlers } from './ipc/notifications.handlers
 import { registerTransfersHandlers } from './ipc/transfers.handlers';
 import { registerDeleteHandlers } from './ipc/delete.handlers';
 import { runMigrations } from './database/migrations';
+import { installIpcGuard } from './security/ipcGuard';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -88,6 +89,12 @@ app.whenReady().then(() => {
     runMigrations(db);
     console.log('[Main] Database ready');
 
+    // Must run BEFORE any handler is registered: it patches ipcMain.handle so
+    // every channel is authentication/permission checked and the caller's real
+    // user id is stamped onto payloads.
+    installIpcGuard();
+    console.log('[Main] IPC guard installed');
+
     console.log('[Main] Registering IPC handlers...');
     registerAuthHandlers();
     registerNotesHandlers();
@@ -106,6 +113,7 @@ app.whenReady().then(() => {
     registerReportsHandlers();
     registerBackupHandlers();
     registerOpeningBalanceHandlers();
+    registerStatementHandlers();
     registerCustomerStatementHandlers();
     registerDatabaseHandlers();
   registerSettlementHandlers();
@@ -122,9 +130,9 @@ app.whenReady().then(() => {
 
     // === AUTO BACKUP SYSTEM ===
     // 1. Daily backup on startup
-    autoBackup();
+    void autoBackup();
     // 2. Periodic backup every hour
-    setInterval(() => autoBackup(), 60 * 60 * 1000);
+    setInterval(() => { void autoBackup(); }, 60 * 60 * 1000);
     console.log('[Main] Auto-backup scheduled (every 1 hour)');
   } catch (err) {
     console.error('[Main] STARTUP ERROR:', err);
@@ -146,16 +154,22 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', () => {
-  // Final backup before closing
-  autoBackup();
+  // Do NOT start an async backup here — the process may exit before it
+  // finishes and leave a half-written file. Checkpoint the WAL into the main
+  // database instead, so the on-disk file is complete for the next startup
+  // backup (and for any external copy of the .db).
+  try {
+    getDb().pragma('wal_checkpoint(TRUNCATE)');
+  } catch (err) {
+    console.error('[Main] WAL checkpoint failed:', err);
+  }
   closeDb();
 });
 
 // Auto backup function - saves to userData/backups
-function autoBackup() {
+async function autoBackup() {
   try {
     const db = getDb();
-    const dbPath = db.name;
     const backupDir = path.join(app.getPath('userData'), 'backups');
     if (!fs.existsSync(backupDir)) {
       fs.mkdirSync(backupDir, { recursive: true });
@@ -164,19 +178,27 @@ function autoBackup() {
     const backupPath = path.join(backupDir, `auto_backup_${today}.db`);
     // Only create if today's backup doesn't exist
     if (!fs.existsSync(backupPath)) {
-      fs.copyFileSync(dbPath, backupPath);
+      // SQLite backup API — the DB is in WAL mode, so copyFileSync can capture
+      // a partial state that is missing everything still in the -wal file.
+      await db.backup(backupPath);
       console.log(`[Main] Auto-backup created: ${backupPath}`);
     }
-    // Clean old backups (keep last 7 days)
-    const files = fs.readdirSync(backupDir);
+
+    // Clean old backups (keep last 7 days).
+    // Only files this function created are eligible — the previous version
+    // deleted EVERY entry older than 7 days in the folder, including unrelated
+    // files a user may have stored there, and threw on sub-directories.
     const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    for (const file of files) {
+    for (const file of fs.readdirSync(backupDir)) {
+      if (!/^auto_backup_\d{4}-\d{2}-\d{2}\.db$/.test(file)) continue;
       const filePath = path.join(backupDir, file);
-      const stats = fs.statSync(filePath);
-      if (stats.mtimeMs < cutoff) {
-        fs.unlinkSync(filePath);
-        console.log(`[Main] Old backup removed: ${file}`);
-      }
+      try {
+        const stats = fs.statSync(filePath);
+        if (stats.isFile() && stats.mtimeMs < cutoff) {
+          fs.unlinkSync(filePath);
+          console.log(`[Main] Old backup removed: ${file}`);
+        }
+      } catch { /* skip unreadable entries */ }
     }
   } catch (err) {
     console.error('[Main] Auto-backup failed:', err);

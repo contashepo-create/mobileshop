@@ -5,6 +5,7 @@ import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { Modal } from '../../components/ui/Modal';
 import { useToastStore } from '../../components/ui/Toast';
+import { currentUserId } from '../../stores/auth.store';
 
 export function SettlementPage() {
   const { showToast } = useToastStore();
@@ -86,7 +87,7 @@ export function SettlementPage() {
     const result = await window.api.invoke('settlements:apply', {
       section,
       items,
-      userId: 1,
+      userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
 

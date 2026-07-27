@@ -33,22 +33,24 @@ export function registerSmartNotificationsHandlers() {
   // Get dismissed keys
   ipcMain.handle('notifications:dismissed', async () => {
     const db = getDb();
+    // SnoozedUntil is written as a full ISO-8601 UTC string (see
+    // notifications:snooze), so compare it as UTC in SQL. The previous version
+    // compared against localtime `datetime('now')` and then re-filtered in JS
+    // by appending a second 'Z' to an already-UTC string, which produced an
+    // Invalid Date and silently dropped snoozes.
     const rows = db.prepare(`
       SELECT NotifKey, SnoozedUntil FROM dismissed_notifications
-      WHERE SnoozedUntil IS NULL OR SnoozedUntil > datetime('now')
+      WHERE SnoozedUntil IS NULL OR SnoozedUntil > strftime('%Y-%m-%dT%H:%M:%fZ','now')
     `).all() as any[];
     const dismissed = new Set<string>();
-    for (const r of rows) {
-      if (!r.SnoozedUntil) dismissed.add(r.NotifKey);
-      else if (new Date(r.SnoozedUntil + 'Z') > new Date()) dismissed.add(r.NotifKey);
-    }
+    for (const r of rows) dismissed.add(r.NotifKey);
     return { dismissed: Array.from(dismissed) };
   });
 
   // Clear expired snoozes
   ipcMain.handle('notifications:clearExpired', async () => {
     const db = getDb();
-    db.prepare("DELETE FROM dismissed_notifications WHERE SnoozedUntil IS NOT NULL AND SnoozedUntil <= datetime('now')").run();
+    db.prepare("DELETE FROM dismissed_notifications WHERE SnoozedUntil IS NOT NULL AND SnoozedUntil <= strftime('%Y-%m-%dT%H:%M:%fZ','now')").run();
     return { success: true };
   });
 

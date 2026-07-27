@@ -1,8 +1,0 @@
-
-[Main] Initializing database...
-[DB] Connected to: C:\Users\accmo\AppData\Roaming\mobile-shop-erp\mobile_shop.db
-[Main] Database ready
-[Main] Registering IPC handlers...
-[Main] All handlers registered
-[Main] Window created
-[Main] Auto-backup scheduled (every 1 hour)

@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { nextDocNumber } from '../database/docNumber';
 
 export function registerTransfersHandlers() {
   // Transfer between cash accounts / payment methods
@@ -26,8 +27,7 @@ export function registerTransfersHandlers() {
       }
 
       const dateStr = new Date().toISOString().split('T')[0];
-      const numResult = db.prepare("SELECT COUNT(*) as count FROM asset_transfers WHERE Date = ?").get(dateStr) as any;
-      const transferNumber = `TRF-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+      const transferNumber = nextDocNumber(db, 'asset_transfers', 'TransferNumber', 'TRF', dateStr);
 
       // Amount received at destination (if cost from amount)
       const receivedAmount = data.TransferCostSource === 'from_amount' ? data.Amount - data.TransferCost : data.Amount;
@@ -85,7 +85,7 @@ export function registerTransfersHandlers() {
               PartyType, PartyName, Description, CashAccountID, UserID)
             VALUES (?, 'payment', ?, ?, ?, 'general', 'تكلفة تحويل', 'عمولة تحويل بين الحسابات', ?, ?)
           `).run(
-            `TRC-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`,
+            nextDocNumber(db, 'vouchers', 'VoucherNumber', 'TRC', dateStr),
             data.fiscalYearId, dateStr, data.TransferCost,
             data.FromID, data.userId
           );

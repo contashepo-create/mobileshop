@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { nextDocNumber } from '../database/docNumber';
 
 export function registerInventoryHandlers() {
   // ===== WAREHOUSES =====
@@ -333,8 +334,7 @@ export function registerInventoryHandlers() {
   }) => {
     const db = getDb();
     const dateStr = new Date().toISOString().split('T')[0];
-    const numResult = db.prepare("SELECT COUNT(*) as count FROM warehouse_transfers WHERE Date = ?").get(dateStr) as any;
-    const transferNumber = `TR-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+    const transferNumber = nextDocNumber(db, 'warehouse_transfers', 'TransferNumber', 'TR', dateStr);
 
     // Check sufficient stock before transfer (unless negative stock allowed)
     const allowNeg = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_stock'").get() as any;

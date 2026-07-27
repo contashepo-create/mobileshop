@@ -1,5 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { nextDocNumber } from '../database/docNumber';
+import { resolveSourceWarehouse, deductStock, restoreStock, totalStock } from '../database/stock';
 
 export function registerSalesHandlers() {
   // ===== SALES =====
@@ -39,13 +41,20 @@ export function registerSalesHandlers() {
 
   ipcMain.handle('sales:create', async (_event, data: {
     CustomerID?: number; CustomerName?: string; CustomerPhone?: string;
-    items: { ItemID: number; SerialID?: number; IMEI?: string; Quantity: number; UnitPrice: number; UnitCost?: number; IsWarranty?: number; WarrantyMonths?: number; isService?: boolean; ServiceName?: string }[];
+    items: { ItemID: number; SerialID?: number; IMEI?: string; Quantity: number; UnitPrice: number; UnitCost?: number; IsWarranty?: number; WarrantyMonths?: number; isService?: boolean; ServiceName?: string; WarehouseID?: number }[];
     Discount: number; TaxRate: number; TaxAmount: number;
     PaymentMethod: string; PaidAmount: number; TransferCost?: number;
     CashAccountID?: number; PaymentMethodID?: number;
     Notes?: string; userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
+
+    // Normalise the payment target: money can only land in ONE account.
+    // A payment method (machine/wallet) wins over a cash account when both are
+    // supplied, and the sale row stores only the one that was actually credited
+    // so that reversals (delete:sale) stay symmetrical.
+    const paymentMethodId = data.PaymentMethodID ?? null;
+    const cashAccountId = paymentMethodId ? null : (data.CashAccountID ?? null);
 
     try {
       // Check if customer is suspended
@@ -72,8 +81,7 @@ export function registerSalesHandlers() {
             }
           } else if (item.ItemID) {
             // Check stock quantity
-            const stock = db.prepare('SELECT COALESCE(SUM(Quantity),0) as qty FROM stock_quantities WHERE ItemID = ?').get(item.ItemID) as any;
-            const availableQty = stock?.qty || 0;
+            const availableQty = totalStock(db, item.ItemID);
             if (item.Quantity > availableQty) {
               // Get item name for better message
               const itemInfo = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(item.ItemID) as any;
@@ -89,8 +97,7 @@ export function registerSalesHandlers() {
       const remaining = totalAmount - paidAmount; // positive = customer owes, negative = customer overpaid (credit)
 
       const dateStr = new Date().toISOString().split('T')[0];
-      const numResult = db.prepare("SELECT COUNT(*) as count FROM sales WHERE Date = ?").get(dateStr) as any;
-      const saleNumber = `SAL-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+      const saleNumber = nextDocNumber(db, 'sales', 'SaleNumber', 'SAL', dateStr);
 
       const status = remaining > 0 ? (paidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
 
@@ -106,7 +113,7 @@ export function registerSalesHandlers() {
           data.CustomerID ?? null, data.CustomerName ?? null, data.CustomerPhone ?? null,
           subtotal, data.Discount, data.TaxRate, data.TaxAmount, totalAmount,
           paidAmount, remaining, data.PaymentMethod,
-          data.CashAccountID ?? null, data.PaymentMethodID ?? null,
+          cashAccountId, paymentMethodId,
           status, data.userId, data.Notes ? `${data.Notes} | عمولة تحويل: ${data.TransferCost || 0}` : (data.TransferCost ? `عمولة تحويل: ${data.TransferCost}` : null)
         );
 
@@ -114,9 +121,15 @@ export function registerSalesHandlers() {
 
         // Add sale details and update stock
         for (const item of data.items) {
+          // Resolve the warehouse up-front and STORE it, so returns/deletes
+          // put the stock back exactly where it came from.
+          const lineWarehouse = item.isService || !item.ItemID
+            ? null
+            : resolveSourceWarehouse(db, item.ItemID, item.Quantity, item.WarehouseID ?? null);
+
           db.prepare(`
-            INSERT INTO sale_details (SaleID, ItemID, SerialID, IMEI, Quantity, UnitPrice, UnitCost, Total, IsWarranty, WarrantyMonths)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sale_details (SaleID, ItemID, SerialID, IMEI, Quantity, UnitPrice, UnitCost, Total, IsWarranty, WarrantyMonths, WarehouseID)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             saleId,
             item.isService ? null : (item.ItemID || null),
@@ -124,7 +137,8 @@ export function registerSalesHandlers() {
             item.isService ? (item.ServiceName || null) : (item.IMEI ?? null),
             item.Quantity, item.UnitPrice, item.UnitCost ?? null,
             item.Quantity * item.UnitPrice,
-            item.IsWarranty ?? 0, item.WarrantyMonths ?? null
+            item.IsWarranty ?? 0, item.WarrantyMonths ?? null,
+            lineWarehouse
           );
 
           // Skip stock operations for service items
@@ -135,12 +149,9 @@ export function registerSalesHandlers() {
             db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(item.SerialID);
           }
 
-          // Deduct from stock (for non-serialized items)
-          if (!item.SerialID && item.ItemID) {
-            const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ?').get(item.ItemID) as any;
-            if (stock) {
-              db.prepare('UPDATE stock_quantities SET Quantity = Quantity - ? WHERE ID = ?').run(item.Quantity, stock.ID);
-            }
+          // Deduct from the resolved warehouse (for non-serialized items)
+          if (!item.SerialID && item.ItemID && lineWarehouse) {
+            deductStock(db, item.ItemID, lineWarehouse, item.Quantity);
           }
         }
 
@@ -160,13 +171,14 @@ export function registerSalesHandlers() {
         }
 
         // === CASH ACCOUNT / PAYMENT METHOD HANDLING ===
-        // Always add the paid amount to the selected cash account or payment method
+        // The money arrives in exactly ONE place. Previously both branches were
+        // independent `if`s, so selecting a cash account AND a payment method
+        // credited the paid amount twice, inventing cash out of thin air.
         if (paidAmount > 0) {
-          if (data.CashAccountID) {
-            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(paidAmount, data.CashAccountID);
-          }
-          if (data.PaymentMethodID) {
-            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(paidAmount, data.PaymentMethodID);
+          if (paymentMethodId) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(paidAmount, paymentMethodId);
+          } else if (cashAccountId) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(paidAmount, cashAccountId);
           }
         }
       });
@@ -198,15 +210,43 @@ export function registerSalesHandlers() {
     const db = getDb();
     const totalAmount = data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitPrice), 0);
     const dateStr = new Date().toISOString().split('T')[0];
-    const numResult = db.prepare("SELECT COUNT(*) as count FROM sale_returns WHERE Date = ?").get(dateStr) as any;
-    const returnNumber = `SR-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+    const returnNumber = nextDocNumber(db, 'sale_returns', 'ReturnNumber', 'SR', dateStr);
 
-    // Check sufficient cash for refund (unless negative cash allowed)
+    // === SPLIT THE REFUND BETWEEN DEBT RELIEF AND CASH ===
+    // A return must first cancel whatever the customer still OWES on that
+    // invoice; only the remainder is genuinely refundable in cash.
+    // Previously the full amount was BOTH paid out in cash AND deducted from
+    // the customer balance, refunding the money twice.
+    const originalSale = db.prepare(
+      'SELECT CustomerID, TotalAmount, PaidAmount, RemainingAmount FROM sales WHERE SaleID = ?'
+    ).get(data.SaleID) as any;
+    if (!originalSale) return { success: false, message: 'الفاتورة الأصلية غير موجودة' };
+
+    // How much of this invoice is still outstanding (never below zero).
+    const outstanding = Math.max(0, originalSale.RemainingAmount || 0);
+    // Already-returned value, so repeated partial returns cannot over-refund.
+    const priorReturns = (db.prepare(
+      'SELECT COALESCE(SUM(TotalAmount),0) as total FROM sale_returns WHERE SaleID = ?'
+    ).get(data.SaleID) as any)?.total || 0;
+
+    if (priorReturns + totalAmount > (originalSale.TotalAmount || 0) + 0.001) {
+      return {
+        success: false,
+        message: `قيمة المرتجع تتجاوز قيمة الفاتورة: إجمالي الفاتورة ${(originalSale.TotalAmount || 0).toFixed(2)}، مرتجع سابق ${priorReturns.toFixed(2)}، المطلوب ${totalAmount.toFixed(2)}`,
+      };
+    }
+
+    // Debt relief comes first, cash refund covers what the customer actually paid.
+    const remainingDebtAfterPriorReturns = Math.max(0, outstanding - priorReturns);
+    const debtRelief = Math.min(totalAmount, remainingDebtAfterPriorReturns);
+    const cashRefund = +(totalAmount - debtRelief).toFixed(2);
+
+    // Check sufficient cash for the portion actually paid back in cash
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
-    if (allowNegCash?.Value !== '1' && data.CashAccountID) {
+    if (allowNegCash?.Value !== '1' && data.CashAccountID && cashRefund > 0) {
       const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
-      if (!acc || (acc.Balance || 0) < totalAmount) {
-        return { success: false, message: `الرصيد غير كافٍ في الخزينة لرد المبلغ: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${totalAmount.toFixed(2)}` };
+      if (!acc || (acc.Balance || 0) < cashRefund) {
+        return { success: false, message: `الرصيد غير كافٍ في الخزينة لرد المبلغ: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${cashRefund.toFixed(2)}` };
       }
     }
 
@@ -220,35 +260,46 @@ export function registerSalesHandlers() {
         const returnId = result.lastInsertRowid;
 
         for (const item of data.items) {
+          // Put the goods back into the warehouse the sale took them from.
+          const origLine = db.prepare(
+            'SELECT WarehouseID FROM sale_details WHERE SaleID = ? AND ItemID IS ? LIMIT 1'
+          ).get(data.SaleID, item.ItemID) as any;
+          const returnWarehouse = origLine?.WarehouseID
+            ?? resolveSourceWarehouse(db, item.ItemID, 0, null);
+
           db.prepare(`
-            INSERT INTO sale_return_details (ReturnID, ItemID, SerialID, Quantity, UnitPrice, Total)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitPrice, item.Quantity * item.UnitPrice);
+            INSERT INTO sale_return_details (ReturnID, ItemID, SerialID, Quantity, UnitPrice, Total, WarehouseID)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitPrice, item.Quantity * item.UnitPrice, returnWarehouse);
 
           // Restore serial status
           if (item.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(item.SerialID);
           }
 
-          // Restore stock quantity
-          if (!item.SerialID) {
-            const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ?').get(item.ItemID) as any;
-            if (stock) {
-              db.prepare('UPDATE stock_quantities SET Quantity = Quantity + ? WHERE ID = ?').run(item.Quantity, stock.ID);
-            }
+          // Restore stock quantity into the correct warehouse
+          if (!item.SerialID && returnWarehouse) {
+            restoreStock(db, item.ItemID, returnWarehouse, item.Quantity);
           }
         }
 
-        // Refund from cash account
-        if (data.CashAccountID) {
-          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(totalAmount, data.CashAccountID);
+        // Pay back only the cash portion (what the customer actually handed over)
+        if (data.CashAccountID && cashRefund > 0) {
+          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(cashRefund, data.CashAccountID);
         }
 
-        // Reduce customer balance
-        const sale = db.prepare('SELECT CustomerID FROM sales WHERE SaleID = ?').get(data.SaleID) as any;
-        if (sale?.CustomerID) {
-          db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(totalAmount, sale.CustomerID);
+        // Cancel the outstanding debt portion on the customer account
+        if (originalSale.CustomerID && debtRelief > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(debtRelief, originalSale.CustomerID);
         }
+
+        // Keep the invoice consistent with what is still owed after the return
+        db.prepare(`
+          UPDATE sales
+          SET RemainingAmount = MAX(0, RemainingAmount - ?),
+              Status = CASE WHEN MAX(0, RemainingAmount - ?) <= 0 THEN 'completed' ELSE Status END
+          WHERE SaleID = ?
+        `).run(debtRelief, debtRelief, data.SaleID);
       });
 
       tx();

@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { currentUserId } from '../../stores/auth.store';
 
 export function PayrollPage() {
   const { showToast } = useToastStore();
@@ -51,7 +52,7 @@ export function PayrollPage() {
     const result = await window.api.invoke('salaries:issue', {
       EmployeeID: parseInt(issueForm.EmployeeID),
       Month: issueForm.Month,
-      userId: 1,
+      userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
     if (result.success) {
@@ -73,7 +74,7 @@ export function PayrollPage() {
       SalaryID: selectedSalary.SalaryID,
       PaidAmount: parseFloat(payForm.PaidAmount) || 0,
       CashAccountID: payForm.CashAccountID ? parseInt(payForm.CashAccountID) : undefined,
-      userId: 1,
+      userId: currentUserId(),
     });
     if (result.success) {
       showToast('success', `تم صرف الراتب - المدفوع: ${result.paidAmount.toFixed(2)} / الصافي: ${result.netSalary.toFixed(2)} - ${result.status === 'paid' ? 'مدفوع بالكامل' : 'دفع جزئي'}`);
@@ -108,7 +109,7 @@ export function PayrollPage() {
       Amount: parseFloat(advanceForm.Amount),
       Reason: advanceForm.Reason,
       CashAccountID: parseInt(advanceForm.CashAccountID),
-      userId: 1,
+      userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
     showToast('success', 'تم صرف السلفية');
@@ -128,7 +129,7 @@ export function PayrollPage() {
       DamagedItemID: deductionForm.DamagedItemID ? parseInt(deductionForm.DamagedItemID) : undefined,
       DamageCostType: deductionForm.DamageCostType,
       Notes: deductionForm.Notes,
-      userId: 1,
+      userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
     if (result.success) {

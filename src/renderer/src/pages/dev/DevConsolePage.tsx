@@ -8,19 +8,16 @@ import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 
-const ENCRYPTED_DEV_USER = btoa('zerocold'.split('').reverse().join(''));
-const ENCRYPTED_DEV_PASS = btoa('014253'.split('').reverse().join(''));
-
-function decrypt(str: string): string {
-  try { return atob(str).split('').reverse().join(''); } catch { return ''; }
-}
-
 type DevTab = 'about' | 'license' | 'codes';
 
 export function DevConsolePage() {
   const { showToast } = useToastStore();
   const navigate = useNavigate();
   const [unlocked, setUnlocked] = useState(false);
+  // Short-lived token issued by the main process after it verifies the
+  // developer credentials. Held in memory only — never persisted, so a page
+  // reload requires re-authenticating and DevTools cannot forge it.
+  const [devToken, setDevToken] = useState('');
   const [loginUser, setLoginUser] = useState('');
   const [loginPass, setLoginPass] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -32,7 +29,6 @@ export function DevConsolePage() {
 
   // License
   const [licenseStatus, setLicenseStatus] = useState<any>(null);
-  const [devPassword, setDevPassword] = useState('');
   const [generatedCodes, setGeneratedCodes] = useState<any[]>([]);
   const [genDays, setGenDays] = useState('30');
   const [genType, setGenType] = useState('trial');
@@ -40,12 +36,8 @@ export function DevConsolePage() {
   const [showGenModal, setShowGenModal] = useState(false);
 
   useEffect(() => {
-    const unlockedSession = sessionStorage.getItem('dev_unlocked');
-    if (unlockedSession === 'true') {
-      setUnlocked(true);
-      fetchDevInfo();
-      fetchLicenseStatus();
-    }
+    // Public info only; the console stays locked until dev:login succeeds.
+    fetchLicenseStatus();
   }, []);
 
   const fetchDevInfo = async () => {
@@ -67,23 +59,25 @@ export function DevConsolePage() {
     setLicenseStatus(status);
   };
 
-  const fetchCodes = async () => {
-    if (!devPassword) return;
-    const result = await window.api.invoke('license:listCodes', { devPassword });
+  const fetchCodes = async (token = devToken) => {
+    if (!token) return;
+    const result = await window.api.invoke('license:listCodes', { devToken: token });
     if (result.success) setGeneratedCodes(result.codes);
   };
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loginUser === decrypt(ENCRYPTED_DEV_USER) && loginPass === decrypt(ENCRYPTED_DEV_PASS)) {
+    const result = await window.api.invoke('dev:login', { username: loginUser, password: loginPass });
+    if (result?.success && result.token) {
+      setDevToken(result.token);
       setUnlocked(true);
-      sessionStorage.setItem('dev_unlocked', 'true');
       setLoginError('');
+      setLoginPass('');
       fetchDevInfo();
       fetchLicenseStatus();
       showToast('success', 'مرحباً بالمطور');
     } else {
-      setLoginError('بيانات الدخول غير صحيحة');
+      setLoginError(result?.message || 'بيانات الدخول غير صحيحة');
     }
   };
 
@@ -94,10 +88,9 @@ export function DevConsolePage() {
   };
 
   const handleGenerateCode = async () => {
-    if (!devPassword) { showToast('error', 'أدخل الرقم السري للمطور'); return; }
     if (!genDeviceId.trim()) { showToast('error', 'أدخل معرّف جهاز العميل'); return; }
     const days = parseInt(genDays);
-    const result = await window.api.invoke('license:generateCode', { days, type: genType, customerDeviceId: genDeviceId.trim(), devPassword });
+    const result = await window.api.invoke('license:generateCode', { days, type: genType, customerDeviceId: genDeviceId.trim(), devToken });
     if (result.success) {
       showToast('success', `تم إنشاء كود: ${result.code} (${result.days === 0 ? 'غير محدود' : result.days + ' يوم'})`);
       setShowGenModal(false);
@@ -109,8 +102,7 @@ export function DevConsolePage() {
   };
 
   const handleRevoke = async (code: string) => {
-    if (!devPassword) return;
-    const result = await window.api.invoke('license:revokeCode', { code, devPassword });
+    const result = await window.api.invoke('license:revokeCode', { code, devToken });
     if (result.success) {
       showToast('success', 'تم إلغاء الكود');
       fetchCodes();
@@ -118,9 +110,8 @@ export function DevConsolePage() {
   };
 
   const handleDeactivate = async () => {
-    if (!devPassword) { showToast('error', 'أدخل الرقم السري'); return; }
     if (!confirm('تحذير: سيتم إلغاء تفعيل الترخيص على هذا الجهاز. متابعة؟')) return;
-    const result = await window.api.invoke('license:deactivate', { devPassword });
+    const result = await window.api.invoke('license:deactivate', { devToken });
     if (result.success) {
       showToast('success', result.message);
       fetchLicenseStatus();
@@ -173,7 +164,7 @@ export function DevConsolePage() {
           <div className="p-2 rounded-lg bg-slate-800 dark:bg-slate-900"><Shield size={20} className="text-slate-300" /></div>
           <div><h1 className="text-2xl font-bold text-slate-800 dark:text-white">لوحة المطور</h1><p className="text-xs text-slate-500 dark:text-slate-400">التحكم الكامل في التطبيق والتراخيص</p></div>
         </div>
-        <Button variant="secondary" onClick={() => { sessionStorage.removeItem('dev_unlocked'); setUnlocked(false); setLoginUser(''); setLoginPass(''); setDevPassword(''); }}>خروج</Button>
+        <Button variant="secondary" onClick={async () => { await window.api.invoke('dev:logout', { devToken }); setDevToken(''); setUnlocked(false); setLoginUser(''); setLoginPass(''); }}>خروج</Button>
       </div>
 
       {/* Tabs */}
@@ -181,13 +172,6 @@ export function DevConsolePage() {
         <button onClick={() => setTab('about')} className={tabBtnClass('about')}><FileText size={16} /> بيانات البرنامج</button>
         <button onClick={() => setTab('license')} className={tabBtnClass('license')}><Key size={16} /> الترخيص والتفعيل</button>
         <button onClick={() => setTab('codes')} className={tabBtnClass('codes')}><Hash size={16} /> أكواد التفعيل</button>
-      </div>
-
-      {/* Dev Password */}
-      <div className="bg-slate-50 dark:bg-slate-800/50 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
-        <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">الرقم السري للمطور (مطلوب لجميع العمليات)</label>
-        <input type="password" value={devPassword} onChange={(e) => setDevPassword(e.target.value)} placeholder="••••••"
-          className="w-full max-w-xs px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm" />
       </div>
 
       {/* ===== ABOUT TAB ===== */}
@@ -260,7 +244,7 @@ export function DevConsolePage() {
           </div>
 
           <div className="mb-3">
-            <Button variant="secondary" onClick={fetchCodes} icon={<Hash size={14} />}>تحديث القائمة</Button>
+            <Button variant="secondary" onClick={() => fetchCodes()} icon={<Hash size={14} />}>تحديث القائمة</Button>
           </div>
 
           <DataTable

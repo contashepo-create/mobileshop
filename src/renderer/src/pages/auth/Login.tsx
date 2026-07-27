@@ -91,8 +91,10 @@ export function Login() {
     setForgotDevPass('');
     setForgotNewPass('');
     setForgotTargetUser('');
-    const users = await window.api.invoke('users:list');
-    setUsersList(users);
+    // `users:listBasic` exposes only id + username (callable pre-login),
+    // unlike `users:list` which leaks roles/employee links.
+    const users = await window.api.invoke('users:listBasic');
+    setUsersList(Array.isArray(users) ? users : []);
   };
 
   const handleForgotSubmit = async (e: React.FormEvent) => {
@@ -105,13 +107,29 @@ export function Login() {
       showToast('error', 'كلمة المرور الجديدة يجب أن تكون 4 أحرف على الأقل');
       return;
     }
+    if (forgotNewPass.length < 6) {
+      showToast('error', 'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل');
+      return;
+    }
     setForgotLoading(true);
+    // Two steps: the main process verifies the developer credentials (bcrypt +
+    // lockout) and returns a short-lived token, which then authorises the reset.
+    // The credentials themselves are never compared in the renderer.
+    const auth = await window.api.invoke('dev:login', {
+      username: forgotDevUser,
+      password: forgotDevPass,
+    });
+    if (!auth?.success || !auth.token) {
+      setForgotLoading(false);
+      showToast('error', auth?.message || 'بيانات المطور غير صحيحة');
+      return;
+    }
     const result = await window.api.invoke('users:resetByDev', {
-      devUser: forgotDevUser,
-      devPassword: forgotDevPass,
+      devToken: auth.token,
       targetUserId: parseInt(forgotTargetUser),
       newPassword: forgotNewPass,
     });
+    await window.api.invoke('dev:logout', { devToken: auth.token });
     setForgotLoading(false);
     if (result.success) {
       showToast('success', result.message);
@@ -261,7 +279,8 @@ export function Login() {
             </div>
             <form onSubmit={handleForgotSubmit} className="p-4 space-y-3">
               <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-2.5 text-xs text-orange-700 dark:text-orange-300">
-                هذه الخاصية مخصصة لحالة نسيان كلمة المرور. يرجى إدخال بيانات الدخول الخاصة بالمطور.
+                استعادة كلمة المرور تتطلب تدخل المطور. تواصل مع الدعم الفني وسيقوم هو بإدخال بياناته.
+                <div className="mt-1 font-medium">لا تشارك بيانات دخولك مع أي شخص.</div>
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">اسم مستخدم المطور</label>
@@ -278,7 +297,7 @@ export function Login() {
                 <select value={forgotTargetUser} onChange={(e) => setForgotTargetUser(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm">
                   <option value="">اختر المستخدم</option>
-                  {usersList.map((u: any) => <option key={u.UserID} value={u.UserID}>{u.Username} ({u.RoleName})</option>)}
+                  {usersList.map((u: any) => <option key={u.UserID} value={u.UserID}>{u.Username}</option>)}
                 </select>
               </div>
               <div>

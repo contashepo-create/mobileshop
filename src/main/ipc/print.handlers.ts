@@ -1,5 +1,38 @@
 import { ipcMain, BrowserWindow } from 'electron';
 
+/**
+ * SECURITY: every value that reaches the invoice HTML is attacker-controllable
+ * (item names, customer names, notes, company settings). Without escaping, an
+ * item named `<img src=x onerror=...>` executes script inside the print window.
+ * The print window is loaded from a `data:` URL, which does NOT inherit the
+ * CSP declared in index.html, so escaping here is the only defence.
+ */
+function esc(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Formats a value as a fixed-2 number, never emitting raw user input. */
+function num(value: unknown, digits = 2): string {
+  const n = typeof value === 'number' ? value : parseFloat(String(value ?? ''));
+  return Number.isFinite(n) ? n.toFixed(digits) : (0).toFixed(digits);
+}
+
+/** Only allow safe image sources for the logo (no javascript:/data:text). */
+function safeImageSrc(value: unknown): string | null {
+  const s = String(value ?? '').trim();
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s) || /^file:\/\//i.test(s) || /^data:image\//i.test(s)) return esc(s);
+  // Bare filesystem path (Windows drive or POSIX) -> treat as file URL
+  if (/^[a-zA-Z]:[\\/]/.test(s) || s.startsWith('/')) return esc('file://' + s.replace(/\\/g, '/'));
+  return null;
+}
+
 export function registerPrintHandlers() {
   // Preview invoice - shows preview window with print button
   ipcMain.handle('print:preview', async (_event, data: {
@@ -18,6 +51,8 @@ export function registerPrintHandlers() {
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
+        sandbox: true,
+        javascript: true, // needed only for the "print" button
       },
       show: true,
     });
@@ -43,6 +78,8 @@ export function registerPrintHandlers() {
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
+        sandbox: true,
+        javascript: true,
       },
       show: true,
     });
@@ -92,11 +129,11 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
 
   const header = showShop ? `
     <div class="invoice-header">
-      ${companyInfo.logo_path ? `<img src="${companyInfo.logo_path}" class="logo" />` : ''}
-      <div class="company-name">${companyInfo.company_name || 'محل الموبايلات'}</div>
-      ${companyInfo.address ? `<div class="info-line">${companyInfo.address}</div>` : ''}
-      ${companyInfo.phone ? `<div class="info-line">هاتف: ${companyInfo.phone}</div>` : ''}
-      ${companyInfo.tax_number ? `<div class="info-line">رقم ضريبي: ${companyInfo.tax_number}</div>` : ''}
+      ${safeImageSrc(companyInfo.logo_path) ? `<img src="${safeImageSrc(companyInfo.logo_path)}" class="logo" />` : ''}
+      <div class="company-name">${esc(companyInfo.company_name || 'محل الموبايلات')}</div>
+      ${companyInfo.address ? `<div class="info-line">${esc(companyInfo.address)}</div>` : ''}
+      ${companyInfo.phone ? `<div class="info-line">هاتف: ${esc(companyInfo.phone)}</div>` : ''}
+      ${companyInfo.tax_number ? `<div class="info-line">رقم ضريبي: ${esc(companyInfo.tax_number)}</div>` : ''}
     </div>
     <hr class="divider" />
   ` : '';
@@ -113,10 +150,10 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
         <tbody>
           ${(invoiceData.items || []).map((item: any) => `
             <tr>
-              <td>${item.ItemName || item.IMEI || item.ServiceName || '—'}${item.IMEI ? `<br/><small class="imei">${item.IMEI}</small>` : ''}</td>
-              <td class="center">${item.Quantity}</td>
-              <td class="center">${item.UnitPrice?.toFixed(2)}</td>
-              <td class="center bold">${(item.Quantity * item.UnitPrice).toFixed(2)}</td>
+              <td>${esc(item.ItemName || item.IMEI || item.ServiceName || '—')}${item.IMEI ? `<br/><small class="imei">${esc(item.IMEI)}</small>` : ''}</td>
+              <td class="center">${esc(item.Quantity)}</td>
+              <td class="center">${num(item.UnitPrice)}</td>
+              <td class="center bold">${num((Number(item.Quantity) || 0) * (Number(item.UnitPrice) || 0))}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -124,30 +161,30 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
     `;
     totalsHTML = `
       <div class="totals">
-        <div class="total-row"><span>الإجمالي الفرعي:</span><span>${(invoiceData.subtotal || 0).toFixed(2)}</span></div>
-        ${invoiceData.discount > 0 ? `<div class="total-row"><span>الخصم:</span><span>${invoiceData.discount.toFixed(2)}</span></div>` : ''}
-        ${invoiceData.taxAmount > 0 ? `<div class="total-row"><span>الضريبة (${invoiceData.taxRate || 0}%):</span><span>${invoiceData.taxAmount.toFixed(2)}</span></div>` : ''}
-        <div class="total-row grand"><span>الإجمالي:</span><span>${(invoiceData.totalAmount || 0).toFixed(2)} ${companyInfo.currency || 'ج.م'}</span></div>
-        <div class="total-row paid"><span>المدفوع:</span><span>${(invoiceData.paidAmount || 0).toFixed(2)}</span></div>
-        ${invoiceData.remaining > 0 ? `<div class="total-row remaining"><span>المتبقي:</span><span>${invoiceData.remaining.toFixed(2)}</span></div>` : ''}
+        <div class="total-row"><span>الإجمالي الفرعي:</span><span>${num(invoiceData.subtotal)}</span></div>
+        ${invoiceData.discount > 0 ? `<div class="total-row"><span>الخصم:</span><span>${num(invoiceData.discount)}</span></div>` : ''}
+        ${invoiceData.taxAmount > 0 ? `<div class="total-row"><span>الضريبة (${esc(invoiceData.taxRate || 0)}%):</span><span>${num(invoiceData.taxAmount)}</span></div>` : ''}
+        <div class="total-row grand"><span>الإجمالي:</span><span>${num(invoiceData.totalAmount)} ${esc(companyInfo.currency || 'ج.م')}</span></div>
+        <div class="total-row paid"><span>المدفوع:</span><span>${num(invoiceData.paidAmount)}</span></div>
+        ${invoiceData.remaining > 0 ? `<div class="total-row remaining"><span>المتبقي:</span><span>${num(invoiceData.remaining)}</span></div>` : ''}
       </div>
-      ${invoiceData.notes || invoiceData.Notes ? `<div class="invoice-notes">ملاحظات: ${invoiceData.notes || invoiceData.Notes}</div>` : ''}
+      ${invoiceData.notes || invoiceData.Notes ? `<div class="invoice-notes">ملاحظات: ${esc(invoiceData.notes || invoiceData.Notes)}</div>` : ''}
     `;
   } else if ((type === 'voucher_receipt' || type === 'voucher_payment') && invoiceData) {
     itemsHTML = `
       <div class="voucher-box">
-        <div class="voucher-amount">المبلغ: <strong>${(invoiceData.amount || 0).toFixed(2)} ${companyInfo.currency || 'ج.م'}</strong></div>
-        <div class="voucher-desc">البيان: ${invoiceData.description || '—'}</div>
-        <div class="voucher-party">الطرف: ${invoiceData.partyName || '—'}</div>
+        <div class="voucher-amount">المبلغ: <strong>${num(invoiceData.amount)} ${esc(companyInfo.currency || 'ج.م')}</strong></div>
+        <div class="voucher-desc">البيان: ${esc(invoiceData.description || '—')}</div>
+        <div class="voucher-party">الطرف: ${esc(invoiceData.partyName || '—')}</div>
       </div>
     `;
   } else if (type === 'maintenance' && invoiceData) {
     const deviceSection = invoiceData.deviceModel ? `
       <div class="device-info">
-        <div class="device-row"><span class="device-label">الجهاز:</span><span>${invoiceData.deviceModel || '—'}</span></div>
-        ${invoiceData.deviceIMEI ? `<div class="device-row"><span class="device-label">IMEI:</span><span>${invoiceData.deviceIMEI}</span></div>` : ''}
-        ${invoiceData.problemDesc ? `<div class="device-row"><span class="device-label">المشكلة:</span><span>${invoiceData.problemDesc}</span></div>` : ''}
-        ${invoiceData.ticketNumber ? `<div class="device-row"><span class="device-label">تذكرة:</span><span>${invoiceData.ticketNumber}</span></div>` : ''}
+        <div class="device-row"><span class="device-label">الجهاز:</span><span>${esc(invoiceData.deviceModel || '—')}</span></div>
+        ${invoiceData.deviceIMEI ? `<div class="device-row"><span class="device-label">IMEI:</span><span>${esc(invoiceData.deviceIMEI)}</span></div>` : ''}
+        ${invoiceData.problemDesc ? `<div class="device-row"><span class="device-label">المشكلة:</span><span>${esc(invoiceData.problemDesc)}</span></div>` : ''}
+        ${invoiceData.ticketNumber ? `<div class="device-row"><span class="device-label">تذكرة:</span><span>${esc(invoiceData.ticketNumber)}</span></div>` : ''}
       </div>
     ` : '';
     itemsHTML = `
@@ -159,10 +196,10 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
         <tbody>
           ${(invoiceData.items || []).map((item: any) => `
             <tr>
-              <td>${item.Description || item.ItemName || '—'}</td>
-              <td class="center">${item.Quantity ?? 1}</td>
-              <td class="center">${(item.UnitPrice || 0).toFixed(2)}</td>
-              <td class="center bold">${(item.Total || item.Quantity * item.UnitPrice || 0).toFixed(2)}</td>
+              <td>${esc(item.Description || item.ItemName || '—')}</td>
+              <td class="center">${esc(item.Quantity ?? 1)}</td>
+              <td class="center">${num(item.UnitPrice)}</td>
+              <td class="center bold">${num(item.Total ?? ((Number(item.Quantity) || 0) * (Number(item.UnitPrice) || 0)))}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -170,20 +207,20 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
     `;
     totalsHTML = `
       <div class="totals">
-        <div class="total-row"><span>الإجمالي الفرعي:</span><span>${(invoiceData.subtotal || 0).toFixed(2)}</span></div>
-        ${invoiceData.discount > 0 ? `<div class="total-row"><span>الخصم:</span><span>${invoiceData.discount.toFixed(2)}</span></div>` : ''}
-        <div class="total-row grand"><span>الإجمالي:</span><span>${(invoiceData.totalAmount || 0).toFixed(2)} ${companyInfo.currency || 'ج.م'}</span></div>
-        <div class="total-row paid"><span>المدفوع:</span><span>${(invoiceData.paidAmount || 0).toFixed(2)}</span></div>
-        ${invoiceData.remaining > 0 ? `<div class="total-row remaining"><span>المتبقي:</span><span>${invoiceData.remaining.toFixed(2)}</span></div>` : ''}
+        <div class="total-row"><span>الإجمالي الفرعي:</span><span>${num(invoiceData.subtotal)}</span></div>
+        ${invoiceData.discount > 0 ? `<div class="total-row"><span>الخصم:</span><span>${num(invoiceData.discount)}</span></div>` : ''}
+        <div class="total-row grand"><span>الإجمالي:</span><span>${num(invoiceData.totalAmount)} ${esc(companyInfo.currency || 'ج.م')}</span></div>
+        <div class="total-row paid"><span>المدفوع:</span><span>${num(invoiceData.paidAmount)}</span></div>
+        ${invoiceData.remaining > 0 ? `<div class="total-row remaining"><span>المتبقي:</span><span>${num(invoiceData.remaining)}</span></div>` : ''}
       </div>
-      ${invoiceData.notes || invoiceData.Notes ? `<div class="invoice-notes">ملاحظات: ${invoiceData.notes || invoiceData.Notes}</div>` : ''}
+      ${invoiceData.notes || invoiceData.Notes ? `<div class="invoice-notes">ملاحظات: ${esc(invoiceData.notes || invoiceData.Notes)}</div>` : ''}
     `;
   }
 
   const partyInfo = showCustomer && invoiceData ? `
     <div class="party-info">
-      ${invoiceData.customerName || invoiceData.CustomerName ? `<div>العميل: ${invoiceData.customerName || invoiceData.CustomerName}</div>` : ''}
-      ${invoiceData.customerPhone || invoiceData.CustomerPhone ? `<div>هاتف: ${invoiceData.customerPhone || invoiceData.CustomerPhone}</div>` : ''}
+      ${invoiceData.customerName || invoiceData.CustomerName ? `<div>العميل: ${esc(invoiceData.customerName || invoiceData.CustomerName)}</div>` : ''}
+      ${invoiceData.customerPhone || invoiceData.CustomerPhone ? `<div>هاتف: ${esc(invoiceData.customerPhone || invoiceData.CustomerPhone)}</div>` : ''}
     </div>
   ` : '';
 
@@ -195,7 +232,7 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>${titles[type] || 'فاتورة'}</title>
+      <title>${esc(titles[type] || 'فاتورة')}</title>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Cairo', 'Segoe UI', Tahoma, sans-serif; font-size: ${font}; color: #333; padding: ${bodyPad}; width: ${isThermal ? width : 'auto'}; max-width: ${isThermal ? width : '210mm'}; margin: 0 auto; }
@@ -233,18 +270,18 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
     </head>
     <body>
       ${header}
-      <div class="invoice-title">${titles[type] || 'فاتورة'}</div>
+      <div class="invoice-title">${esc(titles[type] || 'فاتورة')}</div>
       <div class="invoice-meta">
-        <span>رقم: ${invoiceData?.saleNumber || invoiceData?.purchaseNumber || invoiceData?.ticketNumber || invoiceData?.voucherNumber || '—'}</span>
-        <span>التاريخ: ${invoiceData?.date || invoiceData?.Date || new Date().toISOString().split('T')[0]}</span>
+        <span>رقم: ${esc(invoiceData?.saleNumber || invoiceData?.purchaseNumber || invoiceData?.ticketNumber || invoiceData?.voucherNumber || '—')}</span>
+        <span>التاريخ: ${esc(invoiceData?.date || invoiceData?.Date || new Date().toISOString().split('T')[0])}</span>
       </div>
       ${partyInfo}
       ${itemsHTML}
       ${totalsHTML}
       <div class="thank-you">شكراً لتعاملكم معنا</div>
       <div class="footer">
-        ${companyInfo.owner_name ? `المالك: ${companyInfo.owner_name} | ` : ''}
-        ${companyInfo.phone ? `هاتف: ${companyInfo.phone}` : ''}
+        ${companyInfo.owner_name ? `المالك: ${esc(companyInfo.owner_name)} | ` : ''}
+        ${companyInfo.phone ? `هاتف: ${esc(companyInfo.phone)}` : ''}
       </div>
       <button class="print-btn no-print" onclick="window.print()">🖨️ طباعة</button>
     </body>

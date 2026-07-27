@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { currentUserId } from '../../stores/auth.store';
 
 export function VouchersPage() {
   const { showToast } = useToastStore();
@@ -64,7 +65,7 @@ export function VouchersPage() {
       PartyID: form.PartyID ? parseInt(form.PartyID) : null,
       CashAccountID: parseInt(form.CashAccountID),
       PaymentMethodID: form.PaymentMethodID ? parseInt(form.PaymentMethodID) : null,
-      userId: 1,
+      userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     };
     const result = await window.api.invoke('vouchers:create', data);

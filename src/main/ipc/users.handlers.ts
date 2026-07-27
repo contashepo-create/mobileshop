@@ -1,12 +1,8 @@
 import { ipcMain } from 'electron';
 import bcrypt from 'bcryptjs';
 import { getDb } from '../database/connection';
-
-function decryptDev(str: string): string {
-  try { return Buffer.from(str, 'base64').toString('utf-8').split('').reverse().join(''); } catch { return ''; }
-}
-const ENCRYPTED_DEV_USER = Buffer.from('zerocold'.split('').reverse().join('')).toString('base64');
-const ENCRYPTED_DEV_PASS = Buffer.from('014253'.split('').reverse().join('')).toString('base64');
+import { verifyDevToken } from '../security/devAuth';
+import { destroyAllSessionsForUser } from '../security/session';
 
 export function registerUsersHandlers() {
   // List users
@@ -127,22 +123,45 @@ export function registerUsersHandlers() {
     if (!bcrypt.compareSync(data.adminPassword, admin.PasswordHash)) {
       return { success: false, message: 'كلمة المرور الحالية غير صحيحة' };
     }
+    if (typeof data.newPassword !== 'string' || data.newPassword.length < 6) {
+      return { success: false, message: 'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل' };
+    }
     const hash = bcrypt.hashSync(data.newPassword, 10);
     db.prepare('UPDATE users SET PasswordHash = ? WHERE UserID = ?').run(hash, data.targetUserId);
+    destroyAllSessionsForUser(data.targetUserId);
     return { success: true, message: 'تم تغيير كلمة المرور بنجاح' };
   });
 
-  // Reset any user's password using dev/master credentials (for forgotten passwords)
-  ipcMain.handle('users:resetByDev', async (_event, data: { devUser: string; devPassword: string; targetUserId: number; newPassword: string }) => {
-    if (data.devUser !== decryptDev(ENCRYPTED_DEV_USER) || data.devPassword !== decryptDev(ENCRYPTED_DEV_PASS)) {
-      return { success: false, message: 'بيانات المطور غير صحيحة' };
+  // Reset any user's password with a valid developer token (forgotten password).
+  // SECURITY: the token is minted by `dev:login`, which bcrypt-verifies the
+  // developer credentials in the main process and rate-limits attempts. The old
+  // version compared a base64-obfuscated password that was trivially
+  // recoverable from the shipped bundle.
+  ipcMain.handle('users:resetByDev', async (_event, data: { devToken: string; targetUserId: number; newPassword: string }) => {
+    if (!verifyDevToken(data?.devToken)) {
+      return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
+    }
+    if (typeof data.newPassword !== 'string' || data.newPassword.length < 6) {
+      return { success: false, message: 'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل' };
     }
     const db = getDb();
     const user = db.prepare('SELECT UserID FROM users WHERE UserID = ?').get(data.targetUserId) as any;
     if (!user) return { success: false, message: 'المستخدم غير موجود' };
     const hash = bcrypt.hashSync(data.newPassword, 10);
     db.prepare('UPDATE users SET PasswordHash = ? WHERE UserID = ?').run(hash, data.targetUserId);
+    // Force re-login everywhere: an old session must not survive a password reset.
+    destroyAllSessionsForUser(data.targetUserId);
     return { success: true, message: 'تم إعادة تعيين كلمة المرور بنجاح' };
+  });
+
+  /**
+   * Minimal user list for the "forgot password" picker on the login screen.
+   * Exposes only id + username (no hashes, no roles) because it is reachable
+   * before authentication.
+   */
+  ipcMain.handle('users:listBasic', async () => {
+    const db = getDb();
+    return db.prepare('SELECT UserID, Username FROM users WHERE IsActive = 1 ORDER BY Username ASC').all();
   });
 
   // Delete role (only non-system roles)

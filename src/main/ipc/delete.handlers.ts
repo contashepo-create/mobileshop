@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { restoreStock, resolveSourceWarehouse } from '../database/stock';
 
 export function registerDeleteHandlers() {
   // Delete sale - reverse all effects
@@ -13,16 +14,14 @@ export function registerDeleteHandlers() {
         // Get sale details
         const details = db.prepare('SELECT * FROM sale_details WHERE SaleID = ?').all(saleId) as any[];
 
-        // Reverse stock changes
+        // Reverse stock changes into the warehouse the sale deducted from
         for (const item of details) {
           if (item.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(item.SerialID);
           }
-          if (item.ItemID) {
-            const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ?').get(item.ItemID) as any;
-            if (stock) {
-              db.prepare('UPDATE stock_quantities SET Quantity = Quantity + ? WHERE ID = ?').run(item.Quantity, stock.ID);
-            }
+          if (item.ItemID && !item.SerialID) {
+            const wh = item.WarehouseID ?? resolveSourceWarehouse(db, item.ItemID, 0, null);
+            if (wh) restoreStock(db, item.ItemID, wh, item.Quantity, item.UnitCost || 0);
           }
         }
 
@@ -276,11 +275,13 @@ export function registerDeleteHandlers() {
               if (sd.SerialID) {
                 db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(sd.SerialID);
               }
-              if (sd.ItemID && !sd.SerialID) {
-                const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ?').get(sd.ItemID) as any;
-                if (stock) {
-                  db.prepare('UPDATE stock_quantities SET Quantity = Quantity + ? WHERE ID = ?').run(sd.Quantity, stock.ID);
-                }
+              // NOTE: parts consumed by a maintenance ticket were already
+              // deducted by maintenance:issuePart and are restored from
+              // `maintenance_parts` by maintenance:cancel/return. Restoring them
+              // again from the generated sale_details would double-credit stock,
+              // so only genuinely sale-sourced lines are reversed here.
+              if (sd.ItemID && !sd.SerialID && sd.WarehouseID) {
+                restoreStock(db, sd.ItemID, sd.WarehouseID, sd.Quantity, sd.UnitCost || 0);
               }
             }
             if (sale.CustomerID && sale.RemainingAmount > 0) {

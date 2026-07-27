@@ -6,3 +6,11 @@ mem-log/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local run logs (contain absolute user paths)
+electron_err.txt
+electron_out.txt
+
+# Codely CLI workspace state (chat transcripts, clipboard captures)
+.codely/
+.codely-cli/

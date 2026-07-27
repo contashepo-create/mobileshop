@@ -3,16 +3,56 @@ import { getDb, closeDb, getDbPath, setDbPath } from '../database/connection';
 import path from 'node:path';
 import fs from 'node:fs';
 
+/**
+ * Tables that must never be exported: they contain password hashes or
+ * device secrets that should not leave the application in plain CSV.
+ */
+const EXPORT_BLOCKLIST = new Set(['users', 'user_overrides']);
+
+/**
+ * SECURITY: `tableName` arrives from the renderer and used to be interpolated
+ * straight into `SELECT * FROM ${tableName}`. That allowed both SQL injection
+ * and dumping the `users` table (bcrypt hashes) to a file. We now resolve the
+ * name against the real schema and reject anything else.
+ */
+function assertExportableTable(db: ReturnType<typeof getDb>, tableName: unknown): string {
+  if (typeof tableName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(tableName)) {
+    throw new Error('اسم الجدول غير صالح');
+  }
+  const known = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name = ? AND name NOT LIKE 'sqlite_%'"
+  ).get(tableName) as any;
+  if (!known) throw new Error('الجدول غير موجود');
+  if (EXPORT_BLOCKLIST.has(tableName)) throw new Error('لا يمكن تصدير هذا الجدول لأسباب أمنية');
+  return known.name as string;
+}
+
+/** RFC4180-safe CSV cell; also neutralises spreadsheet formula injection. */
+function csvCell(val: unknown): string {
+  if (val === null || val === undefined) return '';
+  let s = String(val);
+  // A leading =, +, - or @ makes Excel/LibreOffice evaluate the cell as a formula.
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
 export function registerDatabaseHandlers() {
   // ===== EXPORT TO CSV =====
   ipcMain.handle('db:exportCSV', async (_event, tableName: string) => {
     const db = getDb();
-    const rows = db.prepare(`SELECT * FROM ${tableName}`).all() as any[];
+    let safeTable: string;
+    try {
+      safeTable = assertExportableTable(db, tableName);
+    } catch (err: any) {
+      return { success: false, message: err.message };
+    }
+    const rows = db.prepare(`SELECT * FROM "${safeTable}"`).all() as any[];
     if (rows.length === 0) return { success: false, message: 'لا توجد بيانات' };
 
     const result = await dialog.showSaveDialog({
-      title: `تصدير ${tableName}`,
-      defaultPath: `${tableName}_export_${new Date().toISOString().split('T')[0]}.csv`,
+      title: `تصدير ${safeTable}`,
+      defaultPath: `${safeTable}_export_${new Date().toISOString().split('T')[0]}.csv`,
       filters: [{ name: 'CSV', extensions: ['csv'] }],
     });
 
@@ -25,13 +65,7 @@ export function registerDatabaseHandlers() {
     csvLines.push('\uFEFF' + headers.join(','));
 
     for (const row of rows) {
-      const values = headers.map(h => {
-        const val = row[h];
-        if (val === null || val === undefined) return '';
-        if (typeof val === 'string' && val.includes(',')) return `"${val.replace(/"/g, '""')}"`;
-        return val;
-      });
-      csvLines.push(values.join(','));
+      csvLines.push(headers.map(h => csvCell(row[h])).join(','));
     }
 
     fs.writeFileSync(result.filePath, csvLines.join('\n'), 'utf-8');
@@ -56,21 +90,16 @@ export function registerDatabaseHandlers() {
     let exportedCount = 0;
 
     for (const table of tables) {
-      const tableName = table.name;
-      const rows = db.prepare(`SELECT * FROM ${tableName}`).all() as any[];
+      const tableName = table.name as string;
+      if (EXPORT_BLOCKLIST.has(tableName)) continue; // never dump credential tables
+      const rows = db.prepare(`SELECT * FROM "${tableName}"`).all() as any[];
       if (rows.length === 0) continue;
 
       const headers = Object.keys(rows[0]);
       const csvLines: string[] = ['\uFEFF' + headers.join(',')];
 
       for (const row of rows) {
-        const values = headers.map(h => {
-          const val = row[h];
-          if (val === null || val === undefined) return '';
-          if (typeof val === 'string' && val.includes(',')) return `"${val.replace(/"/g, '""')}"`;
-          return val;
-        });
-        csvLines.push(values.join(','));
+        csvLines.push(headers.map(h => csvCell(row[h])).join(','));
       }
 
       const filePath = path.join(folder, `${tableName}.csv`);
@@ -349,6 +378,6 @@ export function registerDatabaseHandlers() {
       WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_prisma%'
       ORDER BY name
     `).all() as any[];
-    return tables.map(t => t.name);
+    return tables.map(t => t.name).filter((n: string) => !EXPORT_BLOCKLIST.has(n));
   });
 }

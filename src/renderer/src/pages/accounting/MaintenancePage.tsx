@@ -803,11 +803,13 @@ export function MaintenancePage() {
             <Input label="المبلغ المحصّل من العميل" type="number" value={deliverForm.PaidAmount} onChange={(e: any) => setDeliverForm({...deliverForm, PaidAmount: e.target.value})} />
             {parseFloat(deliverForm.PaidAmount || '0') > 0 && (
               <div className="grid grid-cols-2 gap-3">
-                <Select label="خزنة/بنك" value={deliverForm.CashAccountID} onChange={(e) => setDeliverForm({...deliverForm, CashAccountID: e.target.value})}>
+                {/* One destination only — selecting a machine clears the safe,
+                    matching the backend which credits a single account. */}
+                <Select label="خزنة/بنك" value={deliverForm.CashAccountID} onChange={(e) => setDeliverForm({...deliverForm, CashAccountID: e.target.value, PaymentMethodID: e.target.value ? '' : deliverForm.PaymentMethodID})}>
                   <option value="">— اختر —</option>
                   {cashAccounts.map((ca: any) => <option key={ca.CashAccountID} value={ca.CashAccountID}>{ca.AccountName} ({ca.Balance?.toFixed(2)})</option>)}
                 </Select>
-                <Select label="ماكينة/محفظة" value={deliverForm.PaymentMethodID} onChange={(e) => setDeliverForm({...deliverForm, PaymentMethodID: e.target.value})}>
+                <Select label="ماكينة/محفظة" value={deliverForm.PaymentMethodID} onChange={(e) => setDeliverForm({...deliverForm, PaymentMethodID: e.target.value, CashAccountID: e.target.value ? '' : deliverForm.CashAccountID})}>
                   <option value="">— بدون —</option>
                   {paymentMethods.map((pm: any) => <option key={pm.PaymentMethodID} value={pm.PaymentMethodID}>{pm.MethodName}</option>)}
                 </Select>

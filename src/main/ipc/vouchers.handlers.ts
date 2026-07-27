@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { nextDocNumber } from '../database/docNumber';
 
 export function registerVouchersHandlers() {
   ipcMain.handle('vouchers:get', async (_event, voucherId: number) => {
@@ -39,8 +40,7 @@ export function registerVouchersHandlers() {
     const db = getDb();
     const dateStr = new Date().toISOString().split('T')[0];
     const prefix = data.VoucherType === 'receipt' ? 'RCV' : 'PAY';
-    const numResult = db.prepare("SELECT COUNT(*) as count FROM vouchers WHERE Date = ? AND VoucherType = ?").get(dateStr, data.VoucherType) as any;
-    const voucherNumber = `${prefix}-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+    const voucherNumber = nextDocNumber(db, 'vouchers', 'VoucherNumber', prefix, dateStr);
 
     // Check sufficient balance for payment vouchers (unless negative cash allowed)
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;

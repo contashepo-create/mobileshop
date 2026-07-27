@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { currentUserId } from '../../stores/auth.store';
 
 export function RentPage() {
   const { showToast } = useToastStore();
@@ -59,7 +60,7 @@ export function RentPage() {
     await window.api.invoke('rentPayments:pay', {
       RentPaymentID: selectedPayment.RentPaymentID,
       CashAccountID: parseInt(payCashAccount),
-      userId: 1,
+      userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
     showToast('success', 'تم دفع الإيجار');

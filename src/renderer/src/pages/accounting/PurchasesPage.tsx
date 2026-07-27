@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { currentUserId } from '../../stores/auth.store';
 
 interface PurchaseItem { ItemID: number; ItemName: string; IMEI?: string; Quantity: number; UnitCost: number; WarehouseID: number; }
 
@@ -91,7 +92,7 @@ export function PurchasesPage() {
         PaymentSourceType: paid > 0 ? paymentSourceType : undefined,
         PaymentSourceID: paid > 0 ? parseInt(paymentSourceId) : undefined,
         Notes: notes,
-        userId: 1,
+        userId: currentUserId(),
         fiscalYearId: activeFy.FiscalYearID,
       });
 

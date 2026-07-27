@@ -912,16 +912,86 @@ export function runMigrations(db: Database.Database) {
     )
   `);
 
-  // Add IsVoided to sales and PreviousSaleID/VoidedSaleID to maintenance_deliveries
-  // NOTE: these must live OUTSIDE seedData() so they run for existing databases too
-  try { db.exec(`ALTER TABLE sales ADD COLUMN IsVoided INTEGER DEFAULT 0`); } catch {}
-  try { db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN PreviousSaleID INTEGER`); } catch {}
-  try { db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN VoidedSaleID INTEGER`); } catch {}
+  // Monotonic per-day counters for document numbers (invoices, vouchers, ...).
+  // Replaces the old COUNT(*)-based numbering which reused numbers after a
+  // delete and collided between clients on a shared database.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS document_sequences (
+      SeqKey    TEXT PRIMARY KEY,
+      LastValue INTEGER NOT NULL DEFAULT 0
+    )
+  `);
 
-  // Warranty/Rework maintenance flow columns
-  try { db.exec(`ALTER TABLE maintenance_tickets ADD COLUMN MaintenanceType TEXT DEFAULT 'normal'`); } catch {}
-  try { db.exec(`ALTER TABLE maintenance_tickets ADD COLUMN ReferenceTicketID INTEGER`); } catch {}
-  try { db.exec(`ALTER TABLE sales ADD COLUMN IsWarranty INTEGER DEFAULT 0`); } catch {}
+  // Seed the counters from existing data so numbering continues rather than
+  // restarting at 1 on databases created before this change.
+  try {
+    const seqSeeds: [string, string, string][] = [
+      ['sales', 'SaleNumber', 'Date'],
+      ['sale_returns', 'ReturnNumber', 'Date'],
+      ['purchases', 'PurchaseNumber', 'Date'],
+      ['purchase_returns', 'ReturnNumber', 'Date'],
+      ['maintenance_tickets', 'TicketNumber', 'Date'],
+      ['maintenance_deliveries', 'DeliveryNumber', 'Date'],
+      ['maintenance_returns', 'ReturnNumber', 'Date'],
+      ['vouchers', 'VoucherNumber', 'Date'],
+      ['service_sales', 'ServiceNumber', 'Date'],
+      ['asset_transfers', 'TransferNumber', 'Date'],
+      ['settlements', 'SettlementNumber', 'Date'],
+    ];
+    const seedSeq = db.prepare(`
+      INSERT INTO document_sequences (SeqKey, LastValue) VALUES (?, ?)
+      ON CONFLICT(SeqKey) DO UPDATE SET LastValue = MAX(LastValue, excluded.LastValue)
+    `);
+    for (const [table, col, dateCol] of seqSeeds) {
+      try {
+        const rows = db.prepare(
+          `SELECT ${dateCol} as d, COUNT(*) as c FROM ${table} GROUP BY ${dateCol}`
+        ).all() as any[];
+        for (const r of rows) {
+          if (r.d) seedSeq.run(`${table}:${r.d}`, r.c);
+        }
+      } catch { /* table may not exist yet */ }
+    }
+  } catch { /* non-fatal */ }
+
+  // =============================================
+  // SCHEMA UPGRADES FOR EXISTING DATABASES
+  // =============================================
+  // These MUST live in runMigrations, not seedData: seedData returns early when
+  // users already exist, so on an existing installation these columns were
+  // never added and every query touching them failed.
+
+  // Add IsVoided to sales and PreviousSaleID to maintenance_deliveries for return flow
+  try {
+    db.exec(`ALTER TABLE sales ADD COLUMN IsVoided INTEGER DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN PreviousSaleID INTEGER`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN VoidedSaleID INTEGER`);
+  } catch {}
+
+  // Warranty/Rework maintenance flow
+  try {
+    db.exec(`ALTER TABLE maintenance_tickets ADD COLUMN MaintenanceType TEXT DEFAULT 'normal'`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE maintenance_tickets ADD COLUMN ReferenceTicketID INTEGER`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE sales ADD COLUMN IsWarranty INTEGER DEFAULT 0`);
+  } catch {}
+
+  // Track WHICH warehouse each sale line was taken from, so a return/delete
+  // credits the same warehouse it originally debited. Without this the reversal
+  // guessed the warehouse and could move stock between locations.
+  try {
+    db.exec(`ALTER TABLE sale_details ADD COLUMN WarehouseID INTEGER`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE sale_return_details ADD COLUMN WarehouseID INTEGER`);
+  } catch {}
 
   // =============================================
   // SEED DATA

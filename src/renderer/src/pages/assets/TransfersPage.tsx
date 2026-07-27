@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { currentUserId } from '../../stores/auth.store';
 
 export function TransfersPage() {
   const { showToast } = useToastStore();
@@ -65,7 +66,7 @@ export function TransfersPage() {
         TransferCost: cost,
         TransferCostSource: form.TransferCostSource,
         Notes: form.Notes,
-        userId: 1,
+        userId: currentUserId(),
         fiscalYearId: activeFy.FiscalYearID,
       });
 

@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { nextDocNumber } from '../database/docNumber';
 
 export function registerPurchasesHandlers() {
   ipcMain.handle('purchases:list', async (_event, filters?: { fromDate?: string; toDate?: string; supplierId?: number }) => {
@@ -63,8 +64,7 @@ export function registerPurchasesHandlers() {
       const remaining = totalAmount - paidAmount;
 
       const dateStr = new Date().toISOString().split('T')[0];
-      const numResult = db.prepare("SELECT COUNT(*) as count FROM purchases WHERE Date = ?").get(dateStr) as any;
-      const purchaseNumber = `PUR-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+      const purchaseNumber = nextDocNumber(db, 'purchases', 'PurchaseNumber', 'PUR', dateStr);
 
       const status = remaining > 0 ? (paidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
 
@@ -194,8 +194,33 @@ export function registerPurchasesHandlers() {
     const db = getDb();
     const totalAmount = data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitCost), 0);
     const dateStr = new Date().toISOString().split('T')[0];
-    const numResult = db.prepare("SELECT COUNT(*) as count FROM purchase_returns WHERE Date = ?").get(dateStr) as any;
-    const returnNumber = `PR-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+    const returnNumber = nextDocNumber(db, 'purchase_returns', 'ReturnNumber', 'PR', dateStr);
+
+    // === SPLIT THE REFUND BETWEEN DEBT RELIEF AND CASH ===
+    // Mirror of the sale-return logic: a purchase return first cancels what we
+    // still OWE the supplier; only the already-paid remainder comes back as
+    // cash. Previously the full amount was BOTH received in cash AND deducted
+    // from the supplier balance, benefitting us twice.
+    const originalPurchase = db.prepare(
+      'SELECT SupplierID, TotalAmount, PaidAmount, RemainingAmount FROM purchases WHERE PurchaseID = ?'
+    ).get(data.PurchaseID) as any;
+    if (!originalPurchase) return { success: false, message: 'فاتورة الشراء الأصلية غير موجودة' };
+
+    const outstanding = Math.max(0, originalPurchase.RemainingAmount || 0);
+    const priorReturns = (db.prepare(
+      'SELECT COALESCE(SUM(TotalAmount),0) as total FROM purchase_returns WHERE PurchaseID = ?'
+    ).get(data.PurchaseID) as any)?.total || 0;
+
+    if (priorReturns + totalAmount > (originalPurchase.TotalAmount || 0) + 0.001) {
+      return {
+        success: false,
+        message: `قيمة المرتجع تتجاوز قيمة الفاتورة: إجمالي الفاتورة ${(originalPurchase.TotalAmount || 0).toFixed(2)}، مرتجع سابق ${priorReturns.toFixed(2)}، المطلوب ${totalAmount.toFixed(2)}`,
+      };
+    }
+
+    const remainingDebtAfterPriorReturns = Math.max(0, outstanding - priorReturns);
+    const debtRelief = Math.min(totalAmount, remainingDebtAfterPriorReturns);
+    const cashRefund = +(totalAmount - debtRelief).toFixed(2);
 
     // Check sufficient stock before return (unless negative stock allowed)
     const allowNegStock = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_stock'").get() as any;
@@ -234,16 +259,23 @@ export function registerPurchasesHandlers() {
         }
       }
 
-      // Reduce supplier balance
-      const purchase = db.prepare('SELECT SupplierID FROM purchases WHERE PurchaseID = ?').get(data.PurchaseID) as any;
-      if (purchase?.SupplierID) {
-        db.prepare('UPDATE suppliers SET Balance = Balance - ? WHERE SupplierID = ?').run(totalAmount, purchase.SupplierID);
+      // Cancel only the part we still owe the supplier
+      if (originalPurchase.SupplierID && debtRelief > 0) {
+        db.prepare('UPDATE suppliers SET Balance = Balance - ? WHERE SupplierID = ?').run(debtRelief, originalPurchase.SupplierID);
       }
 
-      // Refund to cash account
-      if (data.CashAccountID) {
-        db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(totalAmount, data.CashAccountID);
+      // Take back in cash only what we had already paid
+      if (data.CashAccountID && cashRefund > 0) {
+        db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(cashRefund, data.CashAccountID);
       }
+
+      // Keep the purchase consistent with what remains owed
+      db.prepare(`
+        UPDATE purchases
+        SET RemainingAmount = MAX(0, RemainingAmount - ?),
+            Status = CASE WHEN MAX(0, RemainingAmount - ?) <= 0 THEN 'completed' ELSE Status END
+        WHERE PurchaseID = ?
+      `).run(debtRelief, debtRelief, data.PurchaseID);
     });
 
     tx();

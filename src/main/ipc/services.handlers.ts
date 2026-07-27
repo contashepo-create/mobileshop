@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { nextDocNumber } from '../database/docNumber';
 
 export function registerServicesHandlers() {
   // List service sales
@@ -43,8 +44,7 @@ export function registerServicesHandlers() {
 
     try {
       const dateStr = new Date().toISOString().split('T')[0];
-      const numResult = db.prepare("SELECT COUNT(*) as count FROM service_sales WHERE Date = ?").get(dateStr) as any;
-      const serviceNumber = `SRV-${dateStr.replace(/-/g, '')}-${(numResult.count + 1).toString().padStart(4, '0')}`;
+      const serviceNumber = nextDocNumber(db, 'service_sales', 'ServiceNumber', 'SRV', dateStr);
 
       const remaining = data.ChargeAmount - data.PaidAmount;
       const status = remaining > 0 ? (data.PaidAmount > 0 ? 'partial' : 'unpaid') : 'completed';

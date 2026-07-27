@@ -22,3 +22,9 @@ __pycache__/
 # Developer-only licensing material — must never be committed
 scripts/.license-secret
 scripts/issued-licenses.json
+
+# Runtime configuration — contains the client key that points the app at the
+# developer's Worker. Not an admin credential, but it should not be public.
+.env
+.env.local
+.env.*.local

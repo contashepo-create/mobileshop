@@ -30,6 +30,31 @@ import { registerTransfersHandlers } from './ipc/transfers.handlers';
 import { registerDeleteHandlers } from './ipc/delete.handlers';
 import { runMigrations } from './database/migrations';
 import { installIpcGuard } from './security/ipcGuard';
+import { registerRemoteHandlers } from './ipc/remote.handlers';
+import { startHeartbeat } from './remote/heartbeat';
+import { ensureRemoteTables } from './remote/remoteStore';
+
+/**
+ * Device id and licence summary for the heartbeat, resolved lazily so this
+ * module does not import the licence handler at load time.
+ */
+function currentDeviceId(): string {
+  try {
+    const p = path.join(app.getPath('userData'), 'device.id');
+    return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8').trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function currentLicenseSummary(): { status?: string; expiry?: string | null } {
+  try {
+    const db = getDb();
+    const row = db.prepare("SELECT Value FROM remote_state WHERE Key = 'license_summary'").get() as any;
+    if (row?.Value) return JSON.parse(row.Value);
+  } catch { /* fall through */ }
+  return { status: 'unknown', expiry: null };
+}
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -123,6 +148,10 @@ app.whenReady().then(() => {
   registerSmartNotificationsHandlers();
   registerTransfersHandlers();
   registerDeleteHandlers();
+
+    // Remote management: presentation values, developer messages, sync status.
+    ensureRemoteTables();
+    registerRemoteHandlers(currentDeviceId, currentLicenseSummary);
     console.log('[Main] All handlers registered');
 
     createWindow();
@@ -134,6 +163,10 @@ app.whenReady().then(() => {
     // 2. Periodic backup every hour
     setInterval(() => { void autoBackup(); }, 60 * 60 * 1000);
     console.log('[Main] Auto-backup scheduled (every 1 hour)');
+
+    // Daily check-in with the developer's server. Deliberately started AFTER
+    // the window exists and is fully fail-safe: no network, no effect.
+    startHeartbeat(currentDeviceId, currentLicenseSummary);
   } catch (err) {
     console.error('[Main] STARTUP ERROR:', err);
     dialog.showErrorBox('خطأ في التشغيل', `${err}`);

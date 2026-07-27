@@ -88,6 +88,12 @@ const AUTHENTICATED_ONLY = new Set<string>([
   'permissions:getOverrides',
   'print:preview',
   'print:invoice',
+  // Remote management: read-only for the customer plus their own privacy switch.
+  'remote:messages',
+  'remote:markRead',
+  'remote:syncInfo',
+  'remote:privacyReport',
+  'remote:managedKeys',
   'statement:getOperationDetail',
   'capital:get',
 ]);
@@ -244,6 +250,8 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
 
   // ---- Settings / admin
   'settings:set': 'settings.edit',
+  'remote:syncNow': 'settings.edit',
+  'remote:setTelemetry': 'settings.edit',
   'settings:setMany': 'settings.edit',
   'settings:resetDatabase': 'settings.edit',
   'users:create': 'settings.users',

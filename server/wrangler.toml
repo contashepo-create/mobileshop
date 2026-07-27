@@ -1,0 +1,23 @@
+name = "mobileshop-licensing"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# D1 is SQLite — the same engine the desktop app uses, so the schema and
+# queries stay familiar. Create it once with:
+#   npx wrangler d1 create mobileshop
+# then paste the printed database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "mobileshop"
+database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
+
+# Daily sweep at 09:00 UTC that warns about subscriptions expiring within a week.
+[triggers]
+crons = ["0 9 * * *"]
+
+# Secrets are NOT set here — they would end up in git. Set them with:
+#   npx wrangler secret put ADMIN_KEY
+#   npx wrangler secret put CLIENT_KEY
+#   npx wrangler secret put LICENSE_SECRET
+#   npx wrangler secret put TG_BOT_TOKEN
+#   npx wrangler secret put TG_ADMIN_CHAT

@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import { getDb } from '../database/connection';
 import bcrypt from 'bcryptjs';
 import { devLogin, revokeDevToken } from '../security/devAuth';
+import { getRemoteOverrides } from '../remote/remoteStore';
+import { isRemoteManaged } from '../remote/remoteConfig';
 
 export function registerSettingsHandlers() {
   // ===== DEVELOPER AUTHENTICATION =====
@@ -44,6 +46,13 @@ export function registerSettingsHandlers() {
     for (const row of rows) {
       settings[row.Key] = row.Value;
     }
+
+    // Layer the developer's remote values on top of the local ones.
+    // `getRemoteOverrides` only ever returns keys from the client-side
+    // allow-list, so this cannot silently change an accounting setting.
+    for (const [key, value] of Object.entries(getRemoteOverrides())) {
+      settings[key] = value;
+    }
     return settings;
   });
 
@@ -58,6 +67,12 @@ export function registerSettingsHandlers() {
   ipcMain.handle('settings:set', async (_event, key: string, value: string) => {
     const db = getDb();
     db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)').run(key, value);
+    // Writing a key the developer currently controls would appear to work and
+    // then silently revert on the next sync, so say so explicitly.
+    if (isRemoteManaged(key) && key in getRemoteOverrides()) {
+      return { success: true, overriddenRemotely: true,
+        message: 'تم الحفظ محلياً، لكن هذا الحقل يديره المطور وسيُستبدل عند المزامنة' };
+    }
     return { success: true };
   });
 

@@ -1,5 +1,6 @@
 import { ipcMain, app } from 'electron';
 import { getDb } from '../database/connection';
+import { setRemoteState, ensureRemoteTables } from '../remote/remoteStore';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -100,6 +101,18 @@ function newestBusinessDate(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Caches a minimal licence summary so the heartbeat can report status without
+ * re-running the whole status check (and without importing this module).
+ * Presentation data only — never any business figures.
+ */
+function cacheLicenseSummary(status: string, expiry: string | null) {
+  try {
+    ensureRemoteTables();
+    setRemoteState('license_summary', JSON.stringify({ status, expiry }));
+  } catch { /* non-fatal */ }
 }
 
 export function registerLicenseHandlers() {
@@ -247,6 +260,7 @@ export function registerLicenseHandlers() {
     // is decided by the permissions system in the database, never by the
     // licence, so renewing never changes anyone's access rights.
     if (license.expiryDays === 0) {
+      cacheLicenseSummary('active', null);
       return {
         status: 'active', deviceId,
         serial: license.serial,
@@ -262,6 +276,7 @@ export function registerLicenseHandlers() {
     const expiryLabel = expiryToDate(license.expiryDays).toISOString().slice(0, 10);
 
     if (remaining <= 0) {
+      cacheLicenseSummary('expired', expiryLabel);
       return {
         status: 'expired', deviceId,
         serial: license.serial,
@@ -272,6 +287,7 @@ export function registerLicenseHandlers() {
       };
     }
 
+    cacheLicenseSummary('active', expiryLabel);
     return {
       status: 'active', deviceId,
       serial: license.serial,

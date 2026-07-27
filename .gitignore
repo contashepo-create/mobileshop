@@ -18,3 +18,7 @@ electron_out.txt
 # Python bytecode from the verification scripts
 __pycache__/
 *.pyc
+
+# Developer-only licensing material — must never be committed
+scripts/.license-secret
+scripts/issued-licenses.json

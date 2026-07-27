@@ -72,7 +72,17 @@ check("renderer calls dev:login", "invoke('dev:login'" in console)
 print("\n[3] License channels require a dev token")
 lic = read('src/main/ipc/license.handlers.ts')
 check("no plaintext password comparison", "devPassword !== '014253'" not in lic)
-check("verifyDevToken used 4x", lic.count('verifyDevToken(') == 4, f"count={lic.count('verifyDevToken(')}")
+# Every privileged license channel must gate on a dev token. Asserting the
+# BEHAVIOUR rather than a fixed count, so removing a channel does not produce a
+# false failure while adding an unguarded one still does.
+lic_code = code('src/main/ipc/license.handlers.ts')
+privileged = re.findall(r"ipcMain\.handle\(\s*'(license:(?:generateCode|deactivate))'(.*?)(?=ipcMain\.handle\(|\Z)",
+                        lic_code, re.S)
+check("every privileged license channel verifies a dev token",
+      bool(privileged) and all('verifyDevToken(' in body for _, body in privileged),
+      f"channels={[n for n, _ in privileged]}")
+check("no license channel still compares a plaintext password",
+      "devPassword" not in lic_code)
 
 # 4 — IPC guard exists and is installed before handlers
 print("\n[4] IPC authorisation layer")

@@ -5,6 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { verifyDevToken } from '../security/devAuth';
+import {
+  VERIFIER_SECRET, verifyCode, signCode, daysRemaining, expiryToDate, dateToExpiry,
+} from '../security/licenseCrypto';
 
 // ===== LICENSE SYSTEM =====
 // Encrypted license management - cannot be tampered with
@@ -72,6 +75,31 @@ function generateActivationCode(days: number): string {
   // Format: XXXX-XXXX-XXXX-XXXX
   const formatted = code.match(/.{1,4}/g)?.join('-') || code;
   return formatted;
+}
+
+/**
+ * Newest date recorded in the business data (ISO yyyy-mm-dd), or null.
+ *
+ * Used as a clock-rollback signal: if the system clock reads earlier than the
+ * newest invoice, the date was moved back. Unlike `lastaccess.dat`, the user
+ * cannot simply delete this evidence — it lives inside their own accounting
+ * data, which they need.
+ */
+function newestBusinessDate(): string | null {
+  try {
+    const db = getDb();
+    const row = db.prepare(`
+      SELECT MAX(d) AS newest FROM (
+        SELECT MAX(Date) AS d FROM sales
+        UNION ALL SELECT MAX(Date) FROM purchases
+        UNION ALL SELECT MAX(Date) FROM vouchers
+        UNION ALL SELECT MAX(Date) FROM maintenance_tickets
+      )
+    `).get() as any;
+    return row?.newest ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function registerLicenseHandlers() {
@@ -170,248 +198,220 @@ export function registerLicenseHandlers() {
       return { status: 'error', deviceId, message: 'ملف الترخيص تالف' };
     }
 
-    // Verify device ID matches
     if (license.deviceId !== deviceId) {
       return { status: 'error', deviceId, message: 'هذا الترخيص مرتبط بجهاز آخر' };
     }
 
-    // Check for tampering - verify hash
+    // Integrity hash over the stored fields.
     const expectedHash = crypto.createHash('sha256')
-      .update(license.deviceId + license.code + license.days + license.startDate + SECRET_KEY)
+      .update(license.deviceId + license.serial + license.expiryDays + license.startDate + SECRET_KEY)
       .digest('hex');
     if (license.hash !== expectedHash) {
       return { status: 'tampered', deviceId, message: 'تم التلاعب ببيانات الترخيص' };
     }
 
-    // Calculate expiry
-    const startDate = new Date(license.startDate);
     const now = new Date();
-    const elapsedDays = Math.floor((now.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+    const startDate = new Date(license.startDate);
 
-    // Check for date rollback (if current date is before start date or before last known date)
-    if (now.getTime() < startDate.getTime()) {
+    // === CLOCK ROLLBACK DETECTION ===
+    // Three independent signals; any one of them means the clock moved back:
+    //   1. now is before the licence was activated;
+    //   2. now is before the last recorded launch;
+    //   3. now is before the newest business document in the database — the
+    //      strongest signal, because deleting it means losing the shop's data.
+    if (now.getTime() < startDate.getTime() - 60_000) {
       return { status: 'tampered', deviceId, message: 'تم تغيير تاريخ النظام' };
     }
 
-    // Check last access date (prevent rollback)
     const lastAccessPath = path.join(app.getPath('userData'), 'lastaccess.dat');
     if (fs.existsSync(lastAccessPath)) {
       const lastAccess = new Date(fs.readFileSync(lastAccessPath, 'utf-8'));
-      if (now.getTime() < lastAccess.getTime() - (1000 * 60 * 60 * 2)) { // 2 hour tolerance
+      if (!Number.isNaN(lastAccess.getTime()) &&
+          now.getTime() < lastAccess.getTime() - (1000 * 60 * 60 * 2)) {
         return { status: 'tampered', deviceId, message: 'تم تغيير تاريخ النظام للوراء' };
       }
     }
-    // Update last access
-    fs.writeFileSync(lastAccessPath, now.toISOString(), 'utf-8');
 
-    // Unlimited days (0 = forever)
-    if (license.days === 0) {
+    const latestActivity = newestBusinessDate();
+    if (latestActivity && now.toISOString().slice(0, 10) < latestActivity) {
       return {
-        status: 'active',
-        deviceId,
-        type: license.type || 'full',
-        code: license.code,
+        status: 'tampered', deviceId,
+        message: `تم تغيير تاريخ النظام - يوجد نشاط مسجّل بتاريخ ${latestActivity}`,
+      };
+    }
+
+    try { fs.writeFileSync(lastAccessPath, now.toISOString(), 'utf-8'); } catch { /* read-only fs */ }
+
+    // === DURATION ONLY — no feature gating anywhere ===
+    // A valid licence unlocks the whole application. What a given USER may do
+    // is decided by the permissions system in the database, never by the
+    // licence, so renewing never changes anyone's access rights.
+    if (license.expiryDays === 0) {
+      return {
+        status: 'active', deviceId,
+        serial: license.serial,
         startDate: license.startDate,
-        days: 'غير محدود',
-        elapsedDays,
-        remainingDays: '∞',
+        expiry: 'غير محدود',
+        remainingDays: null,
+        unlimited: true,
         message: 'الترخيص مفعّل - غير محدود',
       };
     }
 
-    const remainingDays = license.days - elapsedDays;
-    if (remainingDays <= 0) {
+    const remaining = daysRemaining(license.expiryDays, now);
+    const expiryLabel = expiryToDate(license.expiryDays).toISOString().slice(0, 10);
+
+    if (remaining <= 0) {
       return {
-        status: 'expired',
-        deviceId,
-        type: license.type || 'trial',
-        code: license.code,
+        status: 'expired', deviceId,
+        serial: license.serial,
         startDate: license.startDate,
-        days: license.days,
-        elapsedDays,
+        expiry: expiryLabel,
         remainingDays: 0,
-        message: 'انتهت صلاحية الترخيص',
+        message: `انتهت صلاحية الترخيص بتاريخ ${expiryLabel}`,
       };
     }
 
     return {
-      status: 'active',
-      deviceId,
-      type: license.type || 'trial',
-      code: license.code,
+      status: 'active', deviceId,
+      serial: license.serial,
       startDate: license.startDate,
-      days: license.days,
-      elapsedDays,
-      remainingDays,
-      message: `الترخيص مفعّل - متبقي ${remainingDays} يوم`,
+      expiry: expiryLabel,
+      remainingDays: remaining,
+      unlimited: false,
+      // Surfaced so the UI can nudge the customer before the shop stops.
+      expiringSoon: remaining <= 14,
+      message: `الترخيص مفعّل - متبقي ${remaining} يوم (حتى ${expiryLabel})`,
     };
   });
 
-  // Activate license with code
-  ipcMain.handle('license:activate', async (_event, data: {
-    code: string;
-  }) => {
-    // Normalize code: uppercase, strip dashes
-    const normalizedCode = (data.code || '').toUpperCase().replace(/-/g, '').trim();
-    const formattedCode = normalizedCode.match(/.{1,4}/g)?.join('-') || normalizedCode;
-
-    // Read generated codes
-    const codesPath = path.join(app.getPath('userData'), 'activation_codes.dat');
-    if (!fs.existsSync(codesPath)) {
-      return { success: false, message: 'كود التفعيل غير صالح' };
-    }
-
-    const encryptedCodes = fs.readFileSync(codesPath, 'utf-8');
-    const codes = decrypt(encryptedCodes);
-    if (!codes || !Array.isArray(codes)) {
-      return { success: false, message: 'ملف أكواد التفعيل تالف' };
-    }
-
-    // Find the code (match both formatted and unformatted)
-    const codeEntry = codes.find((c: any) =>
-      c.code === formattedCode || c.code.replace(/-/g, '') === normalizedCode
-    );
-    if (!codeEntry) {
-      return { success: false, message: 'كود التفعيل غير موجود' };
-    }
-
-    // Check if already used
-    if (codeEntry.used) {
-      return { success: false, message: 'تم استخدام هذا الكود من قبل' };
-    }
-
-    // Check if code is for a different device
-    if (codeEntry.deviceId && codeEntry.deviceId !== getDeviceId()) {
-      return { success: false, message: 'هذا الكود مرتبط بجهاز آخر' };
-    }
-
-    // Activate
+  // Activate license with a self-contained code
+  //
+  // The previous implementation looked the code up in
+  // `userData/activation_codes.dat`. That file lives on whichever machine ran
+  // `generateCode`, i.e. the DEVELOPER's — so a code sent to a customer was
+  // never found and activation was impossible across machines. The code now
+  // carries its own signed payload (expiry + serial) bound to this device, so
+  // no local lookup is needed at all.
+  ipcMain.handle('license:activate', async (_event, data: { code: string }) => {
     const deviceId = getDeviceId();
-    const now = new Date().toISOString();
-    const hash = crypto.createHash('sha256')
-      .update(deviceId + codeEntry.code + codeEntry.days + now + SECRET_KEY)
-      .digest('hex');
+    const raw = String(data?.code ?? '').trim();
+    if (!raw) return { success: false, message: 'أدخل كود التفعيل' };
 
+    // Throttle guessing: the tag is 5 bytes, so brute force is impractical, but
+    // a slow path removes any doubt and costs a legitimate user nothing.
+    const attemptsPath = path.join(app.getPath('userData'), 'activation_attempts.dat');
+    let attempts = 0;
+    try { attempts = parseInt(fs.readFileSync(attemptsPath, 'utf-8'), 10) || 0; } catch { attempts = 0; }
+    if (attempts >= 10) {
+      const stat = fs.existsSync(attemptsPath) ? fs.statSync(attemptsPath) : null;
+      const since = stat ? Date.now() - stat.mtimeMs : Infinity;
+      if (since < 15 * 60 * 1000) {
+        return { success: false, message: 'تجاوزت عدد المحاولات - انتظر 15 دقيقة' };
+      }
+      attempts = 0;
+    }
+
+    const payload = verifyCode(VERIFIER_SECRET, deviceId, raw);
+    if (!payload) {
+      try { fs.writeFileSync(attemptsPath, String(attempts + 1), 'utf-8'); } catch { /* ignore */ }
+      return { success: false, message: 'كود التفعيل غير صحيح أو غير مخصص لهذا الجهاز' };
+    }
+
+    // Already expired at the moment of entry.
+    if (payload.expiryDays !== 0 && daysRemaining(payload.expiryDays) <= 0) {
+      return { success: false, message: 'هذا الكود منتهي الصلاحية - اطلب كوداً جديداً' };
+    }
+
+    // Refuse to silently downgrade an existing, longer licence.
+    const licensePath = path.join(app.getPath('userData'), LICENSE_FILE);
+    if (fs.existsSync(licensePath)) {
+      const current = decrypt(fs.readFileSync(licensePath, 'utf-8'));
+      if (current && current.deviceId === deviceId) {
+        if (current.serial === payload.serial) {
+          return { success: false, message: 'تم استخدام هذا الكود بالفعل على هذا الجهاز' };
+        }
+        const currentUnlimited = current.expiryDays === 0;
+        if (currentUnlimited) {
+          return { success: false, message: 'الترخيص الحالي غير محدود - لا حاجة للتجديد' };
+        }
+        if (payload.expiryDays !== 0 && payload.expiryDays < current.expiryDays) {
+          return { success: false, message: 'الكود المدخل أقصر من ترخيصك الحالي' };
+        }
+      }
+    }
+
+    const now = new Date().toISOString();
     const license = {
       deviceId,
-      code: codeEntry.code,
-      days: codeEntry.days,
-      type: codeEntry.type || 'trial',
+      serial: payload.serial,
+      expiryDays: payload.expiryDays,
       startDate: now,
-      hash,
+      hash: crypto.createHash('sha256')
+        .update(deviceId + payload.serial + payload.expiryDays + now + SECRET_KEY)
+        .digest('hex'),
     };
 
-    // Save license file (encrypted)
-    const licensePath = path.join(app.getPath('userData'), LICENSE_FILE);
-    fs.writeFileSync(licensePath, encrypt(license), 'utf-8');
-    fs.chmodSync(licensePath, 0o444); // Read-only
+    try {
+      if (fs.existsSync(licensePath)) fs.chmodSync(licensePath, 0o644);
+      fs.writeFileSync(licensePath, encrypt(license), 'utf-8');
+      fs.chmodSync(licensePath, 0o444);
+    } catch (err: any) {
+      return { success: false, message: `تعذّر حفظ الترخيص: ${err.message}` };
+    }
 
-    // Mark code as used
-    codeEntry.used = true;
-    codeEntry.deviceId = deviceId;
-    codeEntry.activatedAt = now;
-    fs.writeFileSync(codesPath, encrypt(codes), 'utf-8');
+    try { fs.unlinkSync(attemptsPath); } catch { /* ignore */ }
 
+    const label = payload.expiryDays === 0
+      ? 'غير محدود'
+      : expiryToDate(payload.expiryDays).toISOString().slice(0, 10);
     return {
       success: true,
-      message: `تم تفعيل الترخيص بنجاح - ${codeEntry.days === 0 ? 'غير محدود' : codeEntry.days + ' يوم'}`,
-      days: codeEntry.days,
+      message: `تم التفعيل بنجاح - صالح حتى: ${label}`,
+      expiry: label,
+      remainingDays: payload.expiryDays === 0 ? null : daysRemaining(payload.expiryDays),
     };
   });
 
-  // Generate activation code (dev only)
+  // Generate an activation code from inside the app (developer console).
+  //
+  // Codes are normally minted with `scripts/license-keygen.js` on the
+  // developer's own machine — that keeps the signing secret off customer
+  // installs. This handler exists for convenience when the developer is sitting
+  // at a customer's machine; it produces exactly the same code because both
+  // sides use the same HMAC construction.
   ipcMain.handle('license:generateCode', async (_event, data: {
-    days: number; // 0 = unlimited
-    type?: string; // 'trial' | 'full'
-    customerDeviceId: string; // required: bind code to customer's device
+    days: number;              // 0 = perpetual
+    customerDeviceId: string;  // required — the code is bound to it
     devToken: string;
   }) => {
-    // SECURITY: verified against a short-lived token issued by `dev:login`
-    // (main-process bcrypt check + rate limiting) instead of comparing a
-    // plaintext password that shipped inside the packaged app.
-    if (!verifyDevToken(data.devToken)) {
+    if (!verifyDevToken(data?.devToken)) {
       return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
     }
-
-    if (!data.customerDeviceId || data.customerDeviceId.trim().length < 8) {
+    const target = String(data?.customerDeviceId ?? '').trim().toLowerCase();
+    if (target.length < 8) {
       return { success: false, message: 'يجب إدخال معرّف جهاز العميل' };
     }
-
-    const code = generateActivationCode(data.days);
-
-    // Read existing codes
-    const codesPath = path.join(app.getPath('userData'), 'activation_codes.dat');
-    let codes: any[] = [];
-    if (fs.existsSync(codesPath)) {
-      const existing = decrypt(fs.readFileSync(codesPath, 'utf-8'));
-      if (Array.isArray(existing)) codes = existing;
+    const days = Number(data?.days);
+    if (!Number.isFinite(days) || days < 0) {
+      return { success: false, message: 'عدد الأيام غير صالح' };
     }
 
-    // Add new code — bound to customer's device ID
-    codes.push({
-      code,
-      days: data.days,
-      type: data.type || (data.days === 0 ? 'full' : 'trial'),
-      used: false,
-      deviceId: data.customerDeviceId.trim(),
-      createdAt: new Date().toISOString(),
-      activatedAt: null,
-    });
-
-    // Save (encrypted)
-    fs.writeFileSync(codesPath, encrypt(codes), 'utf-8');
-
-    return {
-      success: true,
-      code,
-      days: data.days,
-      type: data.type || (data.days === 0 ? 'full' : 'trial'),
-      deviceId: data.customerDeviceId.trim(),
-    };
-  });
-
-  // List all generated codes (dev only)
-  ipcMain.handle('license:listCodes', async (_event, data: { devToken: string }) => {
-    // SECURITY: verified against a short-lived token issued by `dev:login`
-    // (main-process bcrypt check + rate limiting) instead of comparing a
-    // plaintext password that shipped inside the packaged app.
-    if (!verifyDevToken(data.devToken)) {
-      return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
+    const expiryDays = days === 0 ? 0 : dateToExpiry(new Date()) + Math.floor(days);
+    if (expiryDays > 0xffff) {
+      return { success: false, message: 'المدة طويلة جداً' };
     }
 
-    const codesPath = path.join(app.getPath('userData'), 'activation_codes.dat');
-    if (!fs.existsSync(codesPath)) {
-      return { success: true, codes: [] };
-    }
+    // Serial counter kept locally so repeat issues for the same device differ.
+    const serialPath = path.join(app.getPath('userData'), 'issue_serial.dat');
+    let serial = 1;
+    try { serial = (parseInt(fs.readFileSync(serialPath, 'utf-8'), 10) || 0) + 1; } catch { serial = 1; }
+    try { fs.writeFileSync(serialPath, String(serial), 'utf-8'); } catch { /* ignore */ }
 
-    const codes = decrypt(fs.readFileSync(codesPath, 'utf-8'));
-    return { success: true, codes: codes || [] };
-  });
+    const code = signCode(VERIFIER_SECRET, target, { expiryDays, serial });
+    const label = expiryDays === 0 ? 'غير محدود' : expiryToDate(expiryDays).toISOString().slice(0, 10);
 
-  // Revoke code (dev only)
-  ipcMain.handle('license:revokeCode', async (_event, data: {
-    code: string;
-    devToken: string;
-  }) => {
-    // SECURITY: verified against a short-lived token issued by `dev:login`
-    // (main-process bcrypt check + rate limiting) instead of comparing a
-    // plaintext password that shipped inside the packaged app.
-    if (!verifyDevToken(data.devToken)) {
-      return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
-    }
-
-    const codesPath = path.join(app.getPath('userData'), 'activation_codes.dat');
-    if (!fs.existsSync(codesPath)) {
-      return { success: false, message: 'لا توجد أكواد' };
-    }
-
-    const codes = decrypt(fs.readFileSync(codesPath, 'utf-8'));
-    if (!Array.isArray(codes)) return { success: false, message: 'ملف تالف' };
-
-    const filtered = codes.filter((c: any) => c.code !== data.code);
-    fs.writeFileSync(codesPath, encrypt(filtered), 'utf-8');
-
-    return { success: true };
+    return { success: true, code, days, expiry: label, deviceId: target, serial };
   });
 
   // Deactivate license (dev only - for transferring to new device)

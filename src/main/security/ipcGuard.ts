@@ -44,8 +44,6 @@ const PUBLIC_CHANNELS = new Set<string>([
   'dev:logout',
   // Developer-console channels: gated by devToken inside their own handlers.
   'license:generateCode',
-  'license:listCodes',
-  'license:revokeCode',
   'license:deactivate',
   'users:resetByDev',
   'users:listBasic',

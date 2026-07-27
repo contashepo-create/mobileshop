@@ -1163,6 +1163,10 @@ function seedData(db: Database.Database) {
     ['dev_name', 'محاسب / محمد عبدة'],
     ['dev_phone', '01207770329'],
     ['dev_email', 'conta.shepo@gmail.com'],
+    // Telegram @username. When set, the activation screen can pre-fill the
+    // request message (t.me/<user>?text=...); a bare phone link cannot carry
+    // text, so the app falls back to copying it to the clipboard.
+    ['dev_telegram', ''],
     ['copyright', '© 2026 محاسب / محمد عبدة - جميع الحقوق محفوظة'],
     ['distribution_rights', 'غير مسموح بتوزيع أو نسخ البرنامج بدون إذن المطور'],
     ['app_version', '1.0.0'],

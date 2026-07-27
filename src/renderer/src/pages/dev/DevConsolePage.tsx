@@ -1,11 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Shield, Lock, Save, Edit, Phone, Mail, User, FileText, Hash, Copyright, Key, Cpu, Calendar, CheckCircle, XCircle, Trash2, Plus, AlertTriangle, ArrowRight } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Calendar, CheckCircle, Copy, Cpu, Edit, FileText, Hash, Key, Plus, Save, Shield, Trash2 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
-import { Input, Textarea, Select } from '../../components/ui/Input';
+import { Input, Textarea } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
-import { Badge } from '../../components/ui/Badge';
-import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 
 type DevTab = 'about' | 'license' | 'codes';
@@ -25,13 +23,13 @@ export function DevConsolePage() {
   const [mode, setMode] = useState<'view' | 'edit'>('view');
 
   // About info
-  const [devInfo, setDevInfo] = useState({ app_name: '', dev_name: '', dev_phone: '', dev_email: '', copyright: '', distribution_rights: '', custom_content: '', app_version: '' });
+  const [devInfo, setDevInfo] = useState({ app_name: '', dev_name: '', dev_phone: '', dev_email: '', dev_telegram: '', copyright: '', distribution_rights: '', custom_content: '', app_version: '' });
 
   // License
   const [licenseStatus, setLicenseStatus] = useState<any>(null);
-  const [generatedCodes, setGeneratedCodes] = useState<any[]>([]);
+  const [lastCode, setLastCode] = useState<any>(null);
+  const [codeCopied, setCodeCopied] = useState(false);
   const [genDays, setGenDays] = useState('30');
-  const [genType, setGenType] = useState('trial');
   const [genDeviceId, setGenDeviceId] = useState('');
   const [showGenModal, setShowGenModal] = useState(false);
 
@@ -47,6 +45,7 @@ export function DevConsolePage() {
       dev_name: settings.dev_name || 'محاسب / محمد عبدة',
       dev_phone: settings.dev_phone || '01207770329',
       dev_email: settings.dev_email || 'conta.shepo@gmail.com',
+      dev_telegram: settings.dev_telegram || '',
       copyright: settings.copyright || '© 2026 محاسب / محمد عبدة - جميع الحقوق محفوظة',
       distribution_rights: settings.distribution_rights || 'غير مسموح بتوزيع أو نسخ البرنامج بدون إذن المطور',
       custom_content: settings.custom_content || '',
@@ -57,12 +56,6 @@ export function DevConsolePage() {
   const fetchLicenseStatus = async () => {
     const status = await window.api.invoke('license:status');
     setLicenseStatus(status);
-  };
-
-  const fetchCodes = async (token = devToken) => {
-    if (!token) return;
-    const result = await window.api.invoke('license:listCodes', { devToken: token });
-    if (result.success) setGeneratedCodes(result.codes);
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -89,24 +82,32 @@ export function DevConsolePage() {
 
   const handleGenerateCode = async () => {
     if (!genDeviceId.trim()) { showToast('error', 'أدخل معرّف جهاز العميل'); return; }
-    const days = parseInt(genDays);
-    const result = await window.api.invoke('license:generateCode', { days, type: genType, customerDeviceId: genDeviceId.trim(), devToken });
+    const days = parseInt(genDays, 10);
+    if (Number.isNaN(days) || days < 0) { showToast('error', 'عدد الأيام غير صالح'); return; }
+    const result = await window.api.invoke('license:generateCode', {
+      days, customerDeviceId: genDeviceId.trim(), devToken,
+    });
     if (result.success) {
-      showToast('success', `تم إنشاء كود: ${result.code} (${result.days === 0 ? 'غير محدود' : result.days + ' يوم'})`);
+      setLastCode(result);
       setShowGenModal(false);
-      setGenDeviceId('');
-      fetchCodes();
+      showToast('success', `تم إنشاء الكود: ${result.code}`);
     } else {
       showToast('error', result.message);
     }
   };
 
-  const handleRevoke = async (code: string) => {
-    const result = await window.api.invoke('license:revokeCode', { code, devToken });
-    if (result.success) {
-      showToast('success', 'تم إلغاء الكود');
-      fetchCodes();
-    }
+  /** Copies the customer-ready reply, not just the bare code. */
+  const copyReply = async () => {
+    if (!lastCode) return;
+    const text =
+      `كود التفعيل الخاص بك:\n\n${lastCode.code}\n\n` +
+      `صالح حتى: ${lastCode.expiry}\n` +
+      `انسخ الكود والصقه في شاشة التفعيل ثم اضغط "تفعيل".`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
+    } catch { /* ignore */ }
   };
 
   const handleDeactivate = async () => {
@@ -189,6 +190,7 @@ export function DevConsolePage() {
               <div><label className="text-xs text-slate-500 dark:text-slate-400">اسم المطور</label>{mode === 'view' ? <div className="font-medium text-slate-800 dark:text-white">{devInfo.dev_name}</div> : <Input value={devInfo.dev_name} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDevInfo({ ...devInfo, dev_name: e.target.value })} />}</div>
               <div><label className="text-xs text-slate-500 dark:text-slate-400">الهاتف</label>{mode === 'view' ? <div className="text-slate-700 dark:text-slate-200">{devInfo.dev_phone || '—'}</div> : <Input value={devInfo.dev_phone} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDevInfo({ ...devInfo, dev_phone: e.target.value })} />}</div>
               <div><label className="text-xs text-slate-500 dark:text-slate-400">الإيميل</label>{mode === 'view' ? <div className="text-slate-700 dark:text-slate-200">{devInfo.dev_email || '—'}</div> : <Input value={devInfo.dev_email} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDevInfo({ ...devInfo, dev_email: e.target.value })} />}</div>
+              <div><label className="text-xs text-slate-500 dark:text-slate-400">تليجرام (اسم المستخدم)</label>{mode === 'view' ? <div className="text-slate-700 dark:text-slate-200">{devInfo.dev_telegram || '— (سيُستخدم رقم الهاتف)'}</div> : <Input value={devInfo.dev_telegram} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDevInfo({ ...devInfo, dev_telegram: e.target.value })} placeholder="@username" />}</div>
               <div><label className="text-xs text-slate-500 dark:text-slate-400">حقوق النشر</label>{mode === 'view' ? <div className="text-sm text-slate-700 dark:text-slate-200">{devInfo.copyright || '—'}</div> : <Input value={devInfo.copyright} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDevInfo({ ...devInfo, copyright: e.target.value })} />}</div>
               <div><label className="text-xs text-slate-500 dark:text-slate-400">حقوق التوزيع</label>{mode === 'view' ? <div className="text-sm text-slate-700 dark:text-slate-200">{devInfo.distribution_rights || '—'}</div> : <Input value={devInfo.distribution_rights} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDevInfo({ ...devInfo, distribution_rights: e.target.value })} />}</div>
               <div className="col-span-2"><label className="text-xs text-slate-500 dark:text-slate-400">محتوى مخصص</label>{mode === 'view' ? <div className="whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200 min-h-[60px] bg-slate-50 dark:bg-slate-700/30 rounded-lg p-3">{devInfo.custom_content || '—'}</div> : <Textarea value={devInfo.custom_content} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDevInfo({ ...devInfo, custom_content: e.target.value })} rows={3} />}</div>
@@ -239,28 +241,45 @@ export function DevConsolePage() {
       {/* ===== CODES TAB ===== */}
       {tab === 'codes' && (
         <div className="space-y-4">
+          <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+            <strong>الطريقة المفضّلة:</strong> ولّد الأكواد من جهازك عبر
+            <code className="mx-1 px-1 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 font-mono">node scripts/license-keygen.js</code>
+            حتى يبقى مفتاح التوقيع خارج نسخ العملاء. هذه الشاشة للطوارئ فقط.
+          </div>
+
           <div className="flex justify-end">
             <Button onClick={() => setShowGenModal(true)} icon={<Plus size={16} />}>إنشاء كود تفعيل</Button>
           </div>
 
-          <div className="mb-3">
-            <Button variant="secondary" onClick={() => fetchCodes()} icon={<Hash size={14} />}>تحديث القائمة</Button>
-          </div>
-
-          <DataTable
-            columns={[
-              { key: 'code', title: 'الكود', render: (r) => <span className="font-mono text-xs font-bold text-slate-800 dark:text-white">{r.code}</span> },
-              { key: 'days', title: 'الأيام', render: (r) => <span className="text-slate-700 dark:text-slate-200">{r.days === 0 ? 'غير محدود' : r.days + ' يوم'}</span> },
-              { key: 'type', title: 'النوع', render: (r) => <Badge variant={r.type === 'full' ? 'green' : 'blue'}>{r.type === 'full' ? 'كامل' : 'تجريبي'}</Badge> },
-              { key: 'deviceId', title: 'جهاز العميل', render: (r) => <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400 break-all">{r.deviceId?.substring(0, 16) || '—'}...</span> },
-              { key: 'used', title: 'الحالة', render: (r) => <Badge variant={r.used ? 'red' : 'green'}>{r.used ? 'مستخدم' : 'متاح'}</Badge> },
-              { key: 'createdAt', title: 'تاريخ الإنشاء', render: (r) => <span className="text-xs text-slate-500 dark:text-slate-400">{r.createdAt?.split('T')[0]}</span> },
-              { key: 'actions', title: '', render: (r) => <button onClick={() => handleRevoke(r.code)} className="text-xs text-red-500 hover:underline">إلغاء</button> },
-            ]}
-            data={generatedCodes}
-            keyField="code"
-            emptyMessage="لا توجد أكواد - أنشئ كوداً جديداً"
-          />
+          {lastCode ? (
+            <div className="bg-white dark:bg-slate-800 rounded-xl p-5 border border-slate-200 dark:border-slate-700">
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-3">آخر كود تم إنشاؤه</h3>
+              <div className="bg-slate-900 rounded-lg p-4 text-center mb-3">
+                <div className="font-mono text-xl font-bold tracking-widest text-green-400 break-all">{lastCode.code}</div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs mb-3">
+                <div>
+                  <div className="text-slate-500 dark:text-slate-400">صالح حتى</div>
+                  <div className="font-medium text-slate-800 dark:text-white">{lastCode.expiry}</div>
+                </div>
+                <div>
+                  <div className="text-slate-500 dark:text-slate-400">رقم الإصدار</div>
+                  <div className="font-medium text-slate-800 dark:text-white">#{lastCode.serial}</div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-slate-500 dark:text-slate-400">جهاز العميل</div>
+                  <div className="font-mono text-[10px] text-slate-600 dark:text-slate-300 break-all">{lastCode.deviceId}</div>
+                </div>
+              </div>
+              <Button variant="secondary" onClick={copyReply} className="w-full" icon={<Copy size={14} />}>
+                {codeCopied ? 'تم نسخ الرسالة ✓' : 'نسخ الرد الجاهز للعميل'}
+              </Button>
+            </div>
+          ) : (
+            <div className="text-center py-10 text-sm text-slate-500 dark:text-slate-400">
+              لم يتم إنشاء أكواد في هذه الجلسة
+            </div>
+          )}
         </div>
       )}
 
@@ -270,12 +289,8 @@ export function DevConsolePage() {
         <div className="space-y-4">
           <Input label="معرّف جهاز العميل" value={genDeviceId} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setGenDeviceId(e.target.value)} placeholder="ألصق معرّف جهاز العميل هنا" hint="يجب على العميل نسخ معرّف جهازه من شاشة التفعيل أو الإعدادات" />
           <Input label="عدد الأيام (0 = غير محدود)" type="number" value={genDays} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setGenDays(e.target.value)} hint="7 = أسبوع، 30 = شهر، 0 = غير محدود" />
-          <Select label="نوع الاشتراك" value={genType} onChange={(e) => setGenType(e.target.value)}>
-            <option value="trial">تجريبي</option>
-            <option value="full">كامل (غير محدود الميزات)</option>
-          </Select>
           <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3 text-xs text-blue-700 dark:text-blue-300">
-            سيتم إنشاء كود تفعيل فريد مرتبط بجهاز العميل المحدد. لا يمكن استخدام الكود على جهاز آخر.
+            الكود يحمل مدته بداخله ومرتبط بجهاز العميل — لا يعمل على جهاز آخر. المدة فقط، بلا أي فروق في المزايا.
           </div>
         </div>
       </Modal>

@@ -128,6 +128,13 @@ async function ensureSchema(env) {
       message_id INTEGER, device_id TEXT, read_at TEXT,
       PRIMARY KEY (message_id, device_id)
     )`),
+    // Remembers what a typed reply means during a multi-step menu flow.
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS pending_actions (
+      chat_id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      data TEXT,
+      created_at TEXT
+    )`),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS counters (
       name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0
     )`),
@@ -165,11 +172,16 @@ async function handleHeartbeat(request, env) {
                          license_status, license_expiry, first_seen, last_seen, seen_count)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
     ON CONFLICT(device_id) DO UPDATE SET
-      shop_name = excluded.shop_name,
-      app_version = excluded.app_version,
-      platform = excluded.platform,
-      license_status = excluded.license_status,
-      license_expiry = excluded.license_expiry,
+      -- COALESCE, not a plain overwrite: a heartbeat may legitimately omit a
+      -- field (the customer can switch off telemetry_share_shop_name, or an
+      -- older build may not send it yet). Overwriting with NULL would erase
+      -- information we already have and make the device unidentifiable in the
+      -- dashboard. Only replace a value when the device actually sent one.
+      shop_name = COALESCE(excluded.shop_name, shop_name),
+      app_version = COALESCE(excluded.app_version, app_version),
+      platform = COALESCE(excluded.platform, platform),
+      license_status = COALESCE(excluded.license_status, license_status),
+      license_expiry = COALESCE(excluded.license_expiry, license_expiry),
       last_seen = excluded.last_seen,
       seen_count = seen_count + 1
   `).bind(
@@ -295,76 +307,469 @@ async function handleMessage(request, env) {
   return json({ ok: true, id: res.meta?.last_row_id });
 }
 
-// ---------------------------------------------------------------- telegram
-async function handleTelegram(request, env) {
-  const update = await request.json().catch(() => null);
-  const msg = update?.message;
-  const chatId = String(msg?.chat?.id || '');
-  // Only the owner may drive the bot; anyone else is ignored silently.
-  if (!chatId || chatId !== String(env.TG_ADMIN_CHAT)) return json({ ok: true });
+// ---------------------------------------------------------------- telegram UI
+//
+// The bot is menu-driven: every action is reachable by tapping, and typing a
+// command is only ever an optional shortcut. Two Telegram constraints shape the
+// design:
+//   - callback_data is capped at 64 BYTES, so payloads stay short. A device id
+//     is 32 chars, which fits alongside a short action prefix but leaves no
+//     room for extra fields — anything larger is kept in `pending_actions`.
+//   - a callback must be answered within ~10s or the client shows a stuck
+//     spinner, so answerCallbackQuery is always called first.
 
-  const text = String(msg?.text || '').trim();
-  const [cmd, ...args] = text.split(/\s+/);
-  const reply = async t => tg(env, t);
-
+async function tgCall(env, method, payload) {
+  if (!env.TG_BOT_TOKEN) return null;
   try {
-    if (cmd === '/start' || cmd === '/help') {
-      await reply(
-        '<b>أوامر البوت</b>\n' +
-        '/new &lt;device_id&gt; &lt;days&gt; — إنشاء كود (0 = غير محدود)\n' +
-        '/devices — آخر الأجهزة\n' +
-        '/device &lt;id&gt; — تفاصيل جهاز\n' +
-        '/expiring — اشتراكات تنتهي خلال 14 يوم\n' +
-        '/msg &lt;id|all&gt; &lt;نص&gt; — إرسال رسالة\n' +
-        '/set &lt;id|all&gt; &lt;key&gt; &lt;value&gt; — تعديل إعداد',
-      );
-    } else if (cmd === '/new') {
-      const [dev, d] = args;
-      if (!dev || d === undefined) { await reply('الاستخدام: /new &lt;device_id&gt; &lt;days&gt;'); return json({ ok: true }); }
-      const expiryDays = Number(d) === 0 ? 0 : todayDays() + Number(d);
-      const serial = await nextCloudSerial(env);
-      const code = await signCode(env.LICENSE_SECRET, dev.toLowerCase(), expiryDays, serial);
-      const expiry = expiryDays === 0 ? 'غير محدود' : daysToDate(expiryDays);
-      await env.DB.prepare(`INSERT INTO licenses (serial, device_id, code, expiry_days, issued_at, issued_by, note)
-        VALUES (?, ?, ?, ?, ?, 'bot', '')`)
-        .bind(serial, dev.toLowerCase(), code, expiryDays, new Date().toISOString()).run();
-      await reply(`✅ <b>كود التفعيل</b>\n\n<code>${code}</code>\n\nصالح حتى: ${expiry}\nرقم الإصدار: #${serial}`);
-    } else if (cmd === '/devices') {
-      const rows = await env.DB.prepare(
-        'SELECT device_id, shop_name, license_status, license_expiry, last_seen FROM devices ORDER BY last_seen DESC LIMIT 15',
-      ).all();
-      const list = (rows?.results || []).map(r =>
-        `• ${r.shop_name || '—'} — ${r.license_status || '?'} — ${r.license_expiry || '—'}\n  <code>${r.device_id}</code>`,
-      ).join('\n');
-      await reply(list ? `<b>الأجهزة</b>\n${list}` : 'لا توجد أجهزة بعد.');
-    } else if (cmd === '/expiring') {
-      const limit = daysToDate(todayDays() + 14);
-      const rows = await env.DB.prepare(
-        "SELECT shop_name, device_id, license_expiry FROM devices WHERE license_expiry IS NOT NULL AND license_expiry <= ? ORDER BY license_expiry",
-      ).bind(limit).all();
-      const list = (rows?.results || []).map(r =>
-        `• ${r.shop_name || '—'} — ينتهي ${r.license_expiry}\n  <code>${r.device_id}</code>`).join('\n');
-      await reply(list ? `<b>اشتراكات تقترب من الانتهاء</b>\n${list}` : 'لا توجد اشتراكات تنتهي قريباً ✅');
-    } else if (cmd === '/msg') {
-      const target = args.shift();
-      const bodyText = args.join(' ');
-      if (!target || !bodyText) { await reply('الاستخدام: /msg &lt;id|all&gt; &lt;نص&gt;'); return json({ ok: true }); }
+    const res = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+const send = (env, text, keyboard) =>
+  tgCall(env, 'sendMessage', {
+    chat_id: env.TG_ADMIN_CHAT, text, parse_mode: 'HTML',
+    reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined,
+  });
+
+/** Replaces the current message instead of stacking new ones — feels like an app. */
+const edit = (env, messageId, text, keyboard) =>
+  tgCall(env, 'editMessageText', {
+    chat_id: env.TG_ADMIN_CHAT, message_id: messageId, text, parse_mode: 'HTML',
+    reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined,
+  });
+
+/** Dismisses the button's loading spinner; must happen within ~10 seconds. */
+const answer = (env, id, text) =>
+  tgCall(env, 'answerCallbackQuery', { callback_query_id: id, text: text || undefined });
+
+/**
+ * Multi-step flows (e.g. "new code" -> ask device -> ask duration) need to
+ * remember what the next typed message means. One row per chat is enough
+ * because a single admin drives the bot.
+ */
+async function setPending(env, action, data) {
+  await env.DB.prepare(`
+    INSERT INTO pending_actions (chat_id, action, data, created_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(chat_id) DO UPDATE SET action = excluded.action,
+      data = excluded.data, created_at = excluded.created_at
+  `).bind(String(env.TG_ADMIN_CHAT), action, JSON.stringify(data || {}), new Date().toISOString()).run();
+}
+
+async function getPending(env) {
+  const row = await env.DB.prepare('SELECT action, data, created_at FROM pending_actions WHERE chat_id = ?')
+    .bind(String(env.TG_ADMIN_CHAT)).first();
+  if (!row) return null;
+  // Expire stale prompts so a forgotten flow does not swallow a later command.
+  if (Date.now() - new Date(row.created_at).getTime() > 10 * 60 * 1000) {
+    await clearPending(env);
+    return null;
+  }
+  return { action: row.action, data: JSON.parse(row.data || '{}') };
+}
+
+const clearPending = env =>
+  env.DB.prepare('DELETE FROM pending_actions WHERE chat_id = ?').bind(String(env.TG_ADMIN_CHAT)).run();
+
+// ---------------------------------------------------------------- screens
+
+const MAIN_MENU = [
+  [{ text: '🔑 إنشاء كود تفعيل', callback_data: 'new' }],
+  [{ text: '📱 الأجهزة', callback_data: 'devs:0' },
+   { text: '⏰ تنتهي قريباً', callback_data: 'exp' }],
+  [{ text: '💬 رسالة للجميع', callback_data: 'msgall' },
+   { text: '⚙️ إعداد عام', callback_data: 'setall' }],
+  [{ text: '📊 إحصائيات', callback_data: 'stats' },
+   { text: '❓ مساعدة', callback_data: 'help' }],
+];
+
+const backTo = target => [[{ text: '⬅️ رجوع', callback_data: target }]];
+
+async function screenMain(env, messageId) {
+  const text = '<b>🎛 لوحة التحكم</b>\n\nاختر ما تريد:';
+  return messageId ? edit(env, messageId, text, MAIN_MENU) : send(env, text, MAIN_MENU);
+}
+
+/** Device list, 8 per page — keeps the keyboard under Telegram's button cap. */
+async function screenDevices(env, messageId, page = 0) {
+  const perPage = 8;
+  const total = (await env.DB.prepare('SELECT COUNT(*) AS n FROM devices').first())?.n ?? 0;
+  const rows = await env.DB.prepare(
+    'SELECT device_id, shop_name, license_status, license_expiry FROM devices ORDER BY last_seen DESC LIMIT ? OFFSET ?',
+  ).bind(perPage, page * perPage).all();
+  const list = rows?.results || [];
+
+  if (!list.length) {
+    return edit(env, messageId, 'لا توجد أجهزة مسجّلة بعد.\n\nستظهر الأجهزة تلقائياً عند تشغيل التطبيق عند العميل.', backTo('main'));
+  }
+
+  const icon = s => s === 'active' ? '🟢' : s === 'trial' ? '🔵' : s === 'expired' ? '🔴' : '⚪';
+  const keyboard = list.map(d => [{
+    text: `${icon(d.license_status)} ${(d.shop_name || 'بلا اسم').slice(0, 28)}`,
+    callback_data: `d:${d.device_id}`,     // 2 + 32 = 34 bytes, well inside the limit
+  }]);
+
+  const pages = Math.ceil(total / perPage);
+  const nav = [];
+  if (page > 0) nav.push({ text: '◀️ السابق', callback_data: `devs:${page - 1}` });
+  if (page < pages - 1) nav.push({ text: 'التالي ▶️', callback_data: `devs:${page + 1}` });
+  if (nav.length) keyboard.push(nav);
+  keyboard.push([{ text: '⬅️ القائمة الرئيسية', callback_data: 'main' }]);
+
+  const text = `<b>📱 الأجهزة</b> (${total})\n` +
+    `صفحة ${page + 1} من ${pages}\n\n🟢 مفعّل · 🔵 تجريبي · 🔴 منتهٍ · ⚪ غير معروف`;
+  return edit(env, messageId, text, keyboard);
+}
+
+async function screenDevice(env, messageId, deviceId) {
+  const d = await env.DB.prepare('SELECT * FROM devices WHERE device_id = ?').bind(deviceId).first();
+  if (!d) return edit(env, messageId, 'الجهاز غير موجود.', backTo('devs:0'));
+
+  const codes = await env.DB.prepare(
+    'SELECT code, expiry_days, issued_at FROM licenses WHERE device_id = ? ORDER BY serial DESC LIMIT 3',
+  ).bind(deviceId).all();
+
+  const label = s => s === 'active' ? '🟢 مفعّل' : s === 'trial' ? '🔵 تجريبي'
+    : s === 'expired' ? '🔴 منتهٍ' : '⚪ غير معروف';
+
+  let text = `<b>${d.shop_name || 'بلا اسم'}</b>\n\n` +
+    `الحالة: ${label(d.license_status)}\n` +
+    `ينتهي: ${d.license_expiry || '—'}\n` +
+    `الإصدار: ${d.app_version || '—'}\n` +
+    `النظام: ${d.platform || '—'}\n` +
+    `أول ظهور: ${(d.first_seen || '').slice(0, 10) || '—'}\n` +
+    `آخر ظهور: ${(d.last_seen || '').slice(0, 16).replace('T', ' ') || '—'}\n` +
+    `عدد الاتصالات: ${d.seen_count ?? 0}\n\n` +
+    `<code>${d.device_id}</code>`;
+
+  const history = codes?.results || [];
+  if (history.length) {
+    text += '\n\n<b>آخر الأكواد:</b>';
+    for (const c of history) {
+      const exp = c.expiry_days === 0 ? 'غير محدود' : daysToDate(c.expiry_days);
+      text += `\n• <code>${c.code}</code> — ${exp}`;
+    }
+  }
+
+  const keyboard = [
+    [{ text: '🔑 كود جديد', callback_data: `nd:${deviceId}` }],
+    [{ text: '💬 رسالة لهذا العميل', callback_data: `md:${deviceId}` }],
+    [{ text: '⚙️ إعداد خاص به', callback_data: `sd:${deviceId}` }],
+    [{ text: '⬅️ الأجهزة', callback_data: 'devs:0' },
+     { text: '🏠 الرئيسية', callback_data: 'main' }],
+  ];
+  return edit(env, messageId, text, keyboard);
+}
+
+/** Duration picker — avoids making the admin type a number. */
+function durationKeyboard(prefix) {
+  return [
+    [{ text: 'شهر', callback_data: `${prefix}:30` },
+     { text: '3 شهور', callback_data: `${prefix}:90` },
+     { text: '6 شهور', callback_data: `${prefix}:180` }],
+    [{ text: 'سنة', callback_data: `${prefix}:365` },
+     { text: 'سنتان', callback_data: `${prefix}:730` }],
+    [{ text: '♾ غير محدود', callback_data: `${prefix}:0` }],
+    [{ text: '✏️ مدة أخرى', callback_data: `${prefix}:x` }],
+    [{ text: '⬅️ إلغاء', callback_data: 'main' }],
+  ];
+}
+
+async function issueAndShow(env, messageId, deviceId, days) {
+  const expiryDays = days === 0 ? 0 : todayDays() + days;
+  if (expiryDays > 0xffff) return edit(env, messageId, 'المدة طويلة جداً.', backTo('main'));
+
+  const serial = await nextCloudSerial(env);
+  const code = await signCode(env.LICENSE_SECRET, deviceId, expiryDays, serial);
+  const expiry = expiryDays === 0 ? 'غير محدود' : daysToDate(expiryDays);
+
+  await env.DB.prepare(`INSERT INTO licenses (serial, device_id, code, expiry_days, issued_at, issued_by, note)
+    VALUES (?, ?, ?, ?, ?, 'bot', '')`)
+    .bind(serial, deviceId, code, expiryDays, new Date().toISOString()).run();
+
+  await clearPending(env);
+
+  // Sent as a separate message so the admin can forward it to the customer
+  // as-is, without the surrounding dashboard chrome.
+  await send(env,
+    `كود التفعيل الخاص بك:\n\n<code>${code}</code>\n\n` +
+    `صالح حتى: ${expiry}\n` +
+    `انسخ الكود والصقه في شاشة التفعيل ثم اضغط "تفعيل".`);
+
+  return edit(env,
+    messageId,
+    `✅ <b>تم إنشاء الكود</b>\n\n<code>${code}</code>\n\n` +
+    `الجهاز: <code>${deviceId}</code>\n` +
+    `صالح حتى: ${expiry}\nرقم الإصدار: #${serial}\n\n` +
+    `👆 الرسالة التالية جاهزة لإعادة توجيهها للعميل.`,
+    [[{ text: '📱 الأجهزة', callback_data: 'devs:0' },
+      { text: '🏠 الرئيسية', callback_data: 'main' }]],
+  );
+}
+
+/** Common presentation keys, so the admin rarely has to remember key names. */
+const CONFIG_KEYS = [
+  ['dev_phone', 'رقم الهاتف'],
+  ['dev_whatsapp', 'واتساب'],
+  ['dev_telegram', 'تليجرام'],
+  ['dev_email', 'الإيميل'],
+  ['payment_info', 'معلومات الدفع'],
+  ['subscription_note', 'ملاحظة الاشتراك'],
+  ['support_hours', 'مواعيد الدعم'],
+  ['app_name', 'اسم البرنامج'],
+  ['custom_content', 'معلومات إضافية'],
+];
+
+function configKeyboard(target) {
+  const rows = CONFIG_KEYS.map(([k, label]) => [{ text: label, callback_data: `k:${target}:${k}` }]);
+  rows.push([{ text: '⬅️ رجوع', callback_data: target === 'all' ? 'main' : `d:${target}` }]);
+  return rows;
+}
+
+async function screenStats(env, messageId) {
+  const g = async q => (await env.DB.prepare(q).first())?.n ?? 0;
+  const total = await g('SELECT COUNT(*) AS n FROM devices');
+  const active = await g("SELECT COUNT(*) AS n FROM devices WHERE license_status = 'active'");
+  const trial = await g("SELECT COUNT(*) AS n FROM devices WHERE license_status = 'trial'");
+  const expired = await g("SELECT COUNT(*) AS n FROM devices WHERE license_status = 'expired'");
+  const codes = await g('SELECT COUNT(*) AS n FROM licenses');
+  const week = daysToDate(todayDays() + 7);
+  const soon = (await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM devices WHERE license_expiry IS NOT NULL AND license_expiry <= ?',
+  ).bind(week).first())?.n ?? 0;
+
+  return edit(env, messageId,
+    `<b>📊 إحصائيات</b>\n\n` +
+    `إجمالي الأجهزة: ${total}\n` +
+    `🟢 مفعّل: ${active}\n🔵 تجريبي: ${trial}\n🔴 منتهٍ: ${expired}\n\n` +
+    `⏰ ينتهي خلال أسبوع: ${soon}\n🔑 أكواد صدرت: ${codes}`,
+    backTo('main'));
+}
+
+async function screenExpiring(env, messageId) {
+  const limit = daysToDate(todayDays() + 14);
+  const rows = await env.DB.prepare(
+    'SELECT device_id, shop_name, license_expiry FROM devices WHERE license_expiry IS NOT NULL AND license_expiry <= ? ORDER BY license_expiry LIMIT 10',
+  ).bind(limit).all();
+  const list = rows?.results || [];
+  if (!list.length) {
+    return edit(env, messageId, '✅ لا توجد اشتراكات تنتهي خلال 14 يوماً.', backTo('main'));
+  }
+  const keyboard = list.map(d => [{
+    text: `${d.shop_name || 'بلا اسم'} — ${d.license_expiry}`.slice(0, 40),
+    callback_data: `d:${d.device_id}`,
+  }]);
+  keyboard.push([{ text: '🏠 الرئيسية', callback_data: 'main' }]);
+  return edit(env, messageId, `<b>⏰ تنتهي خلال 14 يوماً</b> (${list.length})\n\nاضغط على أي عميل للتفاصيل:`, keyboard);
+}
+
+// ---------------------------------------------------------------- dispatch
+
+async function handleCallback(env, cb) {
+  const data = String(cb.data || '');
+  const messageId = cb.message?.message_id;
+  await answer(env, cb.id);           // dismiss the spinner first
+
+  if (data === 'main') { await clearPending(env); return screenMain(env, messageId); }
+  if (data === 'stats') return screenStats(env, messageId);
+  if (data === 'exp') return screenExpiring(env, messageId);
+
+  if (data === 'help') {
+    return edit(env, messageId,
+      '<b>❓ كيف تستخدم البوت</b>\n\n' +
+      '<b>لإنشاء كود:</b>\n' +
+      '1. اضغط "إنشاء كود تفعيل"\n2. الصق معرّف الجهاز\n3. اختر المدة\n\n' +
+      '<b>أو من الأجهزة:</b>\n' +
+      'اضغط "الأجهزة" ← اختر عميلاً ← "كود جديد"\n\n' +
+      '<b>أوامر مختصرة (اختيارية):</b>\n' +
+      '<code>/new &lt;id&gt; &lt;days&gt;</code>\n<code>/devices</code>\n<code>/expiring</code>\n\n' +
+      'الأجهزة تظهر تلقائياً عند تشغيل التطبيق عند العميل.',
+      backTo('main'));
+  }
+
+  if (data.startsWith('devs:')) return screenDevices(env, messageId, parseInt(data.slice(5), 10) || 0);
+  if (data.startsWith('d:')) return screenDevice(env, messageId, data.slice(2));
+
+  // --- issue a code, device not chosen yet
+  if (data === 'new') {
+    await setPending(env, 'await_device', {});
+    return edit(env, messageId,
+      '<b>🔑 إنشاء كود تفعيل</b>\n\nالصق <b>معرّف الجهاز</b> الذي أرسله العميل:',
+      backTo('main'));
+  }
+
+  // --- issue a code for a known device
+  if (data.startsWith('nd:')) {
+    const deviceId = data.slice(3);
+    await setPending(env, 'await_duration', { deviceId });
+    return edit(env, messageId,
+      `<b>🔑 كود جديد</b>\n\nالجهاز: <code>${deviceId}</code>\n\nاختر المدة:`,
+      durationKeyboard('dur'));
+  }
+
+  if (data.startsWith('dur:')) {
+    const choice = data.slice(4);
+    const pending = await getPending(env);
+    const deviceId = pending?.data?.deviceId;
+    if (!deviceId) return edit(env, messageId, 'انتهت الجلسة. ابدأ من جديد.', backTo('main'));
+    if (choice === 'x') {
+      await setPending(env, 'await_custom_days', { deviceId });
+      return edit(env, messageId, 'اكتب عدد الأيام (رقم فقط، 0 = غير محدود):', backTo('main'));
+    }
+    return issueAndShow(env, messageId, deviceId, parseInt(choice, 10));
+  }
+
+  // --- messaging
+  if (data === 'msgall') {
+    await setPending(env, 'await_msg', { target: 'all' });
+    return edit(env, messageId,
+      '<b>💬 رسالة للجميع</b>\n\nاكتب نص الرسالة التي ستظهر لكل العملاء:', backTo('main'));
+  }
+  if (data.startsWith('md:')) {
+    const deviceId = data.slice(3);
+    await setPending(env, 'await_msg', { target: deviceId });
+    return edit(env, messageId,
+      `<b>💬 رسالة خاصة</b>\n\nإلى: <code>${deviceId}</code>\n\nاكتب نص الرسالة:`,
+      [[{ text: '⬅️ رجوع', callback_data: `d:${deviceId}` }]]);
+  }
+
+  // --- remote settings
+  if (data === 'setall') {
+    return edit(env, messageId, '<b>⚙️ إعداد عام لكل العملاء</b>\n\nاختر ما تريد تغييره:', configKeyboard('all'));
+  }
+  if (data.startsWith('sd:')) {
+    const deviceId = data.slice(3);
+    return edit(env, messageId,
+      `<b>⚙️ إعداد خاص</b>\n\nالجهاز: <code>${deviceId}</code>\n\nاختر ما تريد تغييره:`,
+      configKeyboard(deviceId));
+  }
+  if (data.startsWith('k:')) {
+    const [, target, key] = data.split(':');
+    await setPending(env, 'await_config', { target, key });
+    const label = CONFIG_KEYS.find(([k]) => k === key)?.[1] || key;
+    return edit(env, messageId,
+      `<b>⚙️ ${label}</b>\n\n${target === 'all' ? 'لكل العملاء' : `للجهاز <code>${target}</code>`}\n\n` +
+      `اكتب القيمة الجديدة (أو <code>-</code> لإلغاء التخصيص):`,
+      backTo(target === 'all' ? 'setall' : `sd:${target}`));
+  }
+
+  return screenMain(env, messageId);
+}
+
+/** Handles a typed message: either it answers a pending prompt, or it is a command. */
+async function handleText(env, text) {
+  const trimmed = text.trim();
+
+  // A slash command always wins over a pending prompt. Without this, asking for
+  // a device id and then typing /start stored "/start" as the device id, and
+  // there was no way out of a flow except waiting for it to expire.
+  if (trimmed.startsWith('/')) {
+    await clearPending(env);
+    return handleCommand(env, trimmed);
+  }
+
+  const pending = await getPending(env);
+
+  if (pending) {
+    const value = text.trim();
+
+    if (pending.action === 'await_device') {
+      const deviceId = value.toLowerCase();
+      if (deviceId.length < 8) return send(env, '⚠️ معرّف الجهاز غير صالح. حاول مرة أخرى أو اضغط /start.');
+      await setPending(env, 'await_duration', { deviceId });
+      return send(env, `الجهاز: <code>${deviceId}</code>\n\nاختر المدة:`, durationKeyboard('dur'));
+    }
+
+    if (pending.action === 'await_custom_days') {
+      const days = parseInt(value, 10);
+      if (!Number.isFinite(days) || days < 0) return send(env, '⚠️ اكتب رقماً صحيحاً.');
+      const sent = await send(env, '⏳ جاري الإنشاء...');
+      return issueAndShow(env, sent?.result?.message_id, pending.data.deviceId, days);
+    }
+
+    if (pending.action === 'await_msg') {
       await env.DB.prepare(`INSERT INTO messages (target, title, body, severity, created_at)
         VALUES (?, 'رسالة من المطور', ?, 'info', ?)`)
-        .bind(target === 'all' ? 'all' : target.toLowerCase(), bodyText, new Date().toISOString()).run();
-      await reply('✅ تم جدولة الرسالة — ستظهر عند العميل في المزامنة القادمة.');
-    } else if (cmd === '/set') {
-      const target = args.shift();
-      const key = args.shift();
-      const value = args.join(' ');
-      if (!target || !key) { await reply('الاستخدام: /set &lt;id|all&gt; &lt;key&gt; &lt;value&gt;'); return json({ ok: true }); }
+        .bind(pending.data.target, value, new Date().toISOString()).run();
+      await clearPending(env);
+      return send(env,
+        `✅ تم جدولة الرسالة${pending.data.target === 'all' ? ' لكل العملاء' : ''}.\n` +
+        `ستظهر عند العميل في المزامنة القادمة.`, MAIN_MENU);
+    }
+
+    if (pending.action === 'await_config') {
+      const { target, key } = pending.data;
+      const stored = value === '-' ? '' : value;
       await env.DB.prepare(`INSERT INTO remote_config (key, target, value, updated_at) VALUES (?, ?, ?, ?)
         ON CONFLICT(key, target) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
-        .bind(key, target === 'all' ? 'all' : target.toLowerCase(), value, new Date().toISOString()).run();
-      await reply(`✅ تم ضبط <code>${key}</code>\nملاحظة: التطبيق يقبل فقط المفاتيح المسموح بها في قائمته الداخلية.`);
+        .bind(key, target, stored, new Date().toISOString()).run();
+      await clearPending(env);
+      return send(env,
+        `✅ تم ضبط <code>${key}</code>\n\n` +
+        (stored ? `القيمة: ${stored}` : 'تم إلغاء التخصيص — سيعود للقيمة المحلية.') +
+        `\n\nيصل التغيير عند المزامنة القادمة.`, MAIN_MENU);
     }
+  }
+
+  // Not a command and no prompt pending — fall through to the shortcuts below.
+  return handleCommand(env, trimmed);
+}
+
+/** Typed shortcuts. The menu covers everything; these just save taps. */
+async function handleCommand(env, text) {
+  const [cmd, ...args] = text.split(/\s+/);
+
+  if (cmd === '/start' || cmd === '/menu' || cmd === '/help') {
+    return screenMain(env);
+  }
+  if (cmd === '/devices') { const m = await send(env, '...'); return screenDevices(env, m?.result?.message_id, 0); }
+  if (cmd === '/expiring') { const m = await send(env, '...'); return screenExpiring(env, m?.result?.message_id); }
+  if (cmd === '/stats') { const m = await send(env, '...'); return screenStats(env, m?.result?.message_id); }
+  if (cmd === '/new') {
+    const [dev, d] = args;
+    if (!dev) { await setPending(env, 'await_device', {}); return send(env, 'الصق معرّف الجهاز:'); }
+    if (d === undefined) {
+      await setPending(env, 'await_duration', { deviceId: dev.toLowerCase() });
+      return send(env, `الجهاز: <code>${dev}</code>\n\nاختر المدة:`, durationKeyboard('dur'));
+    }
+    const m = await send(env, '⏳ جاري الإنشاء...');
+    return issueAndShow(env, m?.result?.message_id, dev.toLowerCase(), parseInt(d, 10));
+  }
+
+  // A bare 32-char hex string is almost certainly a device id pasted directly.
+  if (/^[a-f0-9]{16,64}$/i.test(text.trim())) {
+    const deviceId = text.trim().toLowerCase();
+    const known = await env.DB.prepare('SELECT device_id FROM devices WHERE device_id = ?').bind(deviceId).first();
+    if (known) { const m = await send(env, '...'); return screenDevice(env, m?.result?.message_id, deviceId); }
+    await setPending(env, 'await_duration', { deviceId });
+    return send(env, `جهاز جديد: <code>${deviceId}</code>\n\nاختر المدة:`, durationKeyboard('dur'));
+  }
+
+  return screenMain(env);
+}
+
+async function handleTelegram(request, env) {
+  const update = await request.json().catch(() => null);
+
+  // Only the owner may drive the bot; everyone else is ignored silently so the
+  // bot does not even reveal that it exists.
+  const cb = update?.callback_query;
+  const msg = update?.message;
+  const chatId = String(cb?.from?.id || msg?.chat?.id || '');
+  if (!chatId || chatId !== String(env.TG_ADMIN_CHAT)) return json({ ok: true });
+
+  try {
+    if (cb) await handleCallback(env, cb);
+    else if (msg?.text) await handleText(env, String(msg.text));
   } catch (err) {
-    await reply(`⚠️ خطأ: ${err.message}`);
+    await send(env, `⚠️ خطأ: ${err.message}`);
   }
   return json({ ok: true });
 }

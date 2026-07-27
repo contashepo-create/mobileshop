@@ -7,9 +7,12 @@ compatibility_date = "2026-01-01"
 #   npx wrangler d1 create mobileshop
 # then paste the printed database_id below.
 [[d1_databases]]
+# NOTE: keep this as "DB". `wrangler d1 create` suggests naming the binding
+# after the database, but worker.js reads it as `env.DB`, so renaming it here
+# would make every query fail with "Cannot read properties of undefined".
 binding = "DB"
 database_name = "mobileshop"
-database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
+database_id = "95a44a3e-923b-4df6-9bb7-645dd633946d"
 
 # Daily sweep at 09:00 UTC that warns about subscriptions expiring within a week.
 [triggers]

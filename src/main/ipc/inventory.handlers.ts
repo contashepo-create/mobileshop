@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerInventoryHandlers() {
   // ===== WAREHOUSES =====
@@ -333,7 +334,7 @@ export function registerInventoryHandlers() {
     userId: number;
   }) => {
     const db = getDb();
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const transferNumber = nextDocNumber(db, 'warehouse_transfers', 'TransferNumber', 'TR', dateStr);
 
     // Check sufficient stock before transfer (unless negative stock allowed)

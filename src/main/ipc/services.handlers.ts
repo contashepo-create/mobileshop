@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerServicesHandlers() {
   // List service sales
@@ -43,7 +44,7 @@ export function registerServicesHandlers() {
     const db = getDb();
 
     try {
-      const dateStr = new Date().toISOString().split('T')[0];
+      const dateStr = businessToday();
       const serviceNumber = nextDocNumber(db, 'service_sales', 'ServiceNumber', 'SRV', dateStr);
 
       const remaining = data.ChargeAmount - data.PaidAmount;

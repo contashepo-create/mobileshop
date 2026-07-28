@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerSettlementHandlers() {
   // Apply settlement - actually update balances in DB
@@ -18,7 +19,7 @@ export function registerSettlementHandlers() {
     fiscalYearId: number;
   }) => {
     const db = getDb();
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const settlementNumber = nextDocNumber(db, 'settlements', 'SettlementNumber', 'SET', dateStr);
 
     // Settlement variances must hit the income statement. Writing the new

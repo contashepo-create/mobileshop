@@ -439,8 +439,3 @@ export function param(prefs: Prefs, ruleId: string, key: string): number {
   const v = ruleState(prefs, ruleId).params[key];
   return Number.isFinite(v) ? v : def;
 }
-
-/** ISO date (yyyy-mm-dd) N days before `now`, for SQL comparisons. */
-export function daysAgoIso(now: Date, days: number): string {
-  return new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10);
-}

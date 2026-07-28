@@ -42,9 +42,13 @@ const PUBLIC_CHANNELS = new Set<string>([
   'settings:get',
   'dev:login',
   'dev:logout',
+  // Diagnosing a clock problem must work while the app is locked out — that is
+  // precisely the state the owner needs explained. It only reports dates.
+  'license:clockDiagnostics',
   // Developer-console channels: gated by devToken inside their own handlers.
   'license:generateCode',
   'license:deactivate',
+  'license:repairClockState',
   'users:resetByDev',
   'users:listBasic',
 ]);

@@ -29,7 +29,7 @@ function check(name, ok, detail = '') {
 const P = await import('../src/main/notifications/prefs.ts');
 const {
   NOTIFICATION_RULES, normalisePrefs, defaultPrefs, evaluateSuppression,
-  isQuietHour, param, ruleState, daysAgoIso, PRIORITY_ORDER,
+  isQuietHour, param, ruleState, PRIORITY_ORDER,
 } = P;
 
 console.log('='.repeat(72));
@@ -353,12 +353,24 @@ console.log('\n[13] Priority escalation never downgrades the owner’s choice');
 }
 
 // ---------------------------------------------------------------- 14
-console.log('\n[14] Date helper is timezone-stable');
+console.log('\n[14] Alert cutoffs use the shop’s calendar, not UTC');
 {
-  const now = new Date('2026-07-28T12:00:00Z');
-  check('30 days ago is correct', daysAgoIso(now, 30) === '2026-06-28', daysAgoIso(now, 30));
-  check('output is a plain ISO date', /^\d{4}-\d{2}-\d{2}$/.test(daysAgoIso(now, 7)));
-  check('zero days is today', daysAgoIso(now, 0) === '2026-07-28');
+  // Date arithmetic deliberately lives in shared/businessDate.ts so alert
+  // cutoffs and invoice dates can never drift apart. prefs.ts stays pure.
+  const prefsSrc = R('src/main/notifications/prefs.ts');
+  check('prefs.ts holds no date arithmetic of its own',
+    !prefsSrc.includes('86_400_000') && !prefsSrc.includes('toISOString'));
+  check('prefs.ts has no imports at all (pure policy module)',
+    !/^import /m.test(prefsSrc));
+
+  const engine = R('src/main/ipc/notifications.handlers.ts');
+  check('the engine uses the shared local-date helper',
+    engine.includes("localDateDaysAgo") &&
+    engine.includes("from '../../shared/businessDate'"));
+  check('the engine no longer builds "today" from UTC',
+    !engine.includes("now.toISOString().split('T')[0]"));
+  check('every cutoff goes through the shared helper',
+    (engine.match(/localDateDaysAgo\(/g) || []).length === 4);
 }
 
 console.log('\n' + '='.repeat(72));

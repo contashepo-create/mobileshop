@@ -1,11 +1,14 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerReportsHandlers() {
   // Dashboard stats
   ipcMain.handle('reports:dashboard', async () => {
     const db = getDb();
-    const today = new Date().toISOString().split('T')[0];
+    // Local calendar day, matching how invoices are dated. Using the UTC date
+    // made "today's sales" show zero for the first hours after midnight.
+    const today = businessToday();
 
     const todaySales = db.prepare("SELECT COALESCE(SUM(PaidAmount),0) as total FROM sales WHERE Date = ? AND IsVoided = 0").get(today) as any;
     const pendingMaintenance = db.prepare("SELECT COUNT(*) as count FROM maintenance_tickets WHERE Status NOT IN ('delivered','cancelled','returned')").get() as any;
@@ -15,7 +18,7 @@ export function registerReportsHandlers() {
     // Monthly sales chart (last 6 months)
     const monthlySales = db.prepare(`
       SELECT strftime('%Y-%m', Date) as month, COALESCE(SUM(TotalAmount),0) as total
-      FROM sales WHERE Date >= date('now','-6 months') AND IsVoided = 0
+      FROM sales WHERE Date >= date('now','localtime','-6 months') AND IsVoided = 0
       GROUP BY month ORDER BY month ASC
     `).all();
 

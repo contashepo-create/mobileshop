@@ -2,6 +2,7 @@ import { ipcMain, dialog, app } from 'electron';
 import { getDb, closeDb, getDbPath, setDbPath } from '../database/connection';
 import path from 'node:path';
 import fs from 'node:fs';
+import { businessToday } from '../../shared/businessDate';
 
 /**
  * Tables that must never be exported: they contain password hashes or
@@ -52,7 +53,7 @@ export function registerDatabaseHandlers() {
 
     const result = await dialog.showSaveDialog({
       title: `تصدير ${safeTable}`,
-      defaultPath: `${safeTable}_export_${new Date().toISOString().split('T')[0]}.csv`,
+      defaultPath: `${safeTable}_export_${businessToday()}.csv`,
       filters: [{ name: 'CSV', extensions: ['csv'] }],
     });
 
@@ -120,7 +121,7 @@ export function registerDatabaseHandlers() {
       fs.mkdirSync(backupDir, { recursive: true });
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = businessToday();
     const backupPath = path.join(backupDir, `auto_backup_${today}.db`);
 
     // Check if today's backup already exists
@@ -326,7 +327,7 @@ export function registerDatabaseHandlers() {
   ipcMain.handle('db:uploadToCloud', async (_event, config: { type: string; url: string; apiKey: string }) => {
     const db = getDb();
     const dbPath = db.name;
-    const today = new Date().toISOString().split('T')[0];
+    const today = businessToday();
     const backupPath = path.join(app.getPath('temp'), `mobile_shop_${today}.db`);
 
     try {

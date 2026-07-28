@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerTransfersHandlers() {
   // Transfer between cash accounts / payment methods
@@ -26,7 +27,7 @@ export function registerTransfersHandlers() {
         return { success: false, message: `الرصيد غير كافٍ. الرصيد المتاح: ${sourceBalance.toFixed(2)} والمطلوب: ${totalDeduction.toFixed(2)}` };
       }
 
-      const dateStr = new Date().toISOString().split('T')[0];
+      const dateStr = businessToday();
       const transferNumber = nextDocNumber(db, 'asset_transfers', 'TransferNumber', 'TRF', dateStr);
 
       // Amount received at destination (if cost from amount)

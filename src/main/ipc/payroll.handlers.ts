@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerPayrollHandlers() {
   // ===== SALARIES =====
@@ -112,7 +113,7 @@ export function registerPayrollHandlers() {
     const netSalary = salary.NetSalary;
     const paidAmount = data.PaidAmount !== undefined && data.PaidAmount > 0 ? Math.min(data.PaidAmount, netSalary) : netSalary;
     const status = paidAmount >= netSalary ? 'paid' : 'partial';
-    const paymentDate = new Date().toISOString().split('T')[0];
+    const paymentDate = businessToday();
 
     // Check sufficient balance before paying salary (unless negative cash allowed)
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
@@ -339,7 +340,7 @@ export function registerPayrollHandlers() {
     CashAccountID: number; userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
 
     // Check sufficient balance (unless negative cash allowed)
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
@@ -384,7 +385,7 @@ export function registerPayrollHandlers() {
     Notes?: string; userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
 
     let amount = data.Amount;
     if (data.Reason === 'damage' && data.DamagedItemID) {

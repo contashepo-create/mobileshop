@@ -2,6 +2,7 @@ import { ipcMain, dialog, app } from 'electron';
 import { getDb, closeDb, getDbPath } from '../database/connection';
 import path from 'node:path';
 import fs from 'node:fs';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerBackupHandlers() {
   // Manual backup
@@ -11,7 +12,7 @@ export function registerBackupHandlers() {
 
     const result = await dialog.showSaveDialog({
       title: 'حفظ نسخة احتياطية',
-      defaultPath: `mobile_shop_backup_${new Date().toISOString().split('T')[0]}.db`,
+      defaultPath: `mobile_shop_backup_${businessToday()}.db`,
       filters: [{ name: 'Database', extensions: ['db'] }],
     });
 

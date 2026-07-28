@@ -9,6 +9,7 @@ import { verifyDevToken } from '../security/devAuth';
 import {
   VERIFIER_SECRET, verifyCode, signCode, daysRemaining, expiryToDate, dateToExpiry,
 } from '../security/licenseCrypto';
+import { isImplausiblyFuture, businessToday } from '../../shared/businessDate';
 
 // ===== LICENSE SYSTEM =====
 // Encrypted license management - cannot be tampered with
@@ -18,6 +19,27 @@ const LICENSE_FILE = 'license.dat';
 const DEVICE_FILE = 'device.id';
 const TRIAL_FILE = 'trial.dat';
 const TRIAL_DAYS = 7;
+
+/**
+ * How far the clock may appear to move backwards before it is called tampering.
+ *
+ * `lastaccess.dat` stores an absolute UTC instant, so switching timezone or
+ * crossing a daylight-saving boundary does NOT move it — only the wall-clock
+ * label changes, never the epoch. Egypt's DST shift is one hour, and it cannot
+ * reach this check at all.
+ *
+ * The window still needs to be generous, because several harmless things do
+ * move the epoch a little:
+ *   - Windows re-syncing with an NTP server after the CMOS battery weakens;
+ *   - a laptop resuming from hibernation with a stale RTC;
+ *   - a virtual machine or dual-boot system correcting UTC-vs-local confusion,
+ *     which shifts the clock by exactly the UTC offset (2-3 hours in Egypt).
+ *
+ * Six hours absorbs all of those while still catching the only case that
+ * matters commercially — winding the date back days or months to extend a
+ * subscription, which also has to defeat the business-date check below.
+ */
+const CLOCK_DRIFT_TOLERANCE_MS = 6 * 60 * 60 * 1000;
 
 // Get or create unique device ID
 function getDeviceId(): string {
@@ -175,11 +197,16 @@ export function registerLicenseHandlers() {
         return { status: 'tampered', deviceId, message: 'تم تغيير تاريخ النظام' };
       }
 
-      // Date rollback — last access
+      // Date rollback — last access. Same tolerance as the licensed path so a
+      // trial user is not locked out by an NTP correction either.
       if (fs.existsSync(lastAccessPath)) {
         const lastAccess = new Date(fs.readFileSync(lastAccessPath, 'utf-8'));
-        if (now.getTime() < lastAccess.getTime() - (1000 * 60 * 60 * 2)) {
-          return { status: 'tampered', deviceId, message: 'تم تغيير تاريخ النظام للوراء' };
+        if (now.getTime() < lastAccess.getTime() - CLOCK_DRIFT_TOLERANCE_MS) {
+          return {
+            status: 'tampered', deviceId,
+            message: 'تم تغيير تاريخ النظام للوراء',
+            recoverable: true,
+          };
         }
       }
       fs.writeFileSync(lastAccessPath, now.toISOString(), 'utf-8');
@@ -240,16 +267,35 @@ export function registerLicenseHandlers() {
     if (fs.existsSync(lastAccessPath)) {
       const lastAccess = new Date(fs.readFileSync(lastAccessPath, 'utf-8'));
       if (!Number.isNaN(lastAccess.getTime()) &&
-          now.getTime() < lastAccess.getTime() - (1000 * 60 * 60 * 2)) {
-        return { status: 'tampered', deviceId, message: 'تم تغيير تاريخ النظام للوراء' };
+          now.getTime() < lastAccess.getTime() - CLOCK_DRIFT_TOLERANCE_MS) {
+        return {
+          status: 'tampered', deviceId,
+          message: 'تم تغيير تاريخ النظام للوراء',
+          recoverable: true,
+        };
       }
     }
 
+    // Business documents are dated with the shop's LOCAL calendar day, so the
+    // comparison must use the local day too. Comparing against
+    // `now.toISOString()` (UTC) declared tampering every night between midnight
+    // and 02:00 — exactly when a phone shop is still trading — because the
+    // day's own invoices were "in the future" relative to the UTC date.
+    //
+    // A tolerance is applied on top: a clock a few minutes fast, or a backup
+    // carried from a machine one timezone ahead, is a support call, not fraud.
+    // Real rollback (days or years) is still caught.
     const latestActivity = newestBusinessDate();
-    if (latestActivity && now.toISOString().slice(0, 10) < latestActivity) {
+    if (latestActivity && isImplausiblyFuture(latestActivity, now)) {
       return {
         status: 'tampered', deviceId,
         message: `تم تغيير تاريخ النظام - يوجد نشاط مسجّل بتاريخ ${latestActivity}`,
+        // Told to the UI so it can offer the recovery path instead of a dead
+        // end: this state is reachable by accident (a dead CMOS battery dates
+        // a sale years ahead), and the owner must not be locked out of their
+        // own accounts because of failing hardware.
+        recoverable: true,
+        latestActivity,
       };
     }
 
@@ -462,5 +508,88 @@ export function registerLicenseHandlers() {
   // Get device ID
   ipcMain.handle('license:getDeviceId', async () => {
     return getDeviceId();
+  });
+
+  /**
+   * Explains a clock problem in plain terms, and lets the owner recover.
+   *
+   * A "tampered" verdict is reachable WITHOUT any dishonesty: when a PC's CMOS
+   * battery dies the clock jumps to a default date, often years ahead. If the
+   * shop keeps selling, those invoices are written with that future date. Once
+   * the clock is corrected the app sees documents dated in the future and locks
+   * the whole application — the owner cannot even reach their own accounts to
+   * see what happened.
+   *
+   * Refusing to provide a way out would punish a hardware fault. This handler
+   * reports exactly which records look wrong so the situation is explainable,
+   * and `license:repairClockState` clears the stale marker afterwards.
+   */
+  ipcMain.handle('license:clockDiagnostics', async () => {
+    const db = getDb();
+    const now = new Date();
+    const today = businessToday(now);
+    const lastAccessPath = path.join(app.getPath('userData'), 'lastaccess.dat');
+
+    let lastAccess: string | null = null;
+    try {
+      if (fs.existsSync(lastAccessPath)) {
+        lastAccess = fs.readFileSync(lastAccessPath, 'utf-8').trim();
+      }
+    } catch { /* unreadable — treated as absent */ }
+
+    // Per-table breakdown so the owner can find and correct the bad documents.
+    const tables = [
+      ['sales', 'فواتير البيع'],
+      ['purchases', 'فواتير الشراء'],
+      ['vouchers', 'السندات'],
+      ['maintenance_tickets', 'تذاكر الصيانة'],
+    ] as const;
+
+    const future: Array<{ table: string; label: string; count: number; newest: string }> = [];
+    for (const [table, label] of tables) {
+      try {
+        const row = db.prepare(
+          `SELECT COUNT(*) AS n, MAX(Date) AS newest FROM ${table} WHERE Date > ?`,
+        ).get(today) as any;
+        if (row?.n > 0) {
+          future.push({ table, label, count: row.n, newest: row.newest });
+        }
+      } catch { /* table missing in an old database */ }
+    }
+
+    return {
+      today,
+      systemTime: now.toISOString(),
+      timezoneOffsetMinutes: -now.getTimezoneOffset(),
+      lastAccess,
+      futureRecords: future,
+      totalFuture: future.reduce((s, f) => s + f.count, 0),
+    };
+  });
+
+  /**
+   * Clears the stale clock markers so the app can start again.
+   *
+   * Deliberately does NOT touch the licence file or the business data: it only
+   * removes `lastaccess.dat`, which is a cache of "when was I last opened".
+   * The subscription's own expiry is signed inside the activation code and is
+   * unaffected, so this cannot be used to extend a subscription — the worst it
+   * can do is forget one rollback signal, while the business-date check (which
+   * reads the shop's real invoices) stays in force.
+   */
+  ipcMain.handle('license:repairClockState', async (_event, data: { devToken: string }) => {
+    if (!verifyDevToken(data?.devToken)) {
+      return { success: false, message: 'جلسة المطور غير صالحة - سجّل الدخول مرة أخرى' };
+    }
+    const lastAccessPath = path.join(app.getPath('userData'), 'lastaccess.dat');
+    try {
+      if (fs.existsSync(lastAccessPath)) fs.unlinkSync(lastAccessPath);
+      return {
+        success: true,
+        message: 'تم مسح سجل آخر تشغيل. أعد تشغيل البرنامج بعد ضبط تاريخ الجهاز.',
+      };
+    } catch (err: any) {
+      return { success: false, message: err.message };
+    }
   });
 }

@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerPurchasesHandlers() {
   ipcMain.handle('purchases:list', async (_event, filters?: { fromDate?: string; toDate?: string; supplierId?: number }) => {
@@ -63,7 +64,7 @@ export function registerPurchasesHandlers() {
       const paidAmount = data.PaidAmount || 0;
       const remaining = totalAmount - paidAmount;
 
-      const dateStr = new Date().toISOString().split('T')[0];
+      const dateStr = businessToday();
       const purchaseNumber = nextDocNumber(db, 'purchases', 'PurchaseNumber', 'PUR', dateStr);
 
       const status = remaining > 0 ? (paidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
@@ -193,7 +194,7 @@ export function registerPurchasesHandlers() {
   }) => {
     const db = getDb();
     const totalAmount = data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitCost), 0);
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const returnNumber = nextDocNumber(db, 'purchase_returns', 'ReturnNumber', 'PR', dateStr);
 
     // === SPLIT THE REFUND BETWEEN DEBT RELIEF AND CASH ===

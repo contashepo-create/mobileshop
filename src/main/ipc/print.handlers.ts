@@ -1,4 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron';
+import { businessToday } from '../../shared/businessDate';
 
 /**
  * SECURITY: every value that reaches the invoice HTML is attacker-controllable
@@ -273,7 +274,7 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       <div class="invoice-title">${esc(titles[type] || 'فاتورة')}</div>
       <div class="invoice-meta">
         <span>رقم: ${esc(invoiceData?.saleNumber || invoiceData?.purchaseNumber || invoiceData?.ticketNumber || invoiceData?.voucherNumber || '—')}</span>
-        <span>التاريخ: ${esc(invoiceData?.date || invoiceData?.Date || new Date().toISOString().split('T')[0])}</span>
+        <span>التاريخ: ${esc(invoiceData?.date || invoiceData?.Date || businessToday())}</span>
       </div>
       ${partyInfo}
       ${itemsHTML}

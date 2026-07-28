@@ -3,6 +3,7 @@ import { getDb } from '../database/connection';
 import { getCallerUserId } from '../security/ipcGuard';
 import { nextDocNumber } from '../database/docNumber';
 import { deductStock, restoreStock } from '../database/stock';
+import { businessToday } from '../../shared/businessDate';
 
 const statusLabels: Record<string, string> = {
   received: 'مستلم', inspecting: 'فحص', in_progress: 'قيد العمل',
@@ -101,7 +102,7 @@ export function registerMaintenanceHandlers() {
     MaintenanceType?: string; ReferenceTicketID?: number;
   }) => {
     const db = getDb();
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const ticketNumber = nextDocNumber(db, 'maintenance_tickets', 'TicketNumber', 'MNT', dateStr);
     const maintenanceType = data.MaintenanceType || 'normal';
 
@@ -394,7 +395,7 @@ export function registerMaintenanceHandlers() {
     const remaining = isWarranty ? 0 : (totalCost - paidAmount);
     const totalProfit = isWarranty ? (0 - totalCostOnUs) : (totalCost - totalCostOnUs);
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const deliveryNumber = nextDocNumber(db, 'maintenance_deliveries', 'DeliveryNumber', 'DLV', dateStr);
 
     // Sale number
@@ -605,7 +606,7 @@ export function registerMaintenanceHandlers() {
   }) => {
     const db = getDb();
     if (!data.Reason.trim()) return { success: false, message: 'سبب المرتجع مطلوب' };
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const returnNumber = nextDocNumber(db, 'maintenance_returns', 'ReturnNumber', 'MRT', dateStr);
 
     // Check sufficient cash for refund (unless negative cash allowed)

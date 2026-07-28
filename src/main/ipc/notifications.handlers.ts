@@ -2,8 +2,9 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import {
   NOTIFICATION_RULES, CATEGORY_LABELS, PRIORITY_ORDER, normalisePrefs, defaultPrefs,
-  evaluateSuppression, ruleState, param, daysAgoIso, type Prefs, type Priority,
+  evaluateSuppression, ruleState, param, type Prefs, type Priority,
 } from '../notifications/prefs';
+import { businessToday, localDateDaysAgo } from '../../shared/businessDate';
 
 function getNotifKey(notif: any): string {
   return `${notif.category}:${notif.action || ''}:${notif.actionId || ''}:${(notif.title || '').substring(0, 40)}`;
@@ -140,7 +141,9 @@ export function registerSmartNotificationsHandlers() {
     const prefs = loadPrefs();
     const now = new Date();
     const notifications: any[] = [];
-    const today = now.toISOString().split('T')[0];
+    // Local day: an overdue-maintenance check must use the same calendar the
+    // agreed delivery date was entered in.
+    const today = businessToday(now);
 
     const on = (id: string) => ruleState(prefs, id).enabled;
     const prio = (id: string): Priority => ruleState(prefs, id).priority;
@@ -162,7 +165,7 @@ export function registerSmartNotificationsHandlers() {
 
     // ====== CUSTOMERS ======
     if (on('customer_overdue')) {
-      const cutoff = daysAgoIso(now, num('customer_overdue', 'days'));
+      const cutoff = localDateDaysAgo(num('customer_overdue', 'days'), now);
       const minBalance = num('customer_overdue', 'minBalance');
       const overdueCustomers = db.prepare(`
         SELECT c.CustomerID, c.Name, c.Phone, c.Balance,
@@ -226,7 +229,7 @@ export function registerSmartNotificationsHandlers() {
 
     // ====== SUPPLIERS ======
     if (on('supplier_overdue')) {
-      const cutoff = daysAgoIso(now, num('supplier_overdue', 'days'));
+      const cutoff = localDateDaysAgo(num('supplier_overdue', 'days'), now);
       const minBalance = num('supplier_overdue', 'minBalance');
       const overdueSuppliers = db.prepare(`
         SELECT s.SupplierID, s.Name, s.Balance,
@@ -280,7 +283,7 @@ export function registerSmartNotificationsHandlers() {
     }
 
     if (on('maintenance_stale')) {
-      const cutoff = daysAgoIso(now, num('maintenance_stale', 'days'));
+      const cutoff = localDateDaysAgo(num('maintenance_stale', 'days'), now);
       const staleMaintenance = db.prepare(`
         SELECT t.TicketID, t.TicketNumber, t.CustomerName, t.DeviceModel, t.Status, t.Date
         FROM maintenance_tickets t
@@ -350,7 +353,7 @@ export function registerSmartNotificationsHandlers() {
     }
 
     if (on('inventory_slow_moving')) {
-      const cutoff = daysAgoIso(now, num('inventory_slow_moving', 'days'));
+      const cutoff = localDateDaysAgo(num('inventory_slow_moving', 'days'), now);
       // The stock filter is repeated in full rather than referencing the
       // TotalStock alias: SQLite tolerates an alias in WHERE, but the original
       // form silently excluded items with no stock row at all. Spelling the

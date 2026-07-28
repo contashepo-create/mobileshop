@@ -33,6 +33,7 @@ import { installIpcGuard } from './security/ipcGuard';
 import { registerRemoteHandlers } from './ipc/remote.handlers';
 import { startHeartbeat } from './remote/heartbeat';
 import { ensureRemoteTables } from './remote/remoteStore';
+import { businessToday } from '../shared/businessDate';
 
 /**
  * Device id and licence summary for the heartbeat, resolved lazily so this
@@ -207,7 +208,9 @@ async function autoBackup() {
     if (!fs.existsSync(backupDir)) {
       fs.mkdirSync(backupDir, { recursive: true });
     }
-    const today = new Date().toISOString().split('T')[0];
+    // Local day: the daily backup should be named for the day the shop just
+    // worked, not for a UTC day that ends at 02:00 Cairo time.
+    const today = businessToday();
     const backupPath = path.join(backupDir, `auto_backup_${today}.db`);
     // Only create if today's backup doesn't exist
     if (!fs.existsSync(backupPath)) {

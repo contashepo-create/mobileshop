@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { getCallerUserId } from '../security/ipcGuard';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerRentHandlers() {
   ipcMain.handle('rents:list', async () => {
@@ -58,7 +59,7 @@ export function registerRentHandlers() {
     const payment = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?').get(data.RentPaymentID) as any;
     if (!payment) return { success: false, message: 'الدفعة غير موجودة' };
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const isExpense = db.prepare('SELECT RentType FROM rents WHERE RentID = ?').get(payment.RentID) as any;
 
     // Check sufficient balance for expense payments (unless negative cash allowed)

@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerVouchersHandlers() {
   ipcMain.handle('vouchers:get', async (_event, voucherId: number) => {
@@ -38,7 +39,7 @@ export function registerVouchersHandlers() {
     userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const prefix = data.VoucherType === 'receipt' ? 'RCV' : 'PAY';
     const voucherNumber = nextDocNumber(db, 'vouchers', 'VoucherNumber', prefix, dateStr);
 

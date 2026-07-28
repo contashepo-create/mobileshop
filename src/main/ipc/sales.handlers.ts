@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, deductStock, restoreStock, totalStock } from '../database/stock';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerSalesHandlers() {
   // ===== SALES =====
@@ -96,7 +97,7 @@ export function registerSalesHandlers() {
       const paidAmount = data.PaidAmount || 0;
       const remaining = totalAmount - paidAmount; // positive = customer owes, negative = customer overpaid (credit)
 
-      const dateStr = new Date().toISOString().split('T')[0];
+      const dateStr = businessToday();
       const saleNumber = nextDocNumber(db, 'sales', 'SaleNumber', 'SAL', dateStr);
 
       const status = remaining > 0 ? (paidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
@@ -209,7 +210,7 @@ export function registerSalesHandlers() {
   }) => {
     const db = getDb();
     const totalAmount = data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitPrice), 0);
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
     const returnNumber = nextDocNumber(db, 'sale_returns', 'ReturnNumber', 'SR', dateStr);
 
     // === SPLIT THE REFUND BETWEEN DEBT RELIEF AND CASH ===

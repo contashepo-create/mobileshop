@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { getCallerUserId } from '../security/ipcGuard';
+import { businessToday } from '../../shared/businessDate';
 
 export function registerFiscalYearHandlers() {
   ipcMain.handle('fiscalYear:list', async () => {
@@ -27,7 +28,7 @@ export function registerFiscalYearHandlers() {
     if (!fy) return { success: false, message: 'السنة المالية غير موجودة' };
     if (fy.Status === 'closed') return { success: false, message: 'السنة المالية مغلقة بالفعل' };
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = businessToday();
 
     db.transaction(() => {
       // Close current year

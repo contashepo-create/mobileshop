@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Trash2, ShoppingCart, Wrench, Printer, Eye, ChevronDown, FileText } from 'lucide-react';
+import { Plus, Trash2, ShoppingCart, Wrench, Printer, Eye, ChevronDown, FileText, Pencil, Undo2, RotateCcw } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input, Select } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
@@ -17,6 +17,16 @@ interface CartItem {
 export function SalesPage() {
   const { showToast } = useToastStore();
   const [showSaleModal, setShowSaleModal] = useState(false);
+  const [tab, setTab] = useState<'sales' | 'returns'>('sales');
+  const [returns, setReturns] = useState<any[]>([]);
+  // Set while editing an existing invoice; null when creating a new one.
+  const [editingSaleId, setEditingSaleId] = useState<number | null>(null);
+  // Sale-return workflow
+  const [showReturnModal, setShowReturnModal] = useState(false);
+  const [returnSale, setReturnSale] = useState<any>(null);
+  const [returnLines, setReturnLines] = useState<any[]>([]);
+  const [returnReason, setReturnReason] = useState('');
+  const [returnCashAccountId, setReturnCashAccountId] = useState('');
   const [sales, setSales] = useState<any[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [cashAccounts, setCashAccounts] = useState<any[]>([]);
@@ -52,10 +62,13 @@ export function SalesPage() {
 
   // Transfer cost (when paying via wallet/transfer, the fee charged by the provider)
   const [transferCost, setTransferCost] = useState('');
+  // Who absorbs the machine's commission: the shop, or the customer.
+  const [feeBearer, setFeeBearer] = useState<'shop' | 'customer'>('shop');
 
   const fetchData = async () => {
-    const [s, cu, ca, pm, it, settings] = await Promise.all([
+    const [s, rt, cu, ca, pm, it, settings] = await Promise.all([
       window.api.invoke('sales:list'),
+      window.api.invoke('saleReturns:list'),
       window.api.invoke('customers:list'),
       window.api.invoke('cashAccounts:list'),
       window.api.invoke('paymentMethods:list'),
@@ -63,6 +76,7 @@ export function SalesPage() {
       window.api.invoke('settings:getAll'),
     ]);
     setSales(s);
+    setReturns(rt || []);
     setCustomers(cu);
     setCashAccounts(ca);
     setPaymentMethods(pm);
@@ -183,7 +197,10 @@ export function SalesPage() {
     }
 
     try {
-      const result = await window.api.invoke('sales:create', {
+      // Same payload either way; the channel decides create vs edit.
+      const channel = editingSaleId ? 'sales:update' : 'sales:create';
+      const result = await window.api.invoke(channel, {
+        ...(editingSaleId ? { SaleID: editingSaleId } : {}),
         CustomerID: selectedCustomer ? parseInt(selectedCustomer) : undefined,
         CustomerName: customer?.Name || customerName || undefined,
         CustomerPhone: customer?.Phone || customerPhone || undefined,
@@ -203,6 +220,7 @@ export function SalesPage() {
         PaymentMethod: paid > 0 ? paymentMethod : 'credit',
         PaidAmount: paid,
         TransferCost: parseFloat(transferCost) || 0,
+        TransferCostBearer: feeBearer,
         CashAccountID: cashAccountId ? parseInt(cashAccountId) : undefined,
         PaymentMethodID: paymentMethodId ? parseInt(paymentMethodId) : undefined,
         Notes: notes,
@@ -211,7 +229,9 @@ export function SalesPage() {
       });
 
       if (result.success) {
-        let msg = `تم إنشاء الفاتورة - رقم: ${result.saleNumber}`;
+        let msg = editingSaleId
+          ? `تم تعديل الفاتورة - رقم: ${result.saleNumber}`
+          : `تم إنشاء الفاتورة - رقم: ${result.saleNumber}`;
         if (result.remaining > 0) {
           msg += ` | المتبقي على العميل: ${result.remaining.toFixed(2)}`;
         } else {
@@ -234,6 +254,8 @@ export function SalesPage() {
     setCart([]); setSelectedCustomer(''); setCustomerName(''); setCustomerPhone('');
     setDiscount(''); setPaidAmount(''); setCashAccountId(''); setPaymentMethodId(''); setNotes('');
     setTransferCost('');
+    setFeeBearer('shop');
+    setEditingSaleId(null);
   };
 
   const selectedCustomerObj = customers.find(c => c.CustomerID === parseInt(selectedCustomer));
@@ -332,6 +354,91 @@ export function SalesPage() {
     });
   };
 
+  /** Loads an existing invoice into the form for editing. */
+  const startEdit = async (saleId: number) => {
+    const res = await window.api.invoke('sales:get', saleId);
+    if (!res?.sale) { showToast('error', 'تعذّر تحميل الفاتورة'); return; }
+    const { sale, details } = res;
+    setEditingSaleId(saleId);
+    setSelectedCustomer(sale.CustomerID ? String(sale.CustomerID) : '');
+    setCustomerName(sale.CustomerName || '');
+    setCustomerPhone(sale.CustomerPhone || '');
+    setCart((details || []).map((d: any) => ({
+      ItemID: d.ItemID || undefined,
+      ItemName: d.ItemName || d.IMEI || 'بند',
+      SerialID: d.SerialID || undefined,
+      IMEI: d.IMEI || undefined,
+      Quantity: d.Quantity,
+      UnitPrice: d.UnitPrice,
+      UnitCost: d.UnitCost,
+      isService: d.ItemID == null,
+    })));
+    setDiscount(sale.Discount ? String(sale.Discount) : '');
+    setTaxEnabled(!!sale.TaxAmount);
+    setPaidAmount(sale.PaidAmount ? String(sale.PaidAmount) : '');
+    setPaymentMethod(sale.PaymentMethod || 'cash');
+    setCashAccountId(sale.CashAccountID ? String(sale.CashAccountID) : '');
+    setPaymentMethodId(sale.PaymentMethodID ? String(sale.PaymentMethodID) : '');
+    setTransferCost(sale.TransferCost ? String(sale.TransferCost) : '');
+    setFeeBearer(sale.TransferCostBearer === 'customer' ? 'customer' : 'shop');
+    setNotes(sale.Notes || '');
+    setShowSaleModal(true);
+  };
+
+  /** Opens the credit-note screen for an invoice, showing what is still returnable. */
+  const startReturn = async (sale: any) => {
+    const lines = await window.api.invoke('saleReturns:returnable', sale.SaleID);
+    if (!Array.isArray(lines) || lines.length === 0) {
+      showToast('error', 'لا توجد بنود قابلة للإرجاع'); return;
+    }
+    const open = lines.filter((l: any) => l.Returnable > 0);
+    if (open.length === 0) { showToast('error', 'تم إرجاع كل بنود هذه الفاتورة'); return; }
+    setReturnSale(sale);
+    setReturnLines(open.map((l: any) => ({ ...l, ReturnQty: 0 })));
+    setReturnReason('');
+    setReturnCashAccountId(sale.CashAccountID ? String(sale.CashAccountID) : '');
+    setShowReturnModal(true);
+  };
+
+  const returnTotal = returnLines.reduce(
+    (sum, l) => sum + (Number(l.ReturnQty) || 0) * (l.UnitPrice || 0), 0);
+
+  const submitReturn = async () => {
+    const picked = returnLines.filter(l => (Number(l.ReturnQty) || 0) > 0);
+    if (picked.length === 0) { showToast('error', 'حدد الكمية المرتجعة'); return; }
+    for (const l of picked) {
+      if (Number(l.ReturnQty) > l.Returnable) {
+        showToast('error', `الكمية المرتجعة من "${l.ItemName || 'بند'}" أكبر من المتاح (${l.Returnable})`);
+        return;
+      }
+    }
+    const res = await window.api.invoke('saleReturns:create', {
+      SaleID: returnSale.SaleID,
+      items: picked.map(l => ({
+        ItemID: l.ItemID, SerialID: l.SerialID || undefined,
+        Quantity: Number(l.ReturnQty), UnitPrice: l.UnitPrice,
+      })),
+      Reason: returnReason || undefined,
+      CashAccountID: returnCashAccountId ? parseInt(returnCashAccountId) : undefined,
+      userId: currentUserId(),
+    });
+    if (res?.success) {
+      showToast('success', `تم إنشاء مرتجع رقم ${res.returnNumber}`);
+      setShowReturnModal(false);
+      setReturnSale(null);
+      fetchData();
+    } else {
+      showToast('error', res?.message || 'فشل إنشاء المرتجع');
+    }
+  };
+
+  const undoReturn = async (returnId: number, number: string) => {
+    if (!confirm(`إلغاء المرتجع ${number}؟\n\nسيتم عكس كل تأثيراته: البضاعة تخرج من المخزن، والمبلغ المرتجع يعود للخزنة، ويعود الدين على العميل.`)) return;
+    const res = await window.api.invoke('delete:saleReturn', returnId);
+    if (res?.success) { showToast('success', res.message); fetchData(); }
+    else showToast('error', res?.message || 'فشل الإلغاء');
+  };
+
   // Quick print with specific paper size
   const [showPrintMenu, setShowPrintMenu] = useState<number | null>(null);
 
@@ -345,9 +452,46 @@ export function SalesPage() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-800 dark:text-white">المبيعات</h1>
-        <Button onClick={() => setShowSaleModal(true)} icon={<Plus size={16} />}>فاتورة جديدة</Button>
+        <Button onClick={() => { resetForm(); setShowSaleModal(true); }} icon={<Plus size={16} />}>فاتورة جديدة</Button>
       </div>
 
+      <div className="flex gap-2 border-b border-slate-200 dark:border-slate-700">
+        <button onClick={() => setTab('sales')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+            tab === 'sales' ? 'border-primary-600 text-primary-600'
+                            : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400'}`}>
+          <FileText size={16} /> فواتير البيع ({sales.length})
+        </button>
+        <button onClick={() => setTab('returns')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+            tab === 'returns' ? 'border-primary-600 text-primary-600'
+                              : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400'}`}>
+          <Undo2 size={16} /> مرتجعات البيع ({returns.length})
+        </button>
+      </div>
+
+      {tab === 'returns' ? (
+        <DataTable
+          columns={[
+            { key: 'ReturnNumber', title: 'رقم المرتجع', render: (r) => <span className="font-mono text-xs">{r.ReturnNumber}</span> },
+            { key: 'Date', title: 'التاريخ' },
+            { key: 'SaleNumber', title: 'فاتورة البيع', render: (r) => <span className="font-mono text-xs">{r.SaleNumber}</span> },
+            { key: 'CustomerName', title: 'العميل', render: (r) => r.CustomerName || 'عميل نقدي' },
+            { key: 'TotalAmount', title: 'قيمة المرتجع', render: (r) => <span className="font-bold">{r.TotalAmount?.toFixed(2)}</span> },
+            { key: 'DebtRelief', title: 'خُصم من الدين', render: (r) => <span className="text-blue-600">{(r.DebtRelief || 0).toFixed(2)}</span> },
+            { key: 'CashRefund', title: 'رُدّ نقداً', render: (r) => <span className="text-red-600">{(r.CashRefund || 0).toFixed(2)}</span> },
+            { key: 'Reason', title: 'السبب', render: (r) => r.Reason || '—' },
+            { key: 'undo', title: '', render: (r) => (
+              <button onClick={() => undoReturn(r.ReturnID, r.ReturnNumber)}
+                className="p-1.5 rounded text-slate-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                title="إلغاء المرتجع وعكس تأثيره"><RotateCcw size={14} /></button>
+            )},
+          ]}
+          data={returns}
+          keyField="ReturnID"
+          emptyMessage="لا توجد مرتجعات"
+        />
+      ) : (
       <DataTable
         columns={[
           { key: 'SaleNumber', title: 'رقم الفاتورة', render: (row) => <span className="font-mono text-xs">{row.SaleNumber}</span> },
@@ -375,21 +519,32 @@ export function SalesPage() {
               )}
             </div>
           )},
-          { key: 'delete', title: '', render: (row) => (
-            <button onClick={() => handleDeleteSale(row.SaleID)} className="p-1.5 rounded text-slate-500 dark:text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20" title="حذف"><Trash2 size={14} /></button>
+          { key: 'ops', title: '', render: (row) => (
+            <div className="flex items-center gap-1">
+              <button onClick={() => startEdit(row.SaleID)}
+                className="p-1.5 rounded text-slate-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                title="تعديل الفاتورة"><Pencil size={14} /></button>
+              <button onClick={() => startReturn(row)}
+                className="p-1.5 rounded text-slate-500 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20"
+                title="مرتجع بيع"><Undo2 size={14} /></button>
+              <button onClick={() => handleDeleteSale(row.SaleID)}
+                className="p-1.5 rounded text-slate-500 dark:text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                title="حذف"><Trash2 size={14} /></button>
+            </div>
           )},
         ]}
         data={sales}
         keyField="SaleID"
         emptyMessage="لا توجد فواتير"
       />
+      )}
 
       {/* Sale Modal */}
-      <Modal isOpen={showSaleModal} onClose={() => { setShowSaleModal(false); resetForm(); }} title="فاتورة بيع جديدة" size="xl"
+      <Modal isOpen={showSaleModal} onClose={() => { setShowSaleModal(false); resetForm(); }} title={editingSaleId ? 'تعديل فاتورة بيع' : 'فاتورة بيع جديدة'} size="xl"
         footer={<>
           <Button variant="secondary" onClick={() => { setShowSaleModal(false); resetForm(); }}>إلغاء</Button>
           <Button variant="outline" onClick={previewInvoiceTemplate} icon={<Eye size={16} />}>معاينة الفاتورة</Button>
-          <Button onClick={handleSale} icon={<ShoppingCart size={16} />}>إتمام البيع</Button>
+          <Button onClick={handleSale} icon={<ShoppingCart size={16} />}>{editingSaleId ? 'حفظ التعديل' : 'إتمام البيع'}</Button>
         </>}
       >
         <div className="space-y-4">
@@ -568,7 +723,38 @@ export function SalesPage() {
                     يتم استلام المبلغ في حساب واحد فقط — اختيار الماكينة يلغي اختيار الخزنة.
                   </div>
                   {(paymentMethod === 'transfer' || paymentMethod === 'wallet' || paymentMethod === 'card') && (
-                    <Input label="تكلفة التحويل/العمولة" type="number" value={transferCost} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTransferCost(e.target.value)} hint="عمولة الماكينة أو المحفظة" />
+                    <>
+                      <Input label="عمولة الماكينة / المحفظة" type="number" value={transferCost}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTransferCost(e.target.value)}
+                        hint="المبلغ الذي تخصمه الماكينة أو المحفظة على هذه العملية" />
+                      {parseFloat(transferCost) > 0 && (
+                        <>
+                          <Select label="من يتحمل العمولة؟" value={feeBearer}
+                            onChange={(e) => setFeeBearer(e.target.value as 'shop' | 'customer')}>
+                            <option value="shop">المحل يتحمّلها (تُخصم من المبلغ الواصل لك)</option>
+                            <option value="customer">العميل يدفعها (فوق قيمة الفاتورة)</option>
+                          </Select>
+                          {/* Spelled out in money, because "commission" alone is
+                              exactly what was unclear. */}
+                          <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 text-xs text-amber-800 dark:text-amber-300 space-y-1">
+                            {feeBearer === 'shop' ? (
+                              <>
+                                <div>العميل يدفع: <b>{(parseFloat(paidAmount) || 0).toFixed(2)}</b></div>
+                                <div>الماكينة تخصم: <b>{(parseFloat(transferCost) || 0).toFixed(2)}</b></div>
+                                <div>يصل إلى حسابك: <b>{((parseFloat(paidAmount) || 0) - (parseFloat(transferCost) || 0)).toFixed(2)}</b></div>
+                                <div className="pt-1 border-t border-amber-200 dark:border-amber-800">العمولة تُسجَّل كمصروف على المحل.</div>
+                              </>
+                            ) : (
+                              <>
+                                <div>العميل يدفع: <b>{((parseFloat(paidAmount) || 0) + (parseFloat(transferCost) || 0)).toFixed(2)}</b> (الفاتورة + العمولة)</div>
+                                <div>يصل إلى حسابك: <b>{(parseFloat(paidAmount) || 0).toFixed(2)}</b></div>
+                                <div className="pt-1 border-t border-amber-200 dark:border-amber-800">لا تُسجَّل كمصروف — العميل هو من دفعها.</div>
+                              </>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </>
                   )}
                 </>
               )}
@@ -586,13 +772,96 @@ export function SalesPage() {
           {cart.length > 0 && (
             <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-3 flex items-center justify-between">
               <span className="text-sm font-medium text-green-700 dark:text-green-300">
-                الربح المتوقع (الإيراد - التكاليف{transferCost ? ' - عمولة التحويل' : ''})
+                الربح المتوقع (الإيراد - التكاليف{transferCost && feeBearer === 'shop' ? ' - عمولة الماكينة' : ''})
               </span>
               <span className="text-lg font-bold text-green-600">
-                {(subtotal - discountAmount - cart.reduce((s, i) => s + (i.UnitCost || 0) * i.Quantity, 0) - (parseFloat(transferCost) || 0)).toFixed(2)}
+                {(subtotal - discountAmount - cart.reduce((s, i) => s + (i.UnitCost || 0) * i.Quantity, 0) - (feeBearer === 'shop' ? (parseFloat(transferCost) || 0) : 0)).toFixed(2)}
               </span>
             </div>
           )}
+        </div>
+      </Modal>
+
+      {/* Sale return (credit note) */}
+      <Modal isOpen={showReturnModal} onClose={() => setShowReturnModal(false)}
+        title={`مرتجع بيع — فاتورة ${returnSale?.SaleNumber || ''}`} size="lg"
+        footer={<>
+          <Button variant="secondary" onClick={() => setShowReturnModal(false)}>إلغاء</Button>
+          <Button onClick={submitReturn} icon={<Undo2 size={16} />}>تأكيد المرتجع</Button>
+        </>}
+      >
+        <div className="space-y-4">
+          <div className="text-sm text-slate-600 dark:text-slate-300">
+            العميل: <b>{returnSale?.CustomerName || 'عميل نقدي'}</b>
+            {' · '}إجمالي الفاتورة: <b>{returnSale?.TotalAmount?.toFixed(2)}</b>
+            {' · '}المتبقي على العميل: <b>{(returnSale?.RemainingAmount || 0).toFixed(2)}</b>
+          </div>
+
+          <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 dark:bg-slate-800/50">
+                <tr>
+                  <th className="px-3 py-2 text-right">الصنف</th>
+                  <th className="px-3 py-2 text-right">المباع</th>
+                  <th className="px-3 py-2 text-right">المتاح للإرجاع</th>
+                  <th className="px-3 py-2 text-right">السعر</th>
+                  <th className="px-3 py-2 text-right">الكمية المرتجعة</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                {returnLines.map((l, idx) => (
+                  <tr key={idx}>
+                    <td className="px-3 py-2">{l.ItemName || l.IMEI || 'بند/خدمة'}</td>
+                    <td className="px-3 py-2">{l.Quantity}</td>
+                    <td className="px-3 py-2 text-slate-500">{l.Returnable}</td>
+                    <td className="px-3 py-2">{(l.UnitPrice || 0).toFixed(2)}</td>
+                    <td className="px-3 py-2 w-32">
+                      <input type="number" min={0} max={l.Returnable} value={l.ReturnQty}
+                        onChange={(e) => {
+                          // Clamped here as well as on the server, so the total
+                          // shown can never promise a refund the server refuses.
+                          const v = Math.max(0, Math.min(l.Returnable, Number(e.target.value) || 0));
+                          setReturnLines(rows => rows.map((r, i) => i === idx ? { ...r, ReturnQty: v } : r));
+                        }}
+                        className="w-full px-2 py-1 rounded bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-white" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="سبب الإرجاع" value={returnReason}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
+              placeholder="عيب مصنعي، رغبة العميل..." />
+            <Select label="خزنة رد النقدية" value={returnCashAccountId}
+              onChange={(e) => setReturnCashAccountId(e.target.value)}>
+              <option value="">— بدون رد نقدي —</option>
+              {cashAccounts.map((ca: any) => (
+                <option key={ca.CashAccountID} value={ca.CashAccountID}>
+                  {ca.AccountName} ({ca.Balance?.toFixed(2)})
+                </option>
+              ))}
+            </Select>
+          </div>
+
+          {/* Spelled out so it is obvious BEFORE confirming where the money goes. */}
+          {returnTotal > 0 && (() => {
+            const outstanding = Math.max(0, returnSale?.RemainingAmount || 0);
+            const debtRelief = Math.min(returnTotal, outstanding);
+            const cashBack = +(returnTotal - debtRelief).toFixed(2);
+            return (
+              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 text-sm text-amber-800 dark:text-amber-300 space-y-1">
+                <div>قيمة المرتجع: <b>{returnTotal.toFixed(2)}</b></div>
+                <div>يُخصم من دين العميل: <b>{debtRelief.toFixed(2)}</b></div>
+                <div>يُرد نقداً للعميل: <b>{cashBack.toFixed(2)}</b></div>
+                <div className="pt-1 border-t border-amber-200 dark:border-amber-800 text-xs">
+                  يُسدَّد الدين أولاً، ولا يُرد نقداً إلا ما دفعه العميل فعلاً.
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </Modal>
     </div>

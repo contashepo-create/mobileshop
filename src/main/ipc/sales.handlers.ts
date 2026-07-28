@@ -45,6 +45,8 @@ export function registerSalesHandlers() {
     items: { ItemID: number; SerialID?: number; IMEI?: string; Quantity: number; UnitPrice: number; UnitCost?: number; IsWarranty?: number; WarrantyMonths?: number; isService?: boolean; ServiceName?: string; WarehouseID?: number }[];
     Discount: number; TaxRate: number; TaxAmount: number;
     PaymentMethod: string; PaidAmount: number; TransferCost?: number;
+    /** 'shop' (default) = we absorb the fee; 'customer' = it is added to their bill. */
+    TransferCostBearer?: 'shop' | 'customer';
     CashAccountID?: number; PaymentMethodID?: number;
     Notes?: string; userId: number; fiscalYearId: number;
   }) => {
@@ -126,9 +128,16 @@ export function registerSalesHandlers() {
         }
       }
 
-      // A walk-in customer with no account cannot be left owing money, and
-      // cannot be given credit — there is no account to hold either.
       const transferCost = Number.isFinite(num(data.TransferCost)) ? Math.max(0, num(data.TransferCost)) : 0;
+      // Who absorbs the machine's commission. Anything other than an explicit
+      // 'customer' means the shop pays it, which is the safer default: it books
+      // the fee as a cost rather than silently assuming the customer covered it.
+      const feeBearer = data.TransferCostBearer === 'customer' ? 'customer' : 'shop';
+      // Only a fee the SHOP bears reduces what lands in our account and counts
+      // as an expense. A fee passed on to the customer is collected from them
+      // and handed straight to the provider — the shop is neither richer nor
+      // poorer, so it must not be expensed.
+      const shopBorneFee = feeBearer === 'shop' ? transferCost : 0;
       // Check if customer is suspended
       if (data.CustomerID) {
         const customer = db.prepare('SELECT Status, Balance FROM customers WHERE CustomerID = ?').get(data.CustomerID) as any;
@@ -229,8 +238,9 @@ export function registerSalesHandlers() {
         const result = db.prepare(`
           INSERT INTO sales (SaleNumber, FiscalYearID, Date, CustomerID, CustomerName, CustomerPhone,
             Subtotal, Discount, TaxRate, TaxAmount, TotalAmount, PaidAmount, RemainingAmount,
-            PaymentMethod, CashAccountID, PaymentMethodID, Status, UserID, Notes, TransferCost)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            PaymentMethod, CashAccountID, PaymentMethodID, Status, UserID, Notes,
+            TransferCost, TransferCostBearer)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           saleNumber, data.fiscalYearId, dateStr,
           data.CustomerID ?? null, data.CustomerName ?? null, data.CustomerPhone ?? null,
@@ -239,7 +249,7 @@ export function registerSalesHandlers() {
           cashAccountId, paymentMethodId,
           // Stored as a NUMBER in its own column so the P&L can charge it as a
           // cost. `Notes` keeps only what the user actually typed.
-          status, data.userId, data.Notes ?? null, transferCost
+          status, data.userId, data.Notes ?? null, transferCost, feeBearer
         );
 
         const saleId = result.lastInsertRowid;
@@ -308,7 +318,7 @@ export function registerSalesHandlers() {
           // The customer still owes the full TotalAmount — only what lands in
           // our account is reduced. The fee is carried on the sale row as
           // TransferCost and charged as a cost in the profit & loss report.
-          const netReceived = +(paidAmount - transferCost).toFixed(2);
+          const netReceived = +(paidAmount - shopBorneFee).toFixed(2);
           if (paymentMethodId) {
             db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(netReceived, paymentMethodId);
           } else if (cashAccountId) {
@@ -442,6 +452,367 @@ export function registerSalesHandlers() {
       return { success: true, returnNumber };
     } catch (err: any) {
       console.error('[Sales] Error creating return:', err);
+      return { success: false, message: `خطأ: ${err.message || err}` };
+    }
+  });
+
+  /**
+   * Edits an existing invoice.
+   *
+   * WHY THIS IS A REVERSE-AND-REISSUE RATHER THAN AN UPDATE
+   * -------------------------------------------------------
+   * A sale touches four things: stock, the customer's balance, a cash or
+   * machine account, and the invoice itself. Patching a row in place would mean
+   * hand-writing the delta for each of them for every possible change (fewer
+   * items, a different customer, a switch from cash to card...), and any
+   * combination the author did not think of would silently corrupt a balance.
+   *
+   * Instead the original effects are undone exactly as `delete:sale` undoes
+   * them, and the new version is applied exactly as `sales:create` applies
+   * them — the two code paths that are already audited and tested. The invoice
+   * NUMBER is preserved, so the customer's copy still matches, and the whole
+   * thing runs in a single transaction.
+   *
+   * Editing is refused once the invoice has returns, vouchers or a repair
+   * delivery attached: those documents were issued against the old figures, and
+   * changing the invoice underneath them would leave them referring to amounts
+   * that no longer exist.
+   */
+  ipcMain.handle('sales:update', async (_event, data: {
+    SaleID: number;
+    CustomerID?: number; CustomerName?: string; CustomerPhone?: string;
+    items: { ItemID: number; SerialID?: number; IMEI?: string; Quantity: number; UnitPrice: number; UnitCost?: number; isService?: boolean; ServiceName?: string; WarehouseID?: number }[];
+    Discount: number; TaxRate: number; TaxAmount: number;
+    PaymentMethod: string; PaidAmount: number;
+    TransferCost?: number; TransferCostBearer?: 'shop' | 'customer';
+    CashAccountID?: number; PaymentMethodID?: number;
+    Notes?: string; userId: number;
+  }) => {
+    const db = getDb();
+    try {
+      const original = db.prepare('SELECT * FROM sales WHERE SaleID = ?').get(data.SaleID) as any;
+      if (!original) return { success: false, message: 'الفاتورة غير موجودة' };
+      if (original.IsVoided) return { success: false, message: 'الفاتورة ملغاة - لا يمكن تعديلها' };
+      if ((original.Source ?? 'direct') === 'maintenance') {
+        return { success: false, message: 'فاتورة صيانة - عدّلها من شاشة الصيانة' };
+      }
+
+      const linked = [
+        { sql: 'SELECT COUNT(*) as n FROM sale_returns WHERE SaleID = ?', label: 'مرتجعات' },
+        { sql: 'SELECT COUNT(*) as n FROM maintenance_deliveries WHERE SaleID = ?', label: 'تسليم صيانة' },
+        { sql: "SELECT COUNT(*) as n FROM vouchers WHERE ReferenceType = 'sale' AND ReferenceID = ?", label: 'سندات' },
+      ];
+      for (const l of linked) {
+        const n = (db.prepare(l.sql).get(data.SaleID) as any)?.n || 0;
+        if (n > 0) {
+          return { success: false, message: `لا يمكن تعديل الفاتورة - مرتبطة بـ${l.label}. احذفها أولاً.` };
+        }
+      }
+
+      // ---- Validate the NEW version with the same rules as a new invoice.
+      if (!Array.isArray(data.items) || data.items.length === 0) {
+        return { success: false, message: 'لا يمكن حفظ فاتورة بدون أصناف' };
+      }
+      const num = (v: unknown) => (typeof v === 'number' ? v : Number(v));
+      for (const item of data.items) {
+        const qty = num(item.Quantity);
+        const price = num(item.UnitPrice);
+        if (!Number.isFinite(qty) || qty <= 0) {
+          return { success: false, message: 'الكمية يجب أن تكون رقماً أكبر من صفر' };
+        }
+        if (!Number.isFinite(price) || price < 0) {
+          return { success: false, message: 'السعر يجب أن يكون رقماً غير سالب' };
+        }
+      }
+      const discountIn = num(data.Discount ?? 0);
+      const taxIn = num(data.TaxAmount ?? 0);
+      const paidIn = num(data.PaidAmount ?? 0);
+      if (!Number.isFinite(discountIn) || discountIn < 0
+        || !Number.isFinite(taxIn) || taxIn < 0
+        || !Number.isFinite(paidIn) || paidIn < 0) {
+        return { success: false, message: 'قيم الخصم أو الضريبة أو المدفوع غير صالحة' };
+      }
+      const rawSubtotal = data.items.reduce((s, i) => s + (num(i.Quantity) * num(i.UnitPrice)), 0);
+      if (discountIn > rawSubtotal) {
+        return { success: false, message: `الخصم (${discountIn.toFixed(2)}) أكبر من إجمالي الأصناف (${rawSubtotal.toFixed(2)})` };
+      }
+
+      const newPaymentMethodId = data.PaymentMethodID ?? null;
+      const newCashAccountId = newPaymentMethodId ? null : (data.CashAccountID ?? null);
+      if (paidIn > 0) {
+        if (!newPaymentMethodId && !newCashAccountId) {
+          return { success: false, message: 'اختر مصدر استلام المبلغ (خزنة أو ماكينة)' };
+        }
+        if (newPaymentMethodId) {
+          const pm = db.prepare('SELECT IsActive FROM payment_methods WHERE PaymentMethodID = ?').get(newPaymentMethodId) as any;
+          if (!pm) return { success: false, message: 'ماكينة الدفع المختارة غير موجودة' };
+          if (!pm.IsActive) return { success: false, message: 'ماكينة الدفع المختارة غير مفعّلة' };
+        } else if (newCashAccountId) {
+          const acc = db.prepare('SELECT IsActive FROM cash_accounts WHERE CashAccountID = ?').get(newCashAccountId) as any;
+          if (!acc) return { success: false, message: 'الخزنة المختارة غير موجودة' };
+          if (!acc.IsActive) return { success: false, message: 'الخزنة المختارة غير مفعّلة' };
+        }
+      }
+
+      const transferCost = Number.isFinite(num(data.TransferCost)) ? Math.max(0, num(data.TransferCost)) : 0;
+      const feeBearer = data.TransferCostBearer === 'customer' ? 'customer' : 'shop';
+      const shopBorneFee = feeBearer === 'shop' ? transferCost : 0;
+
+      const subtotal = rawSubtotal;
+      const totalAmount = subtotal - discountIn + taxIn;
+      const remaining = totalAmount - paidIn;
+      const status = remaining > 0 ? (paidIn > 0 ? 'partial' : 'unpaid') : 'completed';
+
+      if (!data.CustomerID && remaining !== 0) {
+        return { success: false, message: 'العميل النقدي يجب أن يدفع المبلغ كاملاً' };
+      }
+
+      const resolveUnitCost = (
+        item: { ItemID?: number; SerialID?: number; UnitCost?: number; isService?: boolean },
+        warehouseId: number | null,
+      ): number | null => {
+        if (item.isService) return item.UnitCost ?? null;
+        if (item.SerialID) {
+          const s = db.prepare('SELECT CostPrice FROM item_serials WHERE SerialID = ?').get(item.SerialID) as any;
+          if (s && s.CostPrice != null) return s.CostPrice;
+        }
+        if (item.ItemID && warehouseId) {
+          const sq = db.prepare('SELECT CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?')
+            .get(item.ItemID, warehouseId) as any;
+          if (sq && sq.CostPrice) return sq.CostPrice;
+        }
+        if (item.ItemID) {
+          const it = db.prepare('SELECT CostPrice FROM items WHERE ItemID = ?').get(item.ItemID) as any;
+          if (it && it.CostPrice != null) return it.CostPrice;
+        }
+        return item.UnitCost ?? null;
+      };
+
+      const tx = db.transaction(() => {
+        // ---- 1. Undo the original, exactly as delete:sale does.
+        const oldLines = db.prepare('SELECT * FROM sale_details WHERE SaleID = ?').all(data.SaleID) as any[];
+        for (const line of oldLines) {
+          if (line.SerialID) {
+            db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(line.SerialID);
+          } else if (line.ItemID) {
+            const wh = line.WarehouseID ?? resolveSourceWarehouse(db, line.ItemID, 0, null);
+            if (wh) restoreStock(db, line.ItemID, wh, line.Quantity, line.UnitCost || 0);
+          }
+        }
+        if (original.CustomerID && original.RemainingAmount > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?')
+            .run(original.RemainingAmount, original.CustomerID);
+        } else if (original.CustomerID && original.RemainingAmount < 0) {
+          db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?')
+            .run(Math.abs(original.RemainingAmount), original.CustomerID);
+        }
+        const oldShopFee = (original.TransferCostBearer ?? 'shop') === 'shop' ? (original.TransferCost || 0) : 0;
+        const oldNet = +((original.PaidAmount || 0) - oldShopFee).toFixed(2);
+        if (original.CashAccountID && original.PaidAmount > 0) {
+          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?')
+            .run(oldNet, original.CashAccountID);
+        }
+        if (original.PaymentMethodID && original.PaidAmount > 0) {
+          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?')
+            .run(oldNet, original.PaymentMethodID);
+        }
+        db.prepare('DELETE FROM sale_details WHERE SaleID = ?').run(data.SaleID);
+
+        // ---- 2. Apply the new version, exactly as sales:create does.
+        db.prepare(`
+          UPDATE sales SET
+            CustomerID = ?, CustomerName = ?, CustomerPhone = ?,
+            Subtotal = ?, Discount = ?, TaxRate = ?, TaxAmount = ?, TotalAmount = ?,
+            PaidAmount = ?, RemainingAmount = ?, PaymentMethod = ?,
+            CashAccountID = ?, PaymentMethodID = ?, Status = ?, Notes = ?,
+            TransferCost = ?, TransferCostBearer = ?
+          WHERE SaleID = ?
+        `).run(
+          data.CustomerID ?? null, data.CustomerName ?? null, data.CustomerPhone ?? null,
+          subtotal, discountIn, data.TaxRate ?? 0, taxIn, totalAmount,
+          paidIn, remaining, data.PaymentMethod,
+          newCashAccountId, newPaymentMethodId, status, data.Notes ?? null,
+          transferCost, feeBearer, data.SaleID,
+        );
+
+        for (const item of data.items) {
+          const lineWarehouse = item.isService || !item.ItemID
+            ? null
+            : resolveSourceWarehouse(db, item.ItemID, item.Quantity, item.WarehouseID ?? null);
+
+          db.prepare(`
+            INSERT INTO sale_details (SaleID, ItemID, SerialID, IMEI, Quantity, UnitPrice, UnitCost, Total, IsWarranty, WarrantyMonths, WarehouseID)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+          `).run(
+            data.SaleID,
+            item.isService ? null : (item.ItemID || null),
+            item.SerialID ?? null,
+            item.isService ? (item.ServiceName || null) : (item.IMEI ?? null),
+            item.Quantity, item.UnitPrice, resolveUnitCost(item, lineWarehouse),
+            item.Quantity * item.UnitPrice,
+            lineWarehouse,
+          );
+
+          if (item.isService) continue;
+          if (item.SerialID) {
+            db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(item.SerialID);
+          }
+          if (!item.SerialID && item.ItemID && lineWarehouse) {
+            deductStock(db, item.ItemID, lineWarehouse, item.Quantity);
+          }
+        }
+
+        if (data.CustomerID && remaining !== 0) {
+          if (remaining > 0) {
+            db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(remaining, data.CustomerID);
+          } else {
+            db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(Math.abs(remaining), data.CustomerID);
+          }
+        }
+
+        if (paidIn > 0) {
+          const netReceived = +(paidIn - shopBorneFee).toFixed(2);
+          if (newPaymentMethodId) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(netReceived, newPaymentMethodId);
+          } else if (newCashAccountId) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(netReceived, newCashAccountId);
+          }
+        }
+      });
+
+      tx();
+      return {
+        success: true, saleNumber: original.SaleNumber,
+        totalAmount, paidAmount: paidIn, remaining, status,
+        message: `تم تعديل الفاتورة ${original.SaleNumber}`,
+      };
+    } catch (err: any) {
+      console.error('[Sales] Error updating sale:', err);
+      return { success: false, message: `خطأ في تعديل الفاتورة: ${err.message || err}` };
+    }
+  });
+
+  /** One return with its lines — used to print the credit note. */
+  ipcMain.handle('saleReturns:get', async (_event, returnId: number) => {
+    const db = getDb();
+    const header = db.prepare(`
+      SELECT r.*, s.SaleNumber, s.CustomerID, s.CustomerName, s.CustomerPhone,
+             c.Name AS CustomerAccountName
+      FROM sale_returns r
+      JOIN sales s ON r.SaleID = s.SaleID
+      LEFT JOIN customers c ON s.CustomerID = c.CustomerID
+      WHERE r.ReturnID = ?
+    `).get(returnId);
+    const details = db.prepare(`
+      SELECT rd.*, i.ItemName
+      FROM sale_return_details rd
+      LEFT JOIN items i ON rd.ItemID = i.ItemID
+      WHERE rd.ReturnID = ?
+    `).all(returnId);
+    return { header, details };
+  });
+
+  /** How much of an invoice may still be returned, per line. */
+  ipcMain.handle('saleReturns:returnable', async (_event, saleId: number) => {
+    const db = getDb();
+    // Sold quantity per item, minus everything already returned for the same
+    // invoice. Without this the UI could offer to return more than was bought,
+    // and the goods would be restocked out of thin air.
+    const lines = db.prepare(`
+      SELECT sd.ItemID, sd.SerialID, sd.IMEI, sd.Quantity, sd.UnitPrice, sd.WarehouseID,
+             i.ItemName,
+             COALESCE((
+               SELECT SUM(rd.Quantity) FROM sale_return_details rd
+               JOIN sale_returns r ON rd.ReturnID = r.ReturnID
+               WHERE r.SaleID = sd.SaleID AND rd.ItemID IS sd.ItemID
+             ), 0) AS AlreadyReturned
+      FROM sale_details sd
+      LEFT JOIN items i ON sd.ItemID = i.ItemID
+      WHERE sd.SaleID = ?
+    `).all(saleId) as any[];
+
+    return lines.map(l => ({
+      ...l,
+      // Service lines carry no ItemID and cannot be restocked, but their value
+      // is still refundable, so they are returned as-is with a flag.
+      IsService: l.ItemID == null,
+      Returnable: Math.max(0, (l.Quantity || 0) - (l.AlreadyReturned || 0)),
+    }));
+  });
+
+  /**
+   * Reverses a sale return — the "undo" for a credit note issued by mistake.
+   *
+   * Every effect of `saleReturns:create` is undone in the opposite direction:
+   * goods leave stock again, the cash refund is taken back, the cancelled debt
+   * is restored to the customer, and the invoice's outstanding amount and
+   * status are recalculated. Doing it in one transaction means a failure
+   * halfway cannot leave the books half-reversed.
+   */
+  ipcMain.handle('delete:saleReturn', async (_event, returnId: number) => {
+    const db = getDb();
+    try {
+      const ret = db.prepare('SELECT * FROM sale_returns WHERE ReturnID = ?').get(returnId) as any;
+      if (!ret) return { success: false, message: 'المرتجع غير موجود' };
+
+      const sale = db.prepare('SELECT * FROM sales WHERE SaleID = ?').get(ret.SaleID) as any;
+      const details = db.prepare('SELECT * FROM sale_return_details WHERE ReturnID = ?')
+        .all(returnId) as any[];
+
+      // Refusing to take cash out of a drawer that cannot cover it keeps the
+      // balance from going negative behind the user's back.
+      const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
+      const cashRefund = ret.CashRefund || 0;
+      if (allowNegCash?.Value !== '1' && ret.CashAccountID && cashRefund > 0) {
+        const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?')
+          .get(ret.CashAccountID) as any;
+        if (!acc || (acc.Balance || 0) < cashRefund) {
+          return {
+            success: false,
+            message: `الرصيد غير كافٍ لاسترجاع المبلغ المدفوع للعميل: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${cashRefund.toFixed(2)}`,
+          };
+        }
+      }
+
+      const tx = db.transaction(() => {
+        for (const line of details) {
+          // The goods go back OUT of stock — the customer keeps them again.
+          if (line.SerialID) {
+            db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(line.SerialID);
+          } else if (line.ItemID && line.WarehouseID) {
+            deductStock(db, line.ItemID, line.WarehouseID, line.Quantity);
+          }
+        }
+
+        // Give back the cash that was refunded to the customer.
+        if (ret.CashAccountID && cashRefund > 0) {
+          db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?')
+            .run(cashRefund, ret.CashAccountID);
+        }
+
+        // Restore the debt that the return had cancelled.
+        const debtRelief = ret.DebtRelief || 0;
+        if (sale?.CustomerID && debtRelief > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?')
+            .run(debtRelief, sale.CustomerID);
+          db.prepare(`
+            UPDATE sales
+            SET RemainingAmount = RemainingAmount + ?,
+                Status = CASE WHEN RemainingAmount + ? > 0
+                              THEN (CASE WHEN PaidAmount > 0 THEN 'partial' ELSE 'unpaid' END)
+                              ELSE 'completed' END
+            WHERE SaleID = ?
+          `).run(debtRelief, debtRelief, ret.SaleID);
+        }
+
+        db.prepare('DELETE FROM sale_return_details WHERE ReturnID = ?').run(returnId);
+        db.prepare('DELETE FROM sale_returns WHERE ReturnID = ?').run(returnId);
+      });
+
+      tx();
+      return { success: true, message: 'تم إلغاء المرتجع وعكس كل تأثيراته' };
+    } catch (err: any) {
+      console.error('[Sales] Error reversing return:', err);
       return { success: false, message: `خطأ: ${err.message || err}` };
     }
   });

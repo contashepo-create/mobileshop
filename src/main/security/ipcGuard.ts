@@ -116,9 +116,17 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'sales:list': 'sales.view',
   'sales:get': 'sales.view',
   'sales:create': 'sales.create',
+  // Editing rewrites balances and stock, so it carries the same authority as
+  // deleting rather than merely creating.
+  'sales:update': 'sales.delete',
   'delete:sale': 'sales.delete',
   'saleReturns:list': 'sales.returns',
   'saleReturns:create': 'sales.returns',
+  'saleReturns:get': 'sales.returns',
+  'saleReturns:returnable': 'sales.returns',
+  // Reversing a credit note moves money and stock, so it is gated with the
+  // same authority as deleting an invoice rather than merely viewing returns.
+  'delete:saleReturn': 'sales.delete',
 
   // ---- Purchases
   'purchases:list': 'purchases.view',

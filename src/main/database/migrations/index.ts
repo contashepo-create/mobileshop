@@ -1074,6 +1074,22 @@ export function runMigrations(db: Database.Database) {
     db.exec(`ALTER TABLE sales ADD COLUMN TransferCost REAL DEFAULT 0`);
   } catch {}
 
+  // WHO pays the machine's commission.
+  //
+  //   'shop'     — the shop absorbs it. The customer is charged the invoice
+  //                total, the provider settles that total MINUS the fee, so the
+  //                shop receives less and the fee is an expense.
+  //   'customer' — the fee is passed on. The customer hands over the invoice
+  //                total PLUS the fee, the provider keeps the fee, and the shop
+  //                still receives the full invoice value. Nothing is lost, so
+  //                it is not an expense.
+  //
+  // Without this the app silently assumed 'shop' for everyone, which is wrong
+  // for the many shops that add the fee to the customer's bill.
+  try {
+    db.exec(`ALTER TABLE sales ADD COLUMN TransferCostBearer TEXT DEFAULT 'shop'`);
+  } catch {}
+
   // Track WHICH warehouse each sale line was taken from, so a return/delete
   // credits the same warehouse it originally debited. Without this the reversal
   // guessed the warehouse and could move stock between locations.

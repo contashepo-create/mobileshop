@@ -422,9 +422,14 @@ export function registerReportsHandlers() {
     // fee, so the difference is a real cost of doing business. It is excluded
     // for maintenance-sourced rows for the same reason their revenue is: the
     // repair side reports its own figures.
+    // Only a fee the SHOP absorbed is a cost. When it is passed on to the
+    // customer they hand over the invoice plus the fee, the provider keeps the
+    // fee, and the shop is neither better nor worse off — expensing that would
+    // understate profit.
     const saleTransferCost = db.prepare(`
       SELECT COALESCE(SUM(COALESCE(TransferCost,0)),0) as total FROM sales
-      WHERE IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance' ${dateFilter}
+      WHERE IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance'
+        AND COALESCE(TransferCostBearer,'shop') = 'shop' ${dateFilter}
     `).get(...params) as any;
 
     // 5. Purchase Returns value (items returned to supplier - reduces our stock cost basis)

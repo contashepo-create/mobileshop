@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
+import { resolveSourceWarehouse, warehouseStock, deductStock } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 
 export function registerPurchasesHandlers() {
@@ -53,8 +54,72 @@ export function registerPurchasesHandlers() {
 
     try {
       const supplier = db.prepare('SELECT Status FROM suppliers WHERE SupplierID = ?').get(data.SupplierID) as any;
+      if (!supplier) return { success: false, message: 'المورد غير موجود' };
       if (supplier?.Status === 'suspended') {
         return { success: false, message: 'المورد موقوف - لا يمكن إتمام عملية الشراء' };
+      }
+
+      // === INPUT VALIDATION ===
+      // Mirrors sales:create. A purchase sets the cost of everything sold
+      // afterwards, so a malformed figure here quietly distorts every future
+      // margin rather than failing loudly.
+      if (!Array.isArray(data.items) || data.items.length === 0) {
+        return { success: false, message: 'لا يمكن حفظ فاتورة شراء بدون أصناف' };
+      }
+      const num = (v: unknown) => (typeof v === 'number' ? v : Number(v));
+      for (const item of data.items) {
+        const qty = num(item.Quantity);
+        const cost = num(item.UnitCost);
+        // Quantity must be strictly positive: zero would divide by zero when
+        // allocating overhead, and negative would credit stock that never came.
+        if (!Number.isFinite(qty) || qty <= 0) {
+          return { success: false, message: 'الكمية يجب أن تكون رقماً أكبر من صفر' };
+        }
+        if (!Number.isFinite(cost) || cost < 0) {
+          return { success: false, message: 'سعر الشراء يجب أن يكون رقماً غير سالب' };
+        }
+        if (!item.WarehouseID) {
+          return { success: false, message: 'اختر المخزن لكل صنف' };
+        }
+        const wh = db.prepare('SELECT WarehouseID FROM warehouses WHERE WarehouseID = ?').get(item.WarehouseID);
+        if (!wh) return { success: false, message: 'المخزن المختار غير موجود' };
+      }
+
+      for (const [label, value] of [
+        ['الخصم', data.Discount], ['الضريبة', data.TaxAmount],
+        ['المدفوع', data.PaidAmount], ['المصاريف الإضافية', data.AdditionalCost],
+        ['عمولة الدفع', data.PaymentCost],
+      ] as const) {
+        const v = num(value ?? 0);
+        if (!Number.isFinite(v) || v < 0) {
+          return { success: false, message: `${label} يجب أن يكون رقماً غير سالب` };
+        }
+      }
+
+      const goodsTotal = data.items.reduce((s, i) => s + (num(i.Quantity) * num(i.UnitCost)), 0);
+      if (num(data.Discount ?? 0) > goodsTotal) {
+        return {
+          success: false,
+          message: `الخصم (${num(data.Discount).toFixed(2)}) أكبر من إجمالي الأصناف (${goodsTotal.toFixed(2)})`,
+        };
+      }
+
+      // The account we pay FROM must exist and be usable, otherwise the
+      // UPDATE silently matches no rows and the money is never deducted while
+      // the invoice still records it as paid.
+      if (num(data.PaidAmount ?? 0) > 0) {
+        if (!data.PaymentSourceID || !data.PaymentSourceType) {
+          return { success: false, message: 'اختر مصدر دفع المبلغ (خزنة أو ماكينة)' };
+        }
+        if (data.PaymentSourceType === 'cash_account') {
+          const acc = db.prepare('SELECT IsActive FROM cash_accounts WHERE CashAccountID = ?').get(data.PaymentSourceID) as any;
+          if (!acc) return { success: false, message: 'الخزنة المختارة غير موجودة' };
+          if (!acc.IsActive) return { success: false, message: 'الخزنة المختارة غير مفعّلة' };
+        } else if (data.PaymentSourceType === 'payment_method') {
+          const pm = db.prepare('SELECT IsActive FROM payment_methods WHERE PaymentMethodID = ?').get(data.PaymentSourceID) as any;
+          if (!pm) return { success: false, message: 'ماكينة الدفع المختارة غير موجودة' };
+          if (!pm.IsActive) return { success: false, message: 'ماكينة الدفع المختارة غير مفعّلة' };
+        }
       }
 
       const subtotal = data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitCost), 0);
@@ -123,9 +188,10 @@ export function registerPurchasesHandlers() {
             : item.UnitCost;
 
           db.prepare(`
-            INSERT INTO purchase_details (PurchaseID, ItemID, IMEI, Quantity, UnitCost, UnitPrice, Total, WarehouseID)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(purchaseId, item.ItemID, item.IMEI ?? null, item.Quantity, item.UnitCost, item.UnitPrice ?? null, itemBaseCost, item.WarehouseID);
+            INSERT INTO purchase_details (PurchaseID, ItemID, IMEI, Quantity, UnitCost, UnitPrice, Total, WarehouseID, EffectiveUnitCost)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(purchaseId, item.ItemID, item.IMEI ?? null, item.Quantity, item.UnitCost,
+                 item.UnitPrice ?? null, itemBaseCost, item.WarehouseID, effectiveUnitCost);
 
           // Add IMEI if provided
           if (item.IMEI) {
@@ -212,7 +278,7 @@ export function registerPurchasesHandlers() {
   });
 
   ipcMain.handle('purchaseReturns:create', async (_event, data: {
-    PurchaseID: number; items: { ItemID: number; SerialID?: number; Quantity: number; UnitCost: number }[];
+    PurchaseID: number; items: { ItemID: number; SerialID?: number; Quantity: number; UnitCost: number; WarehouseID?: number }[];
     Reason?: string; CashAccountID?: number; userId: number;
   }) => {
     const db = getDb();
@@ -247,12 +313,30 @@ export function registerPurchasesHandlers() {
     const cashRefund = +(totalAmount - debtRelief).toFixed(2);
 
     // Check sufficient stock before return (unless negative stock allowed)
+    // Goods go back to the supplier FROM the warehouse they were received into.
+    // Resolved once here and reused below so the check and the deduction can
+    // never disagree.
+    const lineWarehouse = (itemId: number, preferred?: number | null): number | null => {
+      if (preferred) return preferred;
+      const orig = db.prepare(
+        'SELECT WarehouseID FROM purchase_details WHERE PurchaseID = ? AND ItemID = ? LIMIT 1',
+      ).get(data.PurchaseID, itemId) as any;
+      return orig?.WarehouseID ?? resolveSourceWarehouse(db, itemId, 0, null);
+    };
+
     const allowNegStock = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_stock'").get() as any;
     if (allowNegStock?.Value !== '1') {
       for (const item of data.items) {
-        const stock = db.prepare('SELECT COALESCE(SUM(Quantity),0) as qty FROM stock_quantities WHERE ItemID = ?').get(item.ItemID) as any;
-        if ((stock?.qty || 0) < item.Quantity) {
-          return { success: false, message: `الكمية غير متوفرة للمرتجع للصنف #${item.ItemID}: المطلوب ${item.Quantity}، المتاح ${stock?.qty || 0}` };
+        const wh = lineWarehouse(item.ItemID, item.WarehouseID);
+        // Checked against THAT warehouse, not the total across all of them:
+        // stock sitting in another branch cannot be handed to this supplier.
+        const qty = wh ? warehouseStock(db, item.ItemID, wh) : 0;
+        if (qty < item.Quantity) {
+          const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(item.ItemID) as any;
+          return {
+            success: false,
+            message: `الكمية غير متوفرة في المخزن للمرتجع للصنف "${info?.ItemName || item.ItemID}": المطلوب ${item.Quantity}، المتاح ${qty}`,
+          };
         }
       }
     }
@@ -269,20 +353,21 @@ export function registerPurchasesHandlers() {
 
       for (const item of data.items) {
         db.prepare(`
-          INSERT INTO purchase_return_details (ReturnID, ItemID, SerialID, Quantity, UnitCost, Total)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitCost, item.Quantity * item.UnitCost);
+          INSERT INTO purchase_return_details (ReturnID, ItemID, SerialID, Quantity, UnitCost, Total, WarehouseID)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitCost,
+               item.Quantity * item.UnitCost, lineWarehouse(item.ItemID, item.WarehouseID));
 
         // Mark serial as returned
         if (item.SerialID) {
           db.prepare("UPDATE item_serials SET Status = 'returned' WHERE SerialID = ?").run(item.SerialID);
         }
 
-        // Deduct from stock
-        const stock = db.prepare('SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ?').get(item.ItemID) as any;
-        if (stock) {
-          db.prepare('UPDATE stock_quantities SET Quantity = Quantity - ? WHERE ID = ?').run(item.Quantity, stock.ID);
-        }
+        // Deduct from the warehouse the goods actually came into. The previous
+        // query had no WarehouseID and silently picked whichever row came
+        // first, so returning branch stock drove the main store negative.
+        const wh = lineWarehouse(item.ItemID, item.WarehouseID);
+        if (wh) deductStock(db, item.ItemID, wh, item.Quantity);
       }
 
       // Cancel only the part we still owe the supplier

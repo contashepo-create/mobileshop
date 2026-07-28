@@ -118,7 +118,13 @@ export function registerDeleteHandlers() {
             const stock = db.prepare('SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(item.ItemID, item.WarehouseID) as any;
             if (stock) {
               const oldTotal = stock.CostPrice * stock.Quantity;
-              const removedTotal = item.UnitCost * item.Quantity;
+              // Reverse the LANDED cost, which is what was capitalised into
+              // stock. Using the bare supplier price left this line's share of
+              // shipping and fees behind, inflating the cost of the stock that
+              // remained. `EffectiveUnitCost` is null on rows written before it
+              // existed, so fall back to the base figure for those.
+              const unitLanded = item.EffectiveUnitCost ?? item.UnitCost;
+              const removedTotal = unitLanded * item.Quantity;
               const newQty = stock.Quantity - item.Quantity;
               const newCost = newQty > 0 ? ((oldTotal - removedTotal) / newQty) : 0;
               db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?').run(newQty, newCost, stock.ID);

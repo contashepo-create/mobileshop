@@ -1074,6 +1074,28 @@ export function runMigrations(db: Database.Database) {
     db.exec(`ALTER TABLE sales ADD COLUMN TransferCost REAL DEFAULT 0`);
   } catch {}
 
+  // The landed cost per unit actually capitalised into stock: the supplier's
+  // price PLUS this line's share of shipping and payment fees.
+  //
+  // `purchase_details.UnitCost` holds only the supplier's price, but stock was
+  // added at the landed cost. Deleting a purchase reversed the base figure and
+  // left the overhead behind, permanently inflating the cost of whatever stock
+  // remained — 50 of overhead on a deleted 10-unit purchase raised the unit
+  // cost of the surviving 5 units from 105 to 115.
+  try {
+    db.exec(`ALTER TABLE purchase_details ADD COLUMN EffectiveUnitCost REAL`);
+  } catch {}
+
+  // Which warehouse a purchase-return line was taken FROM.
+  //
+  // Without it the reversal ran `WHERE ItemID = ?` with no warehouse and hit
+  // whichever row SQLite returned first. Goods bought into the branch were
+  // deducted from the main store instead: the main store went negative while
+  // the branch still showed stock it no longer had.
+  try {
+    db.exec(`ALTER TABLE purchase_return_details ADD COLUMN WarehouseID INTEGER`);
+  } catch {}
+
   // WHO pays the machine's commission.
   //
   //   'shop'     — the shop absorbs it. The customer is charged the invoice

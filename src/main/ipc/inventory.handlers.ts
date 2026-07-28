@@ -379,7 +379,12 @@ export function registerInventoryHandlers() {
         const existingTo = db.prepare('SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(item.ItemID, data.ToWarehouseID) as any;
         if (existingTo) {
           const newQty = (existingTo.Quantity || 0) + item.Quantity;
-          const newCost = newQty > 0
+          // Average only against a genuine positive holding. A destination
+          // sitting at a negative balance (sold before receipt) would otherwise
+          // drag the incoming goods to an invented cost — the same defect that
+          // was found in purchases:create.
+          const canAverage = (existingTo.Quantity || 0) > 0 && newQty > 0;
+          const newCost = canAverage
             ? (((existingTo.CostPrice || 0) * (existingTo.Quantity || 0)) + (movedCost * item.Quantity)) / newQty
             : movedCost;
           db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?').run(newQty, newCost, existingTo.ID);

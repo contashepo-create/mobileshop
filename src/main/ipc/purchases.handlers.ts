@@ -114,7 +114,13 @@ export function registerPurchasesHandlers() {
           } else if (data.items.length > 0) {
             allocatedOverhead = overhead / data.items.length * (item.Quantity / data.items.reduce((s, i) => s + i.Quantity, 0));
           }
-          const effectiveUnitCost = item.UnitCost + (allocatedOverhead / item.Quantity);
+          // Guard the division: a line with Quantity = 0 makes this Infinity in
+          // JavaScript (no exception), and Infinity was then written straight
+          // into stock_quantities.CostPrice, permanently destroying the
+          // inventory valuation and every report derived from it.
+          const effectiveUnitCost = item.Quantity > 0
+            ? item.UnitCost + (allocatedOverhead / item.Quantity)
+            : item.UnitCost;
 
           db.prepare(`
             INSERT INTO purchase_details (PurchaseID, ItemID, IMEI, Quantity, UnitCost, UnitPrice, Total, WarehouseID)
@@ -136,7 +142,24 @@ export function registerPurchasesHandlers() {
           const existingStock = db.prepare('SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(item.ItemID, item.WarehouseID) as any;
           if (existingStock) {
             const newQty = existingStock.Quantity + item.Quantity;
-            const newCost = ((existingStock.CostPrice * existingStock.Quantity) + (effectiveUnitCost * item.Quantity)) / newQty;
+            // Weighted average only makes sense when BOTH the existing holding
+            // and the resulting holding are positive.
+            //
+            // In negative-stock mode the existing quantity can be below zero
+            // (goods sold before they arrived). Averaging against a negative
+            // quantity produced nonsense: -4 units at cost 0 plus 10 units at
+            // 15 gave a "weighted average" of 25 per unit — the shop would
+            // value stock it paid 15 for at 25, inflating both inventory and
+            // future profit. Worse, an exact fill (-10 + 10) divides by zero
+            // and stored Infinity.
+            //
+            // When the prior balance is not a real positive holding, the price
+            // just paid IS the cost. Nothing is averaged because there is no
+            // earlier valid layer to average with.
+            const canAverage = existingStock.Quantity > 0 && newQty > 0;
+            const newCost = canAverage
+              ? ((existingStock.CostPrice * existingStock.Quantity) + (effectiveUnitCost * item.Quantity)) / newQty
+              : effectiveUnitCost;
             db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?').run(newQty, newCost, existingStock.ID);
           } else {
             db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(item.ItemID, item.WarehouseID, item.Quantity, effectiveUnitCost);

@@ -102,6 +102,57 @@ export function registerSalesHandlers() {
 
       const status = remaining > 0 ? (paidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
 
+      /**
+       * Authoritative unit cost for one sold line.
+       *
+       * The renderer sends `item.CostPrice`, which is the item's WEIGHTED
+       * AVERAGE across every warehouse. For serialised goods that is simply the
+       * wrong number: two identical phones bought at 600 and 900 both report a
+       * cost of 750, so selling the cheap one understates profit by 150 and
+       * selling the dear one overstates it by 150 — while the asset side
+       * relieves the actual serial. Stock value and profit then disagree, and no
+       * report can be right.
+       *
+       * Cost is therefore resolved HERE, in the main process, from the most
+       * specific source available:
+       *   1. the serial's own recorded cost (exact, for serialised units);
+       *   2. the cost of the warehouse the goods actually left;
+       *   3. the item's average cost;
+       *   4. whatever the caller supplied, last.
+       *
+       * Deciding it server-side also means a tampered renderer cannot dictate
+       * cost of sales.
+       */
+      const resolveUnitCost = (
+        item: { ItemID?: number; SerialID?: number; UnitCost?: number; isService?: boolean },
+        warehouseId: number | null,
+      ): number | null => {
+        if (item.isService) return item.UnitCost ?? null;
+
+        if (item.SerialID) {
+          const s = db.prepare('SELECT CostPrice FROM item_serials WHERE SerialID = ?')
+            .get(item.SerialID) as any;
+          if (s && s.CostPrice != null) return s.CostPrice;
+        }
+
+        if (item.ItemID && warehouseId) {
+          const sq = db.prepare(
+            'SELECT CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+          ).get(item.ItemID, warehouseId) as any;
+          // A zero here is meaningful only if the row genuinely holds zero-cost
+          // stock; treat it as usable but prefer a real average when it is 0.
+          if (sq && sq.CostPrice) return sq.CostPrice;
+        }
+
+        if (item.ItemID) {
+          const it = db.prepare('SELECT CostPrice FROM items WHERE ItemID = ?')
+            .get(item.ItemID) as any;
+          if (it && it.CostPrice != null) return it.CostPrice;
+        }
+
+        return item.UnitCost ?? null;
+      };
+
       const tx = db.transaction(() => {
         // Create sale
         const result = db.prepare(`
@@ -136,7 +187,7 @@ export function registerSalesHandlers() {
             item.isService ? null : (item.ItemID || null),
             item.SerialID ?? null,
             item.isService ? (item.ServiceName || null) : (item.IMEI ?? null),
-            item.Quantity, item.UnitPrice, item.UnitCost ?? null,
+            item.Quantity, item.UnitPrice, resolveUnitCost(item, lineWarehouse),
             item.Quantity * item.UnitPrice,
             item.IsWarranty ?? 0, item.WarrantyMonths ?? null,
             lineWarehouse

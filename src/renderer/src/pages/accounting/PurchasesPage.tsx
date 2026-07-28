@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Trash2, Search } from 'lucide-react';
+import { Plus, Trash2, Search, Undo2, RotateCcw, FileText } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input, Select } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
@@ -19,6 +19,14 @@ export function PurchasesPage() {
   const [cashAccounts, setCashAccounts] = useState<any[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
   const [showModal, setShowModal] = useState(false);
+  const [tab, setTab] = useState<'purchases' | 'returns'>('purchases');
+  const [returns, setReturns] = useState<any[]>([]);
+  // Purchase-return (debit note) workflow
+  const [showReturnModal, setShowReturnModal] = useState(false);
+  const [returnPurchase, setReturnPurchase] = useState<any>(null);
+  const [returnLines, setReturnLines] = useState<any[]>([]);
+  const [returnReason, setReturnReason] = useState('');
+  const [returnCashAccountId, setReturnCashAccountId] = useState('');
   const [search, setSearch] = useState('');
 
   const [supplierId, setSupplierId] = useState('');
@@ -38,15 +46,16 @@ export function PurchasesPage() {
   const [warehouseId, setWarehouseId] = useState('');
 
   const fetchData = async () => {
-    const [p, su, it, wh, ca, pm] = await Promise.all([
+    const [p, rt, su, it, wh, ca, pm] = await Promise.all([
       window.api.invoke('purchases:list'),
+      window.api.invoke('purchaseReturns:list'),
       window.api.invoke('suppliers:list'),
       window.api.invoke('items:list', { search, isActive: 1 }),
       window.api.invoke('warehouses:list'),
       window.api.invoke('cashAccounts:list'),
       window.api.invoke('paymentMethods:list'),
     ]);
-    setPurchases(p); setSuppliers(su); setItems(it); setWarehouses(wh); setCashAccounts(ca); setPaymentMethods(pm);
+    setPurchases(p); setReturns(rt || []); setSuppliers(su); setItems(it); setWarehouses(wh); setCashAccounts(ca); setPaymentMethods(pm);
     if (wh.length > 0 && !warehouseId) setWarehouseId(wh[0].WarehouseID.toString());
   };
 
@@ -113,6 +122,63 @@ export function PurchasesPage() {
     }
   };
 
+  /** Opens the debit-note screen, showing what may still go back. */
+  const startReturn = async (purchase: any) => {
+    const lines = await window.api.invoke('purchaseReturns:returnable', purchase.PurchaseID);
+    if (!Array.isArray(lines) || lines.length === 0) {
+      showToast('error', 'لا توجد بنود قابلة للإرجاع'); return;
+    }
+    const open = lines.filter((l: any) => l.Returnable > 0);
+    if (open.length === 0) {
+      showToast('error', 'لا يمكن إرجاع أي بند: إما تم إرجاعه أو لم يعد موجوداً بالمخزن');
+      return;
+    }
+    setReturnPurchase(purchase);
+    setReturnLines(open.map((l: any) => ({ ...l, ReturnQty: 0 })));
+    setReturnReason('');
+    setReturnCashAccountId('');
+    setShowReturnModal(true);
+  };
+
+  const returnTotal = returnLines.reduce(
+    (sum, l) => sum + (Number(l.ReturnQty) || 0) * (l.UnitCost || 0), 0);
+
+  const submitReturn = async () => {
+    const picked = returnLines.filter(l => (Number(l.ReturnQty) || 0) > 0);
+    if (picked.length === 0) { showToast('error', 'حدد الكمية المرتجعة'); return; }
+    for (const l of picked) {
+      if (Number(l.ReturnQty) > l.Returnable) {
+        showToast('error', `الكمية المرتجعة من "${l.ItemName}" أكبر من المتاح (${l.Returnable})`);
+        return;
+      }
+    }
+    const res = await window.api.invoke('purchaseReturns:create', {
+      PurchaseID: returnPurchase.PurchaseID,
+      items: picked.map(l => ({
+        ItemID: l.ItemID, Quantity: Number(l.ReturnQty),
+        UnitCost: l.UnitCost, WarehouseID: l.WarehouseID,
+      })),
+      Reason: returnReason || undefined,
+      CashAccountID: returnCashAccountId ? parseInt(returnCashAccountId) : undefined,
+      userId: currentUserId(),
+    });
+    if (res?.success) {
+      showToast('success', `تم إنشاء مرتجع مشتريات رقم ${res.returnNumber}`);
+      setShowReturnModal(false);
+      setReturnPurchase(null);
+      fetchData();
+    } else {
+      showToast('error', res?.message || 'فشل إنشاء المرتجع');
+    }
+  };
+
+  const undoReturn = async (returnId: number, number: string) => {
+    if (!confirm(`إلغاء المرتجع ${number}؟\n\nستعود البضاعة للمخزن، ويُعاد المبلغ للمورد، ويرجع الدين عليك.`)) return;
+    const res = await window.api.invoke('delete:purchaseReturn', returnId);
+    if (res?.success) { showToast('success', res.message); fetchData(); }
+    else showToast('error', res?.message || 'فشل الإلغاء');
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -120,6 +186,43 @@ export function PurchasesPage() {
         <Button onClick={() => setShowModal(true)} icon={<Plus size={16} />}>فاتورة شراء</Button>
       </div>
 
+      <div className="flex gap-2 border-b border-slate-200 dark:border-slate-700">
+        <button onClick={() => setTab('purchases')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+            tab === 'purchases' ? 'border-primary-600 text-primary-600'
+                                : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400'}`}>
+          <FileText size={16} /> فواتير الشراء ({purchases.length})
+        </button>
+        <button onClick={() => setTab('returns')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+            tab === 'returns' ? 'border-primary-600 text-primary-600'
+                              : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400'}`}>
+          <Undo2 size={16} /> مرتجعات الشراء ({returns.length})
+        </button>
+      </div>
+
+      {tab === 'returns' ? (
+        <DataTable
+          columns={[
+            { key: 'ReturnNumber', title: 'رقم المرتجع', render: (r) => <span className="font-mono text-xs">{r.ReturnNumber}</span> },
+            { key: 'Date', title: 'التاريخ' },
+            { key: 'PurchaseNumber', title: 'فاتورة الشراء', render: (r) => <span className="font-mono text-xs">{r.PurchaseNumber}</span> },
+            { key: 'SupplierName', title: 'المورد' },
+            { key: 'TotalAmount', title: 'قيمة المرتجع', render: (r) => <span className="font-bold">{r.TotalAmount?.toFixed(2)}</span> },
+            { key: 'DebtRelief', title: 'خُصم من دَينك', render: (r) => <span className="text-blue-600">{(r.DebtRelief || 0).toFixed(2)}</span> },
+            { key: 'CashRefund', title: 'استرددت نقداً', render: (r) => <span className="text-green-600">{(r.CashRefund || 0).toFixed(2)}</span> },
+            { key: 'Reason', title: 'السبب', render: (r) => r.Reason || '—' },
+            { key: 'undo', title: '', render: (r) => (
+              <button onClick={() => undoReturn(r.ReturnID, r.ReturnNumber)}
+                className="p-1.5 rounded text-slate-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                title="إلغاء المرتجع وعكس تأثيره"><RotateCcw size={14} /></button>
+            )},
+          ]}
+          data={returns}
+          keyField="ReturnID"
+          emptyMessage="لا توجد مرتجعات شراء"
+        />
+      ) : (
       <DataTable
         columns={[
           { key: 'PurchaseNumber', title: 'رقم الفاتورة', render: (row) => <span className="font-mono text-xs">{row.PurchaseNumber}</span> },
@@ -129,12 +232,22 @@ export function PurchasesPage() {
           { key: 'PaidAmount', title: 'المدفوع', render: (row) => <span className="text-green-600">{row.PaidAmount?.toFixed(2)}</span> },
           { key: 'RemainingAmount', title: 'المتبقي', render: (row) => row.RemainingAmount > 0 ? <span className="text-red-600">{row.RemainingAmount?.toFixed(2)}</span> : '—' },
           { key: 'Status', title: 'الحالة', render: (row) => <Badge variant={row.Status === 'completed' ? 'green' : row.Status === 'partial' ? 'yellow' : 'red'}>{row.Status === 'completed' ? 'مكتملة' : row.Status === 'partial' ? 'جزئية' : 'غير مدفوعة'}</Badge> },
-          { key: 'delete', title: '', render: (row) => <button onClick={async () => { if (confirm('سيتم حذف فاتورة الشراء وعكس كل التأثيرات (المخزون، المورد، الخزنة). متابعة؟')) { const r = await window.api.invoke('delete:purchase', row.PurchaseID); if (r.success) { showToast('success', r.message); fetchData(); } else { showToast('error', r.message); } } }} className="p-1.5 rounded text-slate-500 dark:text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20" title="حذف"><Trash2 size={14} /></button> },
+          { key: 'ops', title: '', render: (row) => (
+            <div className="flex items-center gap-1">
+              <button onClick={() => startReturn(row)}
+                className="p-1.5 rounded text-slate-500 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20"
+                title="مرتجع مشتريات"><Undo2 size={14} /></button>
+              <button onClick={async () => { if (confirm('سيتم حذف فاتورة الشراء وعكس كل التأثيرات (المخزون، المورد، الخزنة). متابعة؟')) { const r = await window.api.invoke('delete:purchase', row.PurchaseID); if (r.success) { showToast('success', r.message); fetchData(); } else { showToast('error', r.message); } } }}
+                className="p-1.5 rounded text-slate-500 dark:text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                title="حذف"><Trash2 size={14} /></button>
+            </div>
+          )},
         ]}
         data={purchases}
         keyField="PurchaseID"
         emptyMessage="لا توجد فواتير شراء"
       />
+      )}
 
       <Modal isOpen={showModal} onClose={() => setShowModal(false)} title="فاتورة شراء جديدة" size="xl"
         footer={<><Button variant="secondary" onClick={() => setShowModal(false)}>إلغاء</Button><Button onClick={handlePurchase}>حفظ</Button></>}
@@ -225,6 +338,96 @@ export function PurchasesPage() {
               {paid === 0 && <p className="text-sm text-slate-400">لم يتم إدخال مبلغ مدفوع — ستكون الفاتورة غير مدفوعة (رصيد للمورد)</p>}
             </div>
           </div>
+        </div>
+      </Modal>
+
+      {/* Purchase return (debit note) */}
+      <Modal isOpen={showReturnModal} onClose={() => setShowReturnModal(false)}
+        title={`مرتجع مشتريات — فاتورة ${returnPurchase?.PurchaseNumber || ''}`} size="lg"
+        footer={<>
+          <Button variant="secondary" onClick={() => setShowReturnModal(false)}>إلغاء</Button>
+          <Button onClick={submitReturn} icon={<Undo2 size={16} />}>تأكيد المرتجع</Button>
+        </>}
+      >
+        <div className="space-y-4">
+          <div className="text-sm text-slate-600 dark:text-slate-300">
+            المورد: <b>{returnPurchase?.SupplierName}</b>
+            {' · '}إجمالي الفاتورة: <b>{returnPurchase?.TotalAmount?.toFixed(2)}</b>
+            {' · '}المتبقي عليك: <b>{(returnPurchase?.RemainingAmount || 0).toFixed(2)}</b>
+          </div>
+
+          <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 dark:bg-slate-800/50">
+                <tr>
+                  <th className="px-3 py-2 text-right">الصنف</th>
+                  <th className="px-3 py-2 text-right">المخزن</th>
+                  <th className="px-3 py-2 text-right">المشترى</th>
+                  <th className="px-3 py-2 text-right">بالمخزن</th>
+                  <th className="px-3 py-2 text-right">المتاح للإرجاع</th>
+                  <th className="px-3 py-2 text-right">سعر الشراء</th>
+                  <th className="px-3 py-2 text-right">الكمية المرتجعة</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                {returnLines.map((l, idx) => (
+                  <tr key={idx}>
+                    <td className="px-3 py-2">{l.ItemName}</td>
+                    <td className="px-3 py-2 text-slate-500">{l.WarehouseName || '—'}</td>
+                    <td className="px-3 py-2">{l.Quantity}</td>
+                    <td className="px-3 py-2 text-slate-500">{l.InStock}</td>
+                    <td className="px-3 py-2">
+                      <span className={l.LimitedByStock ? 'text-orange-600 font-medium' : ''}>{l.Returnable}</span>
+                      {/* Explains WHY the cap is lower than the invoice line. */}
+                      {l.LimitedByStock && (
+                        <span className="block text-[10px] text-orange-500">بيعت بعض الكمية</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">{(l.UnitCost || 0).toFixed(2)}</td>
+                    <td className="px-3 py-2 w-32">
+                      <input type="number" min={0} max={l.Returnable} value={l.ReturnQty}
+                        onChange={(e) => {
+                          const v = Math.max(0, Math.min(l.Returnable, Number(e.target.value) || 0));
+                          setReturnLines(rows => rows.map((r, i) => i === idx ? { ...r, ReturnQty: v } : r));
+                        }}
+                        className="w-full px-2 py-1 rounded bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-white" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="سبب الإرجاع" value={returnReason}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
+              placeholder="بضاعة تالفة، مخالفة للمواصفات..." />
+            <Select label="خزنة استلام المبلغ" value={returnCashAccountId}
+              onChange={(e) => setReturnCashAccountId(e.target.value)}>
+              <option value="">— بدون استرداد نقدي —</option>
+              {cashAccounts.map((ca: any) => (
+                <option key={ca.CashAccountID} value={ca.CashAccountID}>
+                  {ca.AccountName} ({ca.Balance?.toFixed(2)})
+                </option>
+              ))}
+            </Select>
+          </div>
+
+          {returnTotal > 0 && (() => {
+            const outstanding = Math.max(0, returnPurchase?.RemainingAmount || 0);
+            const debtRelief = Math.min(returnTotal, outstanding);
+            const cashBack = +(returnTotal - debtRelief).toFixed(2);
+            return (
+              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 text-sm text-amber-800 dark:text-amber-300 space-y-1">
+                <div>قيمة المرتجع: <b>{returnTotal.toFixed(2)}</b></div>
+                <div>يُخصم من دَينك للمورد: <b>{debtRelief.toFixed(2)}</b></div>
+                <div>تسترده نقداً: <b>{cashBack.toFixed(2)}</b></div>
+                <div className="pt-1 border-t border-amber-200 dark:border-amber-800 text-xs">
+                  يُسدَّد ما عليك أولاً، ولا تسترد نقداً إلا ما دفعته فعلاً.
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </Modal>
     </div>

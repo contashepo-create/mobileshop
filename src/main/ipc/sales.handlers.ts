@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { resolveSourceWarehouse, deductStock, restoreStock, totalStock } from '../database/stock';
+import { resolveSourceWarehouse, deductStock, restoreStock, restoreStockAtCost, totalStock } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 
 export function registerSalesHandlers() {
@@ -406,12 +406,14 @@ export function registerSalesHandlers() {
         const returnId = result.lastInsertRowid;
 
         for (const item of data.items) {
-          // Put the goods back into the warehouse the sale took them from.
+          // Put the goods back into the warehouse the sale took them from, at
+          // the cost they LEFT at.
           const origLine = db.prepare(
-            'SELECT WarehouseID FROM sale_details WHERE SaleID = ? AND ItemID IS ? LIMIT 1'
+            'SELECT WarehouseID, UnitCost FROM sale_details WHERE SaleID = ? AND ItemID IS ? LIMIT 1'
           ).get(data.SaleID, item.ItemID) as any;
           const returnWarehouse = origLine?.WarehouseID
             ?? resolveSourceWarehouse(db, item.ItemID, 0, null);
+          const returnedUnitCost = origLine?.UnitCost ?? 0;
 
           db.prepare(`
             INSERT INTO sale_return_details (ReturnID, ItemID, SerialID, Quantity, UnitPrice, Total, WarehouseID)
@@ -423,9 +425,16 @@ export function registerSalesHandlers() {
             db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(item.SerialID);
           }
 
-          // Restore stock quantity into the correct warehouse
+          // Restore stock quantity into the correct warehouse.
+          //
+          // The COGS reversal in the P&L credits `sale_details.UnitCost` — the
+          // cost the goods left at. The asset must come back at the SAME figure
+          // or the two sides disagree. Adding only the quantity left the row's
+          // existing CostPrice untouched, so goods sold at 30 and returned after
+          // a restock at 50 came back valued at 50: inventory was overstated by
+          // the difference while COGS was credited the smaller amount.
           if (!item.SerialID && returnWarehouse) {
-            restoreStock(db, item.ItemID, returnWarehouse, item.Quantity);
+            restoreStockAtCost(db, item.ItemID, returnWarehouse, item.Quantity, returnedUnitCost);
           }
         }
 

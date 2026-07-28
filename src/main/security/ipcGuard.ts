@@ -135,6 +135,11 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'delete:purchase': 'purchases.delete',
   'purchaseReturns:list': 'purchases.returns',
   'purchaseReturns:create': 'purchases.returns',
+  'purchaseReturns:get': 'purchases.returns',
+  'purchaseReturns:returnable': 'purchases.returns',
+  // Reversing a debit note moves stock and money, so it carries the same
+  // authority as deleting a purchase.
+  'delete:purchaseReturn': 'purchases.delete',
 
   // ---- Maintenance
   'maintenance:list': 'maintenance.view',

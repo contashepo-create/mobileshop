@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { resolveSourceWarehouse, warehouseStock, deductStock } from '../database/stock';
+import { resolveSourceWarehouse, warehouseStock, deductStock, restoreStockAtCost } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 
 export function registerPurchasesHandlers() {
@@ -391,5 +391,141 @@ export function registerPurchasesHandlers() {
 
     tx();
     return { success: true, returnNumber };
+  });
+
+  /** One purchase return with its lines — used to print the debit note. */
+  ipcMain.handle('purchaseReturns:get', async (_event, returnId: number) => {
+    const db = getDb();
+    const header = db.prepare(`
+      SELECT r.*, p.PurchaseNumber, p.SupplierID, sup.Name AS SupplierName
+      FROM purchase_returns r
+      JOIN purchases p ON r.PurchaseID = p.PurchaseID
+      JOIN suppliers sup ON p.SupplierID = sup.SupplierID
+      WHERE r.ReturnID = ?
+    `).get(returnId);
+    const details = db.prepare(`
+      SELECT rd.*, i.ItemName, w.WarehouseName
+      FROM purchase_return_details rd
+      LEFT JOIN items i ON rd.ItemID = i.ItemID
+      LEFT JOIN warehouses w ON rd.WarehouseID = w.WarehouseID
+      WHERE rd.ReturnID = ?
+    `).all(returnId);
+    return { header, details };
+  });
+
+  /**
+   * How much of each purchase line may still be returned to the supplier.
+   *
+   * Two independent limits apply, and the smaller one wins:
+   *   1. what was bought and not yet returned — you cannot send back more than
+   *      arrived;
+   *   2. what is physically still in that warehouse — goods already sold to a
+   *      customer are gone and cannot also go back to the supplier.
+   *
+   * Reporting both figures lets the screen explain WHY a line is capped.
+   */
+  ipcMain.handle('purchaseReturns:returnable', async (_event, purchaseId: number) => {
+    const db = getDb();
+    const lines = db.prepare(`
+      SELECT pd.ItemID, pd.IMEI, pd.Quantity, pd.UnitCost, pd.WarehouseID,
+             pd.EffectiveUnitCost, i.ItemName, w.WarehouseName,
+             COALESCE((
+               SELECT SUM(rd.Quantity) FROM purchase_return_details rd
+               JOIN purchase_returns r ON rd.ReturnID = r.ReturnID
+               WHERE r.PurchaseID = pd.PurchaseID AND rd.ItemID = pd.ItemID
+             ), 0) AS AlreadyReturned
+      FROM purchase_details pd
+      LEFT JOIN items i ON pd.ItemID = i.ItemID
+      LEFT JOIN warehouses w ON pd.WarehouseID = w.WarehouseID
+      WHERE pd.PurchaseID = ?
+    `).all(purchaseId) as any[];
+
+    return lines.map(l => {
+      const notYetReturned = Math.max(0, (l.Quantity || 0) - (l.AlreadyReturned || 0));
+      const inStock = l.WarehouseID ? warehouseStock(db, l.ItemID, l.WarehouseID) : 0;
+      return {
+        ...l,
+        InStock: inStock,
+        NotYetReturned: notYetReturned,
+        Returnable: Math.min(notYetReturned, Math.max(0, inStock)),
+        // Set when stock, not the invoice, is the binding constraint — the
+        // screen uses it to say "you have already sold some of these".
+        LimitedByStock: inStock < notYetReturned,
+      };
+    });
+  });
+
+  /**
+   * Reverses a purchase return — the "undo" for a debit note raised in error.
+   *
+   * Mirror image of `purchaseReturns:create`: the goods come back into the same
+   * warehouse at the same landed cost, the cash we took back goes out again,
+   * and the debt we had cancelled is restored to the supplier.
+   */
+  ipcMain.handle('delete:purchaseReturn', async (_event, returnId: number) => {
+    const db = getDb();
+    try {
+      const ret = db.prepare('SELECT * FROM purchase_returns WHERE ReturnID = ?').get(returnId) as any;
+      if (!ret) return { success: false, message: 'المرتجع غير موجود' };
+
+      const purchase = db.prepare('SELECT * FROM purchases WHERE PurchaseID = ?').get(ret.PurchaseID) as any;
+      const details = db.prepare('SELECT * FROM purchase_return_details WHERE ReturnID = ?')
+        .all(returnId) as any[];
+
+      // Undoing the return means paying the supplier back what they refunded
+      // us, so the drawer must be able to cover it.
+      const cashRefund = ret.CashRefund || 0;
+      const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
+      if (allowNegCash?.Value !== '1' && ret.CashAccountID && cashRefund > 0) {
+        const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?')
+          .get(ret.CashAccountID) as any;
+        if (!acc || (acc.Balance || 0) < cashRefund) {
+          return {
+            success: false,
+            message: `الرصيد غير كافٍ لإعادة المبلغ للمورد: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${cashRefund.toFixed(2)}`,
+          };
+        }
+      }
+
+      const tx = db.transaction(() => {
+        for (const line of details) {
+          if (line.SerialID) {
+            db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(line.SerialID);
+          } else if (line.ItemID && line.WarehouseID) {
+            // Back in at the cost the goods left at, so inventory value and the
+            // purchase-returns figure in the P&L stay in step.
+            restoreStockAtCost(db, line.ItemID, line.WarehouseID, line.Quantity, line.UnitCost || 0);
+          }
+        }
+
+        if (ret.CashAccountID && cashRefund > 0) {
+          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?')
+            .run(cashRefund, ret.CashAccountID);
+        }
+
+        const debtRelief = ret.DebtRelief || 0;
+        if (purchase?.SupplierID && debtRelief > 0) {
+          db.prepare('UPDATE suppliers SET Balance = Balance + ? WHERE SupplierID = ?')
+            .run(debtRelief, purchase.SupplierID);
+          db.prepare(`
+            UPDATE purchases
+            SET RemainingAmount = RemainingAmount + ?,
+                Status = CASE WHEN RemainingAmount + ? > 0
+                              THEN (CASE WHEN PaidAmount > 0 THEN 'partial' ELSE 'unpaid' END)
+                              ELSE 'completed' END
+            WHERE PurchaseID = ?
+          `).run(debtRelief, debtRelief, ret.PurchaseID);
+        }
+
+        db.prepare('DELETE FROM purchase_return_details WHERE ReturnID = ?').run(returnId);
+        db.prepare('DELETE FROM purchase_returns WHERE ReturnID = ?').run(returnId);
+      });
+
+      tx();
+      return { success: true, message: 'تم إلغاء مرتجع الشراء وعكس كل تأثيراته' };
+    } catch (err: any) {
+      console.error('[Purchases] Error reversing return:', err);
+      return { success: false, message: `خطأ: ${err.message || err}` };
+    }
   });
 }

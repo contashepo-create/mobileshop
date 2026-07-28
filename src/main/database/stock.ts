@@ -70,6 +70,50 @@ export function deductStock(db: Database.Database, itemId: number, warehouseId: 
   }
 }
 
+/**
+ * Returns goods to stock at a KNOWN unit cost, re-averaging correctly.
+ *
+ * Used when the cost of the returning goods is known independently of whatever
+ * the warehouse currently holds — a customer return, where the goods must come
+ * back at the cost they left at.
+ *
+ * `restoreStock` only adds quantity and leaves the existing CostPrice alone.
+ * That is wrong whenever the cost has moved since: goods sold at 30 and
+ * returned after a restock at 50 would re-enter valued at 50, overstating
+ * inventory while the profit report credited cost of sales the smaller figure.
+ * The two sides must use the same number.
+ *
+ * The weighted average is only meaningful when the existing holding is
+ * positive; against a negative or empty balance the returning cost IS the cost,
+ * because there is no valid earlier layer to blend with.
+ */
+export function restoreStockAtCost(
+  db: Database.Database,
+  itemId: number,
+  warehouseId: number,
+  qty: number,
+  unitCost: number,
+) {
+  const row = db.prepare(
+    'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+  ).get(itemId, warehouseId) as any;
+
+  if (!row) {
+    db.prepare(
+      'INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)',
+    ).run(itemId, warehouseId, qty, unitCost);
+    return;
+  }
+
+  const newQty = (row.Quantity || 0) + qty;
+  const canAverage = (row.Quantity || 0) > 0 && newQty > 0;
+  const newCost = canAverage
+    ? (((row.CostPrice || 0) * row.Quantity) + (unitCost * qty)) / newQty
+    : unitCost;
+  db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?')
+    .run(newQty, newCost, row.ID);
+}
+
 /** Adds `qty` back to a specific warehouse, creating the row if needed. */
 export function restoreStock(db: Database.Database, itemId: number, warehouseId: number, qty: number, costPrice = 0) {
   const row = db.prepare('SELECT ID FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(itemId, warehouseId) as any;

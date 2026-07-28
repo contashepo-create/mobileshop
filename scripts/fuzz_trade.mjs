@@ -48,7 +48,14 @@ function netWorth(db) {
  * documents. Not recomputed — see the conservation check below.
  */
 function totalFreightWrittenOff(db) {
-  return db.prepare('SELECT COALESCE(SUM(COALESCE(FreightWrittenOff,0)),0) v FROM purchase_returns').get()?.v ?? 0;
+  // `purchase_returns.FreightWrittenOff` is a printing copy of the same
+  // figures now held in `inventory_adjustments`; counting both double-charged.
+  const a = 0;
+  // Inventory valuation the handlers recorded as written off, for the same
+  // reason: it is value that genuinely left the business, so an operation that
+  // books one is allowed to move net worth by exactly that much.
+  const b = db.prepare('SELECT COALESCE(SUM(COALESCE(Amount,0)),0) v FROM inventory_adjustments').get()?.v ?? 0;
+  return a + b;
 }
 
 const ITERATIONS = Number(process.argv[2]) || 400;
@@ -90,8 +97,14 @@ function seed() {
            VALUES(1,'Ahmed',0,'active'),(2,'Sara',0,'active')`);
   db.exec(`INSERT INTO suppliers(SupplierID,Name,Balance,Status)
            VALUES(1,'SuppA',0,'active'),(2,'SuppB',0,'active')`);
+  // Item 3 is SERIALISED, because this is a mobile phone shop and an
+  // IMEI-tracked handset is the normal case, not an edge case. Without one the
+  // fuzzer never touched ~58 lines of serial handling, and it hid the worst
+  // defect found: a sold handset stayed in `stock_quantities` for ever, so
+  // inventory was overstated by the cost of every phone the shop had sold.
   db.exec(`INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive)
-           VALUES(1,'Cable','part',0,10,20,1),(2,'Phone','device',0,600,1000,1)`);
+           VALUES(1,'Cable','part',0,10,20,1),(2,'Phone','device',0,600,1000,1),
+                 (3,'iPhone','device',1,600,1000,1)`);
   db.exec(`INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice)
            VALUES(1,1,100,10),(2,1,20,600)`);
   return db;
@@ -129,6 +142,21 @@ async function opSale() {
   const items = [];
   const n = between(1, 2);
   for (let i = 0; i < n; i++) {
+    // Prefer a real handset when one is on the shelf, so the serialised path
+    // is exercised as a matter of course rather than by luck.
+    const free = qa(`SELECT SerialID, WarehouseID FROM item_serials
+                     WHERE Status='available' ORDER BY SerialID`);
+    if (free.length && rnd() < 0.35) {
+      const s = free[Math.floor(rnd() * free.length)];
+      if (!items.some(x => x.SerialID === s.SerialID)) {
+        items.push({
+          ItemID: 3, SerialID: s.SerialID, Quantity: 1,
+          WarehouseID: s.WarehouseID ?? undefined,
+          UnitPrice: between(900, 1200),
+        });
+        continue;
+      }
+    }
     const itemId = pick([1, 2]);
     items.push({
       ItemID: itemId,
@@ -159,13 +187,19 @@ async function opSale() {
     (res?.success ? '' : ' [refused]');
 }
 
+let imeiCounter = 0;
+
 async function opPurchase() {
+  // One purchase in four brings in a serialised handset, one unit at a time
+  // with its own IMEI — exactly how a phone shop receives stock.
+  const serialised = rnd() < 0.25;
   const items = [{
-    ItemID: pick([1, 2]),
-    Quantity: between(1, 20),
+    ItemID: serialised ? 3 : pick([1, 2]),
+    Quantity: serialised ? 1 : between(1, 20),
     UnitCost: 0,
     WarehouseID: pick([1, 2]),
   }];
+  if (serialised) items[0].IMEI = `35${String(++imeiCounter).padStart(13, '0')}`;
   items[0].UnitCost = items[0].ItemID === 1 ? between(8, 14) : between(550, 650);
   const total = items[0].Quantity * items[0].UnitCost;
   const paid = r2(total * pick([0, 0.5, 1]));
@@ -253,6 +287,13 @@ async function opPurchaseReturn() {
 async function opDeleteSaleReturn() {
   const ret = pickRow('SELECT ReturnID FROM sale_returns ORDER BY ReturnID');
   if (!ret) return 'deleteSaleReturn [none]';
+  if (process.env.SERTRACE) {
+    const d = currentDb();
+    globalThis.__dsr = {
+      lines: d.prepare('SELECT * FROM sale_return_details WHERE ReturnID=?').all(ret.ReturnID),
+      sale: d.prepare('SELECT SaleID,ItemID,SerialID,Quantity,UnitCost,WarehouseID FROM sale_details WHERE SaleID=(SELECT SaleID FROM sale_returns WHERE ReturnID=?)').all(ret.ReturnID),
+    };
+  }
   const res = await call('delete:saleReturn', ret.ReturnID);
   return 'deleteSaleReturn' + (res?.success ? '' : ' [refused]');
 }
@@ -396,6 +437,14 @@ for (let i = 1; i <= ITERATIONS; i++) {
   // shape. It is covered by the accounting identity instead.
   const movesMargin = /^(sale\(|editSale|saleReturn|deleteSale)/.test(label);
   if (!movesMargin && Math.abs(worthDelta) > 0.001) {
+    if (process.env.CONSDUMP) {
+      const d = currentDb();
+      console.log('\n--- CONSERVATION DUMP ---', label);
+      console.log('adjustments:', JSON.stringify(d.prepare('SELECT AdjustmentID,ItemID,WarehouseID,Amount,Reason,RefType,RefID FROM inventory_adjustments ORDER BY AdjustmentID DESC LIMIT 5').all()));
+      console.log('lastPR     :', JSON.stringify(d.prepare('SELECT ReturnID,PurchaseID,TotalAmount,DebtRelief,CashRefund,FreightWrittenOff FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').get()));
+      console.log('lastPRD    :', JSON.stringify(d.prepare('SELECT * FROM purchase_return_details ORDER BY DetailID DESC LIMIT 2').all()));
+      console.log('stock      :', JSON.stringify(d.prepare('SELECT ItemID,WarehouseID,Quantity,CostPrice FROM stock_quantities').all()));
+    }
     breachesFound.push({
       step: i, label,
       breaches: [{
@@ -413,6 +462,62 @@ for (let i = 1; i <= ITERATIONS; i++) {
   writeOffsBefore = writeOffsAfter;
 
   const breaches = checkAll(currentDb(), OPENING_NET_WORTH);
+  if (process.env.SERTRACE) {
+    const d = currentDb();
+    const q = d.prepare('SELECT COALESCE(SUM(Quantity),0) v FROM stock_quantities WHERE ItemID=3').get().v;
+    const n = d.prepare("SELECT COUNT(*) v FROM item_serials WHERE ItemID=3 AND Status='available'").get().v;
+    const sv = d.prepare('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities WHERE ItemID=3').get().v;
+    const nv = d.prepare("SELECT COALESCE(SUM(CostPrice),0) v FROM item_serials WHERE ItemID=3 AND Status='available'").get().v;
+    const vgap = Math.round((sv-nv)*100)/100;
+    if (vgap !== (globalThis.__vgap ?? 0)) {
+      console.log(`  step ${i}: VALUE gap ${(globalThis.__vgap ?? 0)} -> ${vgap}  after ${label}`);
+      if (globalThis.__dsr) {
+        console.log('     DELETED return lines:', JSON.stringify(globalThis.__dsr.lines));
+        console.log('     its sale lines     :', JSON.stringify(globalThis.__dsr.sale));
+      }
+      const rr = d.prepare('SELECT * FROM sale_returns ORDER BY ReturnID DESC LIMIT 1').get();
+      if (rr) {
+        console.log('     LAST sale_return:', JSON.stringify(rr));
+        console.log('     its lines :', JSON.stringify(d.prepare('SELECT * FROM sale_return_details WHERE ReturnID=?').all(rr.ReturnID)));
+        console.log('     its sale  :', JSON.stringify(d.prepare('SELECT SaleID,ItemID,SerialID,Quantity,UnitCost,WarehouseID FROM sale_details WHERE SaleID=?').all(rr.SaleID)));
+      }
+      console.log('     purchase_details(item3):', JSON.stringify(d.prepare('SELECT PurchaseID,Quantity,UnitCost,EffectiveUnitCost,IMEI,WarehouseID FROM purchase_details WHERE ItemID=3').all()));
+      console.log('     pr_details:', JSON.stringify(d.prepare('SELECT ReturnID,ItemID,SerialID,Quantity,UnitCost,LandedUnitCost,WarehouseID FROM purchase_return_details WHERE ItemID=3').all()));
+      console.log('     returns:', JSON.stringify(d.prepare('SELECT ReturnID,PurchaseID FROM purchase_returns').all()));
+      console.log('     serials:', JSON.stringify(d.prepare('SELECT SerialID,IMEI,Status,CostPrice,WarehouseID FROM item_serials ORDER BY SerialID').all()));
+      globalThis.__vgap = vgap;
+    }
+    const perWh = d.prepare(`
+      SELECT w.WarehouseID,
+        COALESCE((SELECT SUM(Quantity) FROM stock_quantities WHERE ItemID=3 AND WarehouseID=w.WarehouseID),0) q,
+        COALESCE((SELECT COUNT(*) FROM item_serials WHERE ItemID=3 AND Status='available' AND WarehouseID=w.WarehouseID),0) n
+      FROM warehouses w`).all();
+    const sig = perWh.map(r=>`${r.WarehouseID}:${r.q-r.n}`).join(',');
+    if (sig !== (globalThis.__sig ?? '')) {
+      console.log(`  step ${i}: per-warehouse gap ${globalThis.__sig ?? '(init)'} -> ${sig}  after ${label}`);
+      globalThis.__sig = sig;
+    }
+    const gap = q - n;
+    if (gap !== (globalThis.__sgap ?? 0)) {
+      console.log(`  step ${i}: serial gap ${(globalThis.__sgap ?? 0)} -> ${gap}  after ${label}`);
+      console.log('     ALL purchase_details for item 3:', JSON.stringify(d.prepare('SELECT PurchaseID,ItemID,Quantity,UnitCost,EffectiveUnitCost,IMEI,WarehouseID FROM purchase_details WHERE ItemID=3').all()));
+      console.log('     ALL purchase_returns:', JSON.stringify(d.prepare('SELECT ReturnID,PurchaseID,TotalAmount FROM purchase_returns').all()));
+      console.log('     ALL pr details:', JSON.stringify(d.prepare('SELECT ReturnID,ItemID,SerialID,Quantity,UnitCost,LandedUnitCost,WarehouseID FROM purchase_return_details').all()));
+      const pr = d.prepare('SELECT * FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').get();
+      if (pr) {
+        console.log('     lastPR lines :', JSON.stringify(d.prepare('SELECT ItemID,SerialID,Quantity,UnitCost,LandedUnitCost FROM purchase_return_details WHERE ReturnID=?').all(pr.ReturnID)));
+        console.log('     its purchase :', JSON.stringify(d.prepare('SELECT DetailID,ItemID,Quantity,UnitCost,IMEI FROM purchase_details WHERE PurchaseID=?').all(pr.PurchaseID)));
+        console.log('     serials      :', JSON.stringify(d.prepare('SELECT SerialID,IMEI,Status,CostPrice FROM item_serials WHERE ItemID=3 ORDER BY SerialID').all()));
+      }
+      globalThis.__sgap = gap;
+    }
+  }
+  if (breaches.length && process.env.SERDUMP) {
+    const d = currentDb();
+    console.log('\n--- SERIAL STATE AT BREACH ---', label);
+    console.log('stock  :', JSON.stringify(d.prepare('SELECT WarehouseID,Quantity,CostPrice FROM stock_quantities WHERE ItemID=3').all()));
+    console.log('serials:', JSON.stringify(d.prepare('SELECT SerialID,IMEI,Status,CostPrice,WarehouseID FROM item_serials ORDER BY SerialID').all()));
+  }
   if (breaches.length) {
     breachesFound.push({ step: i, label, breaches, history: history.slice(-6) });
     break;   // stop at the first breach; the state is already corrupt

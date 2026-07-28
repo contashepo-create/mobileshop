@@ -333,9 +333,36 @@ export function registerSalesHandlers() {
             db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(item.SerialID);
           }
 
-          // Deduct from the resolved warehouse (for non-serialized items)
-          if (!item.SerialID && item.ItemID && lineWarehouse) {
-            deductStock(db, item.ItemID, lineWarehouse, item.Quantity);
+          // Deduct from the warehouse — for SERIALISED goods too.
+          //
+          // A purchase adds to `stock_quantities` whether or not the line
+          // carries an IMEI, so a sale has to take it back out the same way.
+          // Only marking the serial 'sold' left the quantity and its value
+          // sitting in the warehouse for ever: after selling one of two
+          // handsets the books still showed two, and inventory was overstated
+          // by the cost of every serialised unit the shop had ever sold. For a
+          // phone shop that is most of the stock value.
+          //
+          // The serial's OWN cost is removed, not the pool average, so the
+          // value taken out matches the cost of sales recorded on the line —
+          // `resolveUnitCost` already prefers `item_serials.CostPrice`.
+          if (item.ItemID && lineWarehouse) {
+            const soldCost = resolveUnitCost(item, lineWarehouse);
+            if (item.SerialID) {
+              const { residual } = deductStockAtCost(
+                db, item.ItemID, lineWarehouse, item.Quantity, soldCost ?? 0);
+              recordValuationResidual(db, {
+                date: dateStr,
+                itemId: item.ItemID,
+                warehouseId: lineWarehouse,
+                amount: residual,
+                reason: 'بيع جهاز بسيريال أفرغ المخزن',
+                refType: 'sale',
+                refId: Number(saleId),
+              });
+            } else {
+              deductStock(db, item.ItemID, lineWarehouse, item.Quantity);
+            }
           }
         }
 
@@ -656,7 +683,12 @@ export function registerSalesHandlers() {
           // the difference while COGS was credited the smaller amount.
           // `ItemID` is null for a service line (labour, a custom charge).
           // Those carry no stock, so only their value is refunded.
-          if (!item.SerialID && item.ItemID && returnWarehouse) {
+          //
+          // Serialised goods are restored HERE TOO. The sale now deducts the
+          // quantity for them, so the return has to add it back or the handset
+          // would come back on the shelf as a serial while the warehouse count
+          // stayed one short for ever.
+          if (item.ItemID && returnWarehouse) {
             restoreStockAtCost(db, item.ItemID, returnWarehouse, item.Quantity, returnedUnitCost);
           }
         }
@@ -856,7 +888,9 @@ export function registerSalesHandlers() {
         for (const line of oldLines) {
           if (line.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(line.SerialID);
-          } else if (line.ItemID) {
+          }
+          // Quantity comes back for serialised lines too, mirroring the sale.
+          if (line.ItemID) {
             const wh = line.WarehouseID ?? resolveSourceWarehouse(db, line.ItemID, 0, null);
             // Un-sell at the cost the goods left at, so the value returned
             // equals the value removed. `restoreStock` keeps the pool's current
@@ -942,8 +976,24 @@ export function registerSalesHandlers() {
           if (item.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(item.SerialID);
           }
-          if (!item.SerialID && item.ItemID && lineWarehouse) {
-            deductStock(db, item.ItemID, lineWarehouse, item.Quantity);
+          if (item.ItemID && lineWarehouse) {
+            if (item.SerialID) {
+              // Serial's own cost, matching the figure written to the line.
+              const soldCost = resolveUnitCost(item, lineWarehouse);
+              const { residual } = deductStockAtCost(
+                db, item.ItemID, lineWarehouse, item.Quantity, soldCost ?? 0);
+              recordValuationResidual(db, {
+                date: businessToday(),
+                itemId: item.ItemID,
+                warehouseId: lineWarehouse,
+                amount: residual,
+                reason: 'تعديل فاتورة بجهاز بسيريال أفرغ المخزن',
+                refType: 'sale_update',
+                refId: data.SaleID,
+              });
+            } else {
+              deductStock(db, item.ItemID, lineWarehouse, item.Quantity);
+            }
           }
         }
 
@@ -1084,7 +1134,24 @@ export function registerSalesHandlers() {
       if (allowNegStock?.Value !== '1') {
         const missing: string[] = [];
         for (const line of details) {
-          if (line.SerialID || !line.ItemID || !line.WarehouseID) continue;
+          // A named device must still be on the shelf.
+          //
+          // Once the customer brought it back it became available again, and
+          // it may since have been sold to somebody else. Cancelling the return
+          // hands it back to the FIRST customer, which cannot happen — the
+          // phone is gone. Allowing it deducted a unit of stock while the
+          // device was already recorded as sold, so the warehouse count fell
+          // one below the device list and stayed there.
+          if (line.SerialID) {
+            const sv = db.prepare(
+              'SELECT Status, IMEI FROM item_serials WHERE SerialID = ?',
+            ).get(line.SerialID) as any;
+            if (sv && sv.Status !== 'available') {
+              missing.push(`IMEI ${sv.IMEI ?? line.SerialID} (الحالة: ${sv.Status})`);
+              continue;
+            }
+          }
+          if (!line.ItemID || !line.WarehouseID) continue;
           const held = (db.prepare(
             'SELECT COALESCE(SUM(Quantity),0) AS qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
           ).get(line.ItemID, line.WarehouseID) as any)?.qty || 0;
@@ -1105,9 +1172,33 @@ export function registerSalesHandlers() {
       const tx = db.transaction(() => {
         for (const line of details) {
           // The goods go back OUT of stock — the customer keeps them again.
+          //
+          // When the return line names the device, that one goes back to the
+          // customer. When it does not, the devices this SALE delivered are
+          // used instead: the quantity leaves either way, so leaving them
+          // 'available' left a handset on the shelf that nobody holds, and the
+          // warehouse count fell one below the device list for ever.
           if (line.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(line.SerialID);
-          } else if (line.ItemID && line.WarehouseID) {
+          } else if (line.ItemID) {
+            const isSerialised = (db.prepare(
+              'SELECT IsSerialized FROM items WHERE ItemID = ?',
+            ).get(line.ItemID) as any)?.IsSerialized;
+            if (isSerialised) {
+              const back = db.prepare(`
+                SELECT s.SerialID FROM item_serials s
+                JOIN sale_details sd ON sd.SerialID = s.SerialID AND sd.SaleID = ?
+                WHERE s.ItemID = ? AND s.Status = 'available'
+                ORDER BY s.SerialID
+                LIMIT ?
+              `).all(ret.SaleID, line.ItemID, Math.ceil(line.Quantity)) as any[];
+              for (const b of back) {
+                db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(b.SerialID);
+              }
+            }
+          }
+          // Quantity leaves for serialised lines as well, mirroring the sale.
+          if (line.ItemID && line.WarehouseID) {
             // Remove exactly the value the return added, read from the return
             // line itself. Re-deriving it from `sale_details` with LIMIT 1
             // picked an arbitrary row when the invoice carried the same item

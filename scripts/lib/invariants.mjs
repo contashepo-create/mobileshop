@@ -88,8 +88,10 @@ export function identity(db, opening) {
   // purchase return emptied the pool. Read from the document rather than
   // recomputed, so this stays an independent check rather than a copy of the
   // handler's arithmetic.
-  const freightLost = g(`SELECT COALESCE(SUM(COALESCE(FreightWrittenOff,0)),0) v
-                         FROM purchase_returns`);
+  // NOT read from `purchase_returns.FreightWrittenOff` any more: that column
+  // is a copy kept for printing the debit note, and the same loss is recorded
+  // in `inventory_adjustments`. Counting both charged every write-off twice.
+  const freightLost = 0;
 
   // Inventory value that had no units left to sit on when a movement emptied a
   // warehouse. Positive = written off. Read from the ledger the handlers write,
@@ -249,8 +251,22 @@ export function stockValuationSane(db) {
     if (!Number.isFinite(r.CostPrice)) return `item ${r.ItemID}: CostPrice is ${r.CostPrice}`;
     if (!Number.isFinite(r.Quantity)) return `item ${r.ItemID}: Quantity is ${r.Quantity}`;
     if (r.CostPrice < 0) return `item ${r.ItemID}: negative unit cost ${r.CostPrice}`;
+    // Units carried at zero are only acceptable when a valuation adjustment
+    // explains it.
+    //
+    // Weighted average cannot say WHICH units left, so returning an expensive
+    // batch out of a pool that has since been sold down can demand more value
+    // than the pool holds. `deductStockAtCost` floors the cost at zero and
+    // records the excess, which is the honest answer — but a zero with NO such
+    // record still means value was invented or lost, and must fail.
     if (r.Quantity > 0 && r.CostPrice === 0) {
-      return `item ${r.ItemID} wh ${r.WarehouseID}: ${r.Quantity} units valued at zero`;
+      const explained = db.prepare(`
+        SELECT COUNT(*) n FROM inventory_adjustments
+        WHERE ItemID = ? AND (WarehouseID = ? OR WarehouseID IS NULL)
+      `).get(r.ItemID, r.WarehouseID)?.n || 0;
+      if (!explained) {
+        return `item ${r.ItemID} wh ${r.WarehouseID}: ${r.Quantity} units valued at zero`;
+      }
     }
   }
   return null;
@@ -345,6 +361,50 @@ export function statusMatchesBalance(db) {
     : null;
 }
 
+/**
+ * A serialised item's warehouse quantity must equal the number of individual
+ * units recorded as still being on the shelf, and its value must equal the sum
+ * of those units' own costs.
+ *
+ * `stock_quantities` and `item_serials` are two records of the same physical
+ * goods. A purchase writes BOTH, so every movement afterwards has to move both
+ * or they drift apart silently — and nothing in the books reveals it, because
+ * each table is internally consistent.
+ *
+ * This is exactly what went wrong: selling a handset marked the serial 'sold'
+ * but left the quantity and its value in the warehouse, so after selling one of
+ * two phones the shop still valued two. Inventory was overstated by the cost of
+ * every serialised unit ever sold, which in a phone shop is most of the stock.
+ */
+export function serialsMatchWarehouseStock(db) {
+  // Only items whose stock is FULLY device-tracked can be compared unit for
+  // unit. A serialised item may legitimately have been received without an
+  // IMEI — the purchase screen treats it as optional — and those units exist in
+  // the warehouse with no device record, so a plain comparison would report a
+  // difference that is not an error. Such items are excluded, and the
+  // untracked-quantity check below covers them instead.
+  const bad = db.prepare(`
+    SELECT i.ItemID, i.ItemName,
+           COALESCE((SELECT SUM(Quantity) FROM stock_quantities WHERE ItemID = i.ItemID), 0) AS Qty,
+           COALESCE((SELECT SUM(Quantity * CostPrice) FROM stock_quantities WHERE ItemID = i.ItemID), 0) AS Val,
+           COALESCE((SELECT COUNT(*) FROM item_serials
+                      WHERE ItemID = i.ItemID AND Status = 'available'), 0) AS Units,
+           COALESCE((SELECT SUM(CostPrice) FROM item_serials
+                      WHERE ItemID = i.ItemID AND Status = 'available'), 0) AS UnitVal,
+           COALESCE((SELECT SUM(CASE WHEN pd.IMEI IS NULL OR pd.IMEI = '' THEN pd.Quantity ELSE 0 END)
+                       FROM purchase_details pd WHERE pd.ItemID = i.ItemID), 0) AS Untracked
+    FROM items i WHERE i.IsSerialized = 1
+  `).all()
+    .filter(r => r.Untracked === 0)
+    .filter(r => Math.abs(r.Qty - r.Units) > 0.001 || Math.abs(r.Val - r.UnitVal) > 0.011);
+
+  return bad.length
+    ? 'serialised stock disagrees with the individual units: ' +
+      bad.map(b => `${b.ItemName}: warehouse ${r2(b.Qty)} units worth ${r2(b.Val)}, `
+        + `but ${b.Units} serials worth ${r2(b.UnitVal)} are on the shelf`).join('; ')
+    : null;
+}
+
 export const ALL = {
   identity,
   invoiceLinesMatchHeader,
@@ -360,6 +420,7 @@ export const ALL = {
   documentNumbersUnique,
   noNaNOrInfinity,
   statusMatchesBalance,
+  serialsMatchWarehouseStock,
 };
 
 /** Runs every invariant; returns a list of breach descriptions. */

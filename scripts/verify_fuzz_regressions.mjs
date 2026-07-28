@@ -324,5 +324,115 @@ t('gross profit reconciles to the balances it came from',
   Math.abs(measured - (OPENING + pl.grossProfit)) < 0.005,
   `measured ${r2(measured)} vs opening+profit ${r2(OPENING + pl.grossProfit)}`);
 
+// ===================================================================
+// Round 3 — SERIALISED handsets.
+//
+// Both fuzzer items were IsSerialized = 0, so ~58 lines of IMEI handling had
+// never been executed by any test. In a mobile phone shop that is the main
+// business. Every defect below was found the moment a serialised item was
+// added, and the first is the most serious found in the whole audit.
+// ===================================================================
+
+function seedSerial() {
+  const db = buildDatabase();
+  db.exec("INSERT INTO roles(RoleID,RoleName,IsSystem) VALUES(1,'a',1)");
+  db.exec("INSERT INTO users(UserID,Username,PasswordHash,RoleID,IsActive) VALUES(1,'a','x',1,1)");
+  db.exec("INSERT INTO fiscal_years(FiscalYearID,YearName,StartDate,EndDate,Status) VALUES(1,'26','2026-01-01','2026-12-31','open')");
+  db.exec("INSERT INTO warehouses(WarehouseID,WarehouseName) VALUES(1,'Main'),(2,'Branch')");
+  db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'S','safe',100000,1)");
+  db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'A',0,'active')");
+  db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'S',0,'active')");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'iPhone','device',1,600,1000,1)");
+  return db;
+}
+const buyPhone = (imei, cost, wh = 1) => call('purchases:create', {
+  SupplierID: 1, items: [{ ItemID: 1, Quantity: 1, UnitCost: cost, WarehouseID: wh, IMEI: imei }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1,
+});
+const serialOf = imei => q('SELECT SerialID v FROM item_serials WHERE IMEI = ?', imei).v;
+// Warehouse quantity/value must equal the devices actually on the shelf.
+const agree = () => {
+  const a = q('SELECT COALESCE(SUM(Quantity),0) v FROM stock_quantities WHERE ItemID=1').v;
+  const b = q("SELECT COUNT(*) v FROM item_serials WHERE ItemID=1 AND Status='available'").v;
+  const av = q('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities WHERE ItemID=1').v;
+  const bv = q("SELECT COALESCE(SUM(CostPrice),0) v FROM item_serials WHERE ItemID=1 AND Status='available'").v;
+  return { ok: Math.abs(a - b) < 1e-9 && Math.abs(av - bv) < 0.011, a, b, av, bv };
+};
+
+// 21 Selling a handset must remove it from the warehouse, not just flag the
+//    IMEI. Inventory was overstated by the cost of every phone ever sold.
+seedSerial();
+await buyPhone('111', 600);
+await buyPhone('222', 900);
+await call('sales:create', { CustomerID: 1,
+  items: [{ ItemID: 1, SerialID: serialOf('111'), Quantity: 1, UnitPrice: 1000 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 1000,
+  CashAccountID: 1, fiscalYearId: 1 });
+let ag = agree();
+t('selling a handset removes it from the warehouse too', ag.ok,
+  `warehouse ${ag.a} units worth ${ag.av}, devices ${ag.b} worth ${ag.bv}`);
+
+// 22 Returning it puts both records back.
+await call('saleReturns:create', { SaleID: q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v,
+  items: [{ ItemID: 1, SerialID: serialOf('111'), Quantity: 1, UnitPrice: 1000 }],
+  AccountCredit: 0, CashRefund: 1000, CashAccountID: 1 });
+ag = agree();
+t('returning it restores both the count and the device', ag.ok,
+  `warehouse ${ag.a}/${ag.av}, devices ${ag.b}/${ag.bv}`);
+
+// 23 One IMEI is one physical phone: it cannot be received twice.
+seedSerial();
+await buyPhone('SAME', 661);
+const dup = await buyPhone('SAME', 641);
+t('receiving an IMEI already in stock is refused', dup.success === false, dup.message);
+t('the duplicate did not inflate the warehouse',
+  q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1').v === 1,
+  'qty ' + q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1').v);
+
+// 24 A device already sold cannot be handed back to the supplier.
+seedSerial();
+await buyPhone('AAA', 600);
+const pOnly = q('SELECT PurchaseID v FROM purchases ORDER BY PurchaseID DESC LIMIT 1').v;
+await call('sales:create', { CustomerID: 1,
+  items: [{ ItemID: 1, SerialID: serialOf('AAA'), Quantity: 1, UnitPrice: 1000 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 1000,
+  CashAccountID: 1, fiscalYearId: 1 });
+const badRet = await call('purchaseReturns:create', { PurchaseID: pOnly,
+  items: [{ ItemID: 1, Quantity: 1, UnitCost: 600 }], AccountCredit: 600, CashRefund: 0 });
+t('returning a sold handset to the supplier is refused', badRet.success === false, badRet.message);
+
+// 25 A purchase return with no SerialID still takes a device off the shelf.
+seedSerial();
+await buyPhone('BBB', 600);
+const pB = q('SELECT PurchaseID v FROM purchases ORDER BY PurchaseID DESC LIMIT 1').v;
+await call('purchaseReturns:create', { PurchaseID: pB,
+  items: [{ ItemID: 1, Quantity: 1, UnitCost: 600 }], AccountCredit: 600, CashRefund: 0 });
+ag = agree();
+t('a debit note without an IMEI still removes the device', ag.ok,
+  `warehouse ${ag.a}/${ag.av}, devices ${ag.b}/${ag.bv}`);
+
+// 26 ...and cancelling it puts the device back.
+await call('delete:purchaseReturn', q('SELECT ReturnID v FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').v);
+ag = agree();
+t('cancelling that debit note restores the device', ag.ok && ag.b === 1,
+  `warehouse ${ag.a}/${ag.av}, devices ${ag.b}/${ag.bv}`);
+
+// 27 A unit cost can never be negative — weighted average cannot express which
+//    specific units left, and repeated returns drove it below zero.
+seedSerial();
+currentDb().exec('DELETE FROM stock_quantities');
+currentDb().exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'Loose','part',0,10,20,1)");
+await call('purchases:create', { SupplierID: 1, items: [{ ItemID: 2, Quantity: 2, UnitCost: 900, WarehouseID: 1 }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
+const pExp = q('SELECT PurchaseID v FROM purchases ORDER BY PurchaseID DESC LIMIT 1').v;
+await call('purchases:create', { SupplierID: 1, items: [{ ItemID: 2, Quantity: 2, UnitCost: 100, WarehouseID: 1 }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
+await call('sales:create', { CustomerID: 1, items: [{ ItemID: 2, Quantity: 1, UnitPrice: 1200 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 1200, CashAccountID: 1, fiscalYearId: 1 });
+await call('purchaseReturns:create', { PurchaseID: pExp,
+  items: [{ ItemID: 2, Quantity: 1, UnitCost: 900 }], AccountCredit: 900, CashRefund: 0 });
+const cp = q('SELECT MIN(CostPrice) v FROM stock_quantities WHERE ItemID=2').v;
+t('a unit cost is never driven negative', cp >= 0, 'lowest unit cost ' + cp);
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

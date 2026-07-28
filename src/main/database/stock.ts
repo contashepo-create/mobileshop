@@ -102,7 +102,10 @@ export function planStockAllocation(
   const claimedByItem = new Map<number, number>();
 
   for (const line of lines) {
-    if (line.isService || line.SerialID || !line.ItemID) continue;
+    // Serialised lines ARE planned now. The sale deducts the warehouse
+    // quantity for them exactly as it does for loose stock, so leaving them
+    // out here meant that deduction had no availability check at all.
+    if (line.isService || !line.ItemID) continue;
     const qty = Number(line.Quantity) || 0;
     if (qty <= 0) continue;
 
@@ -241,8 +244,25 @@ export function deductStockAtCost(
   // removed gives a negative figure, which is a genuine gain. Getting this
   // backwards doubles the error instead of cancelling it, so it is derived here
   // once rather than re-reasoned at each caller.
-  const residual = newQty > 0 ? 0 : remainingValue;
-  const newCost = newQty > 0 ? remainingValue / newQty : (row.CostPrice || 0);
+  let residual = newQty > 0 ? 0 : remainingValue;
+  let newCost = newQty > 0 ? remainingValue / newQty : (row.CostPrice || 0);
+
+  // A unit cost can never be negative.
+  //
+  // Weighted average cannot express WHICH units left. Buying 2 at 900 and 2 at
+  // 100 gives a pool of 4 at 500; selling one relieves 500, and returning the
+  // expensive batch then removes 900 a unit from a pool that only holds 500 a
+  // unit. Repeated, the average goes below zero — stock valued at less than
+  // nothing, which is not a number any report can survive.
+  //
+  // The pool is floored at zero and the excess is handed back as a valuation
+  // adjustment, so the impossible figure never reaches the database and the
+  // difference is recorded instead of silently distorting inventory.
+  if (newQty > 0 && remainingValue < 0) {
+    residual = remainingValue;   // negative = the pool gained relative to cost
+    newCost = 0;
+  }
+
   db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?')
     .run(newQty, newCost, row.ID);
   return { residual };

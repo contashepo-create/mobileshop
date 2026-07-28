@@ -70,7 +70,10 @@ report('ALTER TABLE purchase_details ADD COLUMN EffectiveUnitCost REAL' in MIGR,
        'cost including this line\'s share of shipping and payment fees')
 report('EffectiveUnitCost)' in PUR and 'effectiveUnitCost);' in PUR,
        'purchases:create writes it')
-report('const unitLanded = item.EffectiveUnitCost ?? item.UnitCost;' in DEL,
+# Matched loosely on purpose. Pinning the exact declaration broke when the
+# variable became reassignable so a handset could contribute the cost it
+# actually carries; the behaviour was right and the assertion was wrong.
+report('unitLanded = item.EffectiveUnitCost ?? item.UnitCost;' in DEL,
        'delete:purchase reverses the landed cost, not the bare price',
        'reversing the base figure left the overhead behind and inflated the\n'
        'cost of whatever stock remained')

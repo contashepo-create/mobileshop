@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
-import { restoreStock, resolveSourceWarehouse, restoreStockAtCost, deductStockAtCost } from '../database/stock';
+import { restoreStock, resolveSourceWarehouse, restoreStockAtCost, deductStockAtCost, recordValuationResidual } from '../database/stock';
+import { businessToday } from '../../shared/businessDate';
 
 /**
  * Refuses a delete when other documents still reference the record.
@@ -50,7 +51,10 @@ export function registerDeleteHandlers() {
           if (item.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(item.SerialID);
           }
-          if (item.ItemID && !item.SerialID) {
+          // Quantity is restored for serialised lines as well: the sale now
+          // deducts it for them, so deleting the sale has to give it back or
+          // the warehouse count stays permanently one short.
+          if (item.ItemID) {
             const wh = item.WarehouseID ?? resolveSourceWarehouse(db, item.ItemID, 0, null);
             // Put the value back, not just the count. `restoreStock` leaves the
             // existing CostPrice untouched when a row already exists, so goods
@@ -124,7 +128,7 @@ export function registerDeleteHandlers() {
       // cannot be un-received on this invoice's behalf.
       const shortages: string[] = [];
       const lines = db.prepare(
-        'SELECT ItemID, Quantity, WarehouseID FROM purchase_details WHERE PurchaseID = ?',
+        'SELECT ItemID, Quantity, WarehouseID, IMEI FROM purchase_details WHERE PurchaseID = ?',
       ).all(purchaseId) as any[];
       for (const line of lines) {
         if (!line.ItemID || !line.WarehouseID) continue;
@@ -134,6 +138,21 @@ export function registerDeleteHandlers() {
         if (held < line.Quantity - 0.001) {
           const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
           shortages.push(`"${info?.ItemName || line.ItemID}" (المطلوب ${line.Quantity}، المتاح ${held})`);
+          continue;
+        }
+        // For a handset, having "enough units" is not enough: THIS phone must
+        // still be on the shelf. A pool of three other devices satisfied the
+        // quantity check while the IMEI on this invoice had already been sold,
+        // so the deletion removed a unit of value and left the sold device's
+        // record behind — the count and the IMEI list disagreed from then on.
+        if (line.IMEI) {
+          const serial = db.prepare(
+            'SELECT Status FROM item_serials WHERE IMEI = ?',
+          ).get(line.IMEI) as any;
+          if (serial && serial.Status !== 'available') {
+            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+            shortages.push(`"${info?.ItemName || line.ItemID}" (IMEI ${line.IMEI} — الحالة: ${serial.Status})`);
+          }
         }
       }
       if (shortages.length) {
@@ -149,8 +168,19 @@ export function registerDeleteHandlers() {
 
         // Reverse stock changes (recalculate weighted average cost)
         for (const item of details) {
+          // Read the device's CURRENT cost before its record is removed — it is
+          // needed below to reverse the right value, and reading it afterwards
+          // always returned nothing.
+          const deviceCost = item.IMEI
+            ? (db.prepare('SELECT CostPrice FROM item_serials WHERE IMEI = ?')
+                .get(item.IMEI) as any)?.CostPrice ?? null
+            : null;
           if (item.IMEI) {
-            db.prepare("DELETE FROM item_serials WHERE IMEI = ? AND Status = 'available'").run(item.IMEI);
+            // No `Status = 'available'` filter: the guard above already refused
+            // the deletion if this handset had left the shelf. Filtering here
+            // meant a sold or returned device silently survived while its unit
+            // of stock was removed anyway.
+            db.prepare('DELETE FROM item_serials WHERE IMEI = ?').run(item.IMEI);
           }
           if (item.ItemID) {
             const stock = db.prepare('SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(item.ItemID, item.WarehouseID) as any;
@@ -161,11 +191,70 @@ export function registerDeleteHandlers() {
               // shipping and fees behind, inflating the cost of the stock that
               // remained. `EffectiveUnitCost` is null on rows written before it
               // existed, so fall back to the base figure for those.
-              const unitLanded = item.EffectiveUnitCost ?? item.UnitCost;
+              let unitLanded = item.EffectiveUnitCost ?? item.UnitCost;
+
+              // For a handset, use the cost the DEVICE actually carries.
+              //
+              // Its value can have moved since it arrived: when another return
+              // emptied its line, that line's unrecoverable freight was loaded
+              // onto the devices left on the shelf, and this one is now worth
+              // more than the invoice says. Reversing the invoice figure left
+              // the difference stranded — deleting the purchase destroyed the
+              // absorbed freight and the books fell by exactly that amount.
+              if (deviceCost != null) unitLanded = deviceCost;
               const removedTotal = unitLanded * item.Quantity;
+
+              // Value the device picked up AFTER it was received has no home
+              // once the receipt is undone.
+              //
+              // Deleting a purchase reverses what the supplier charged. If an
+              // earlier return had loaded its unrecoverable freight onto this
+              // handset, the device is now worth more than the invoice — and
+              // that extra came from a delivery the shop really paid for. It is
+              // written off rather than silently destroyed, so assets and
+              // liabilities fall by the same amount and the difference is
+              // reported instead of quietly reducing net worth.
+              const invoiceLanded = (item.EffectiveUnitCost ?? item.UnitCost ?? 0) * item.Quantity;
+              const strandedOnDevice = removedTotal - invoiceLanded;
+              if (Math.abs(strandedOnDevice) > 1e-9) {
+                recordValuationResidual(db, {
+                  date: businessToday(),
+                  itemId: item.ItemID,
+                  warehouseId: item.WarehouseID ?? null,
+                  amount: strandedOnDevice,
+                  reason: 'حذف فاتورة شراء لجهاز يحمل مصاريف شحن مُحمَّلة',
+                  refType: 'purchase_delete',
+                  refId: purchaseId,
+                });
+              }
               const newQty = stock.Quantity - item.Quantity;
               const newCost = newQty > 0 ? ((oldTotal - removedTotal) / newQty) : 0;
               db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?').run(newQty, newCost, stock.ID);
+
+              // Emptying the pool strands whatever value is left in it.
+              //
+              // The invoice is reversed at what the supplier charged, but the
+              // pool can be carrying more than that — most often the
+              // unrecoverable freight from an earlier return, pushed onto the
+              // units that stayed behind. While units remain that difference
+              // simply re-spreads over them; at zero quantity there is nothing
+              // to hold it, and forcing the cost to 0 destroyed it silently.
+              // Recording it keeps assets and liabilities falling together and
+              // makes the loss reportable.
+              if (newQty <= 0) {
+                const stranded = oldTotal - removedTotal;
+                if (Math.abs(stranded) > 1e-9) {
+                  recordValuationResidual(db, {
+                    date: businessToday(),
+                    itemId: item.ItemID,
+                    warehouseId: item.WarehouseID ?? null,
+                    amount: stranded,
+                    reason: 'حذف فاتورة شراء أفرغ المخزن وترك قيمة بلا رصيد',
+                    refType: 'purchase_delete',
+                    refId: purchaseId,
+                  });
+                }
+              }
             }
           }
         }

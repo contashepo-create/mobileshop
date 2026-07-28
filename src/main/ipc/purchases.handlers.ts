@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { resolveSourceWarehouse, warehouseStock, deductStock, deductStockAtCost, restoreStockAtCost } from '../database/stock';
+import { resolveSourceWarehouse, warehouseStock, deductStock, deductStockAtCost, restoreStockAtCost, recordValuationResidual } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
 
@@ -84,6 +84,44 @@ export function registerPurchasesHandlers() {
         }
         const wh = db.prepare('SELECT WarehouseID FROM warehouses WHERE WarehouseID = ?').get(item.WarehouseID);
         if (!wh) return { success: false, message: 'المخزن المختار غير موجود' };
+
+        // An IMEI identifies ONE physical handset. Receiving one that is
+        // already on the shelf means either a typo or the same phone counted
+        // twice, and the books would then show two units where one exists.
+        // Re-receiving a handset that was sold, returned to the supplier or
+        // written off is fine — that record is simply reactivated below.
+        if (item.IMEI) {
+          const onShelf = db.prepare(
+            "SELECT SerialID FROM item_serials WHERE IMEI = ? AND Status = 'available'",
+          ).get(item.IMEI) as any;
+          if (onShelf) {
+            return {
+              success: false,
+              message: `الرقم التسلسلي (IMEI) ${item.IMEI} موجود بالفعل في المخزن — لا يمكن استلام نفس الجهاز مرتين`,
+            };
+          }
+        }
+
+        // Two lines of the SAME invoice cannot carry one IMEI either.
+        if (item.IMEI && data.items.filter(x => x.IMEI && x.IMEI === item.IMEI).length > 1) {
+          return {
+            success: false,
+            message: `الرقم التسلسلي (IMEI) ${item.IMEI} مكرر في نفس الفاتورة`,
+          };
+        }
+
+        // A serialised line is one physical device, so it cannot carry a
+        // quantity other than 1 — otherwise one IMEI would stand for several
+        // units and the count could never agree with the device list.
+        const serialised = (db.prepare(
+          'SELECT IsSerialized FROM items WHERE ItemID = ?',
+        ).get(item.ItemID) as any)?.IsSerialized;
+        if (serialised && item.IMEI && Number(item.Quantity) !== 1) {
+          return {
+            success: false,
+            message: 'الجهاز ذو الرقم التسلسلي يجب أن تكون كميته 1 — أضف سطراً لكل جهاز',
+          };
+        }
       }
 
       for (const [label, value] of [
@@ -194,14 +232,32 @@ export function registerPurchasesHandlers() {
           `).run(purchaseId, item.ItemID, item.IMEI ?? null, item.Quantity, item.UnitCost,
                  item.UnitPrice ?? null, itemBaseCost, item.WarehouseID, effectiveUnitCost);
 
-          // Add IMEI if provided
+          // Add IMEI if provided.
+          //
+          // A handset that went back to the supplier, or was written off, can
+          // legitimately be received again — the same physical phone returning
+          // to the shelf. That is an UPDATE of the existing record, not a new
+          // one, and it must carry the price just paid for it.
+          //
+          // Silently doing nothing (the previous behaviour) still added a unit
+          // and its value to `stock_quantities`, so the pool counted two units
+          // where one handset existed and valued it at a stale cost. The
+          // warehouse total drifted away from the IMEI list permanently.
           if (item.IMEI) {
-            const existingSerial = db.prepare('SELECT SerialID FROM item_serials WHERE IMEI = ?').get(item.IMEI);
+            const existingSerial = db.prepare(
+              'SELECT SerialID, Status FROM item_serials WHERE IMEI = ?',
+            ).get(item.IMEI) as any;
             if (!existingSerial) {
               db.prepare(`
                 INSERT INTO item_serials (ItemID, IMEI, Status, CostPrice, WarehouseID)
                 VALUES (?, ?, 'available', ?, ?)
               `).run(item.ItemID, item.IMEI, effectiveUnitCost, item.WarehouseID);
+            } else {
+              db.prepare(`
+                UPDATE item_serials
+                SET Status = 'available', CostPrice = ?, WarehouseID = ?, ItemID = ?
+                WHERE SerialID = ?
+              `).run(effectiveUnitCost, item.WarehouseID, item.ItemID, existingSerial.SerialID);
             }
           }
 
@@ -467,6 +523,51 @@ export function registerPurchasesHandlers() {
             message: `الكمية غير متوفرة في المخزن للمرتجع للصنف "${info?.ItemName || item.ItemID}": المطلوب ${item.Quantity}، المتاح ${qty}`,
           };
         }
+
+        // For a handset, a sufficient QUANTITY is not sufficient proof.
+        //
+        // The units on this invoice are specific devices. If they have since
+        // been sold, the shop cannot hand them back to the supplier no matter
+        // how many other phones of the same model are in stock. Accepting it
+        // deducted a unit of value while no device left the shelf, so the
+        // warehouse count and the IMEI list disagreed permanently.
+        const isSerialised = (db.prepare(
+          'SELECT IsSerialized FROM items WHERE ItemID = ?',
+        ).get(item.ItemID) as any)?.IsSerialized;
+        if (isSerialised) {
+          if (item.SerialID) {
+            const s = db.prepare(
+              'SELECT Status, IMEI FROM item_serials WHERE SerialID = ?',
+            ).get(item.SerialID) as any;
+            if (!s || s.Status !== 'available') {
+              return {
+                success: false,
+                message: `الجهاز (IMEI ${s?.IMEI ?? item.SerialID}) لم يعد بالمخزن — لا يمكن رده للمورد`,
+              };
+            }
+          } else {
+            // No serial named: count how many of THIS invoice's devices are
+            // still on the shelf and available to send back.
+            const onShelf = (db.prepare(`
+              SELECT COUNT(*) AS n FROM item_serials s
+              JOIN purchase_details pd ON pd.IMEI = s.IMEI AND pd.PurchaseID = ?
+              WHERE s.ItemID = ? AND s.Status = 'available'
+            `).get(data.PurchaseID, item.ItemID) as any)?.n || 0;
+            // Only enforced when this invoice actually recorded IMEIs; a
+            // serialised item received without one has no device to check.
+            const tracked = (db.prepare(`
+              SELECT COUNT(*) AS n FROM purchase_details
+              WHERE PurchaseID = ? AND ItemID = ? AND IMEI IS NOT NULL AND IMEI <> ''
+            `).get(data.PurchaseID, item.ItemID) as any)?.n || 0;
+            if (tracked > 0 && onShelf < item.Quantity) {
+              const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(item.ItemID) as any;
+              return {
+                success: false,
+                message: `أجهزة "${info?.ItemName || item.ItemID}" من هذه الفاتورة لم تعد بالمخزن (بيعت أو رُدّت): المطلوب ${item.Quantity}، المتاح ${onShelf}`,
+              };
+            }
+          }
+        }
       }
     }
 
@@ -495,9 +596,43 @@ export function registerPurchasesHandlers() {
                money(item.Quantity * item.UnitCost), lineWarehouse(item.ItemID, item.WarehouseID),
                item.EffectiveUnitCost ?? item.UnitCost ?? 0).lastInsertRowid;
 
-        // Mark serial as returned
+        // Mark the individual handsets as returned.
+        //
+        // When the caller names a serial, that is the one that goes back. When
+        // it does not — the debit-note screen sends item and quantity only —
+        // the serials still have to be resolved, because the warehouse quantity
+        // IS reduced below either way. Leaving them 'available' created phantom
+        // handsets: stock showed zero while the IMEI list still offered a
+        // device for sale, and the next sale of it drove the count negative.
+        //
+        // They are taken from the IMEIs this very purchase brought in, oldest
+        // first, and only ones still on the shelf are eligible.
+        // The specific handsets that go back, with the cost each one carries.
+        // Kept so the warehouse can be relieved of exactly THEIR value below.
+        let returnedSerials: Array<{ SerialID: number; CostPrice: number }> = [];
         if (item.SerialID) {
+          const s = db.prepare(
+            'SELECT SerialID, CostPrice FROM item_serials WHERE SerialID = ?',
+          ).get(item.SerialID) as any;
+          if (s) returnedSerials = [s];
           db.prepare("UPDATE item_serials SET Status = 'returned' WHERE SerialID = ?").run(item.SerialID);
+        } else {
+          const isSerialised = (db.prepare(
+            'SELECT IsSerialized FROM items WHERE ItemID = ?',
+          ).get(item.ItemID) as any)?.IsSerialized;
+          if (isSerialised) {
+            returnedSerials = db.prepare(`
+              SELECT s.SerialID, s.CostPrice FROM item_serials s
+              JOIN purchase_details pd
+                ON pd.IMEI = s.IMEI AND pd.PurchaseID = ?
+              WHERE s.ItemID = ? AND s.Status = 'available'
+              ORDER BY s.SerialID
+              LIMIT ?
+            `).all(data.PurchaseID, item.ItemID, Math.ceil(item.Quantity)) as any[];
+            for (const c of returnedSerials) {
+              db.prepare("UPDATE item_serials SET Status = 'returned' WHERE SerialID = ?").run(c.SerialID);
+            }
+          }
         }
 
         // Deduct from the warehouse the goods actually came into. The previous
@@ -510,14 +645,34 @@ export function registerPurchasesHandlers() {
           // average of 7.50; sending those same 10 back at the average destroys
           // 75 of stock value while the supplier credits only 50, so 25 simply
           // vanished from the books.
-          const landedCost = item.EffectiveUnitCost ?? item.UnitCost ?? 0;
+          // For a SERIALISED line the warehouse must be relieved of the cost of
+          // the very handsets being sent back, not the purchase line's figure.
+          //
+          // The two are different numbers whenever the shop bought the same
+          // model at different prices: the pool was reduced by the line cost
+          // while a serial carrying a different cost left the shelf, so the
+          // remaining quantity and the remaining IMEIs disagreed in value and
+          // the inventory total was wrong from then on.
+          const landedCost = returnedSerials.length
+            ? returnedSerials.reduce((sum, s) => sum + (s.CostPrice || 0), 0) / returnedSerials.length
+            : (item.EffectiveUnitCost ?? item.UnitCost ?? 0);
           // Emptying the pool can leave a valuation residual with no units to
           // carry it — see `deductStockAtCost`. It is a real change in the
           // value of what the shop owns, so it is booked with the freight
           // write-off rather than left to disappear.
+          // The pool's value BEFORE this line touches it.
+          //
+          // Every valuation adjustment below is derived from what actually
+          // changed, measured here and compared after all the movements. The
+          // previous version added up several estimates — a residual from the
+          // deduction, a freight write-off, a floor at zero — and those
+          // overlapped whenever more than one applied to the same line, so the
+          // same loss was charged twice. Measuring once cannot double-count.
+          const poolBefore = (db.prepare(
+            'SELECT COALESCE(SUM(Quantity * CostPrice), 0) AS v FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+          ).get(item.ItemID, wh) as any)?.v || 0;
+
           const { residual } = deductStockAtCost(db, item.ItemID, wh, item.Quantity, landedCost);
-          // Positive = written off, so it adds to the write-off total directly.
-          freightWrittenOff += residual;
           if (Math.abs(residual) > 1e-9) {
             // Kept on the line so cancelling the return restores exactly this
             // amount to exactly this pool.
@@ -578,6 +733,28 @@ export function registerPurchasesHandlers() {
               // Rounding happens only where money is displayed or paid.
               const newCost = ((row.CostPrice || 0) * row.Quantity + strandedFreight) / row.Quantity;
               db.prepare('UPDATE stock_quantities SET CostPrice = ? WHERE ID = ?').run(newCost, row.ID);
+
+              // The individual devices must absorb it too.
+              //
+              // For a serialised item the warehouse row and the IMEI records
+              // are two views of the same goods. Loading the freight onto the
+              // pool alone moved one and not the other: the pool said 655 while
+              // the one handset left on the shelf was still recorded at 635, so
+              // inventory disagreed with the device list by exactly the freight
+              // and stayed wrong for ever after.
+              const survivors = db.prepare(`
+                SELECT SerialID FROM item_serials
+                WHERE ItemID = ? AND WarehouseID = ? AND Status = 'available'
+              `).all(item.ItemID, wh) as any[];
+              if (survivors.length) {
+                const share = strandedFreight / survivors.length;
+                for (const sv of survivors) {
+                  db.prepare(
+                    'UPDATE item_serials SET CostPrice = COALESCE(CostPrice,0) + ? WHERE SerialID = ?',
+                  ).run(share, sv.SerialID);
+                }
+              }
+
               // Remember that it was absorbed rather than written off, so the
               // reversal takes it back off the survivors instead of guessing.
               db.prepare('UPDATE purchase_return_details SET FreightAbsorbed = ? WHERE DetailID = ?')
@@ -591,19 +768,49 @@ export function registerPurchasesHandlers() {
               // the warehouse. Rounding here would make the write-off disagree
               // with the stock movement it is meant to explain, which is the
               // same leak by another route. It is rounded for DISPLAY only.
-              freightWrittenOff = freightWrittenOff + strandedFreight;
+              // Nothing to do: with an empty pool the freight cannot be
+              // carried, and the single measured adjustment below already
+              // accounts for every piastre that left the warehouse.
             }
           }
+
+          // ONE adjustment per line, derived from what actually happened.
+          //
+          //   value the warehouse lost   = poolBefore - poolAfter
+          //   value the supplier credits = Quantity x UnitCost
+          //
+          // Anything the supplier does not credit is a real loss to the shop —
+          // unrecoverable freight, a pool floored at zero, an average that no
+          // longer matched the units. Measuring the difference covers all of
+          // them at once and cannot charge any of them twice.
+          const poolAfter = (db.prepare(
+            'SELECT COALESCE(SUM(Quantity * CostPrice), 0) AS v FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+          ).get(item.ItemID, wh) as any)?.v || 0;
+          const creditedBack = item.Quantity * (item.UnitCost || 0);
+          const lineAdjustment = (poolBefore - poolAfter) - creditedBack;
+          recordValuationResidual(db, {
+            date: dateStr,
+            itemId: item.ItemID,
+            warehouseId: wh,
+            amount: lineAdjustment,
+            reason: 'فرق تقييم مخزون على مرتجع مشتريات (شحن غير مسترد/تسوية)',
+            refType: 'purchase_return',
+            refId: Number(returnId),
+          });
         }
       }
 
-      // Written whenever it is non-zero, in EITHER direction. A valuation
-      // residual can be negative — the emptied pool was carrying less than the
-      // units were removed at — and that is a gain, not something to discard.
-      // Testing `> 0` would have dropped exactly half the cases.
-      if (Math.abs(freightWrittenOff) > 1e-9) {
+      // `FreightWrittenOff` is kept up to date for the debit note, which prints
+      // it, but the figure charged in the profit report now comes from
+      // `inventory_adjustments` alone. Two columns describing the same loss
+      // were charged twice and understated profit by the same amount twice.
+      const woTotal = (db.prepare(`
+        SELECT COALESCE(SUM(Amount),0) AS v FROM inventory_adjustments
+        WHERE RefType = 'purchase_return' AND RefID = ?
+      `).get(returnId) as any)?.v || 0;
+      if (Math.abs(woTotal) > 1e-9) {
         db.prepare('UPDATE purchase_returns SET FreightWrittenOff = ? WHERE ReturnID = ?')
-          .run(freightWrittenOff, returnId);
+          .run(woTotal, returnId);
       }
 
       // Cancel only the part we still owe the supplier
@@ -743,9 +950,33 @@ export function registerPurchasesHandlers() {
 
       const tx = db.transaction(() => {
         for (const line of details) {
+          // Put the individual handsets back on the shelf.
+          //
+          // Both halves run: the quantity is restored below for serialised
+          // lines too, so the serials must come back with it or the two records
+          // disagree. When the return did not name a serial, the ones it marked
+          // 'returned' from this purchase are reinstated, oldest first.
           if (line.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(line.SerialID);
-          } else if (line.ItemID && line.WarehouseID) {
+          } else if (line.ItemID) {
+            const isSerialised = (db.prepare(
+              'SELECT IsSerialized FROM items WHERE ItemID = ?',
+            ).get(line.ItemID) as any)?.IsSerialized;
+            if (isSerialised) {
+              const back = db.prepare(`
+                SELECT s.SerialID FROM item_serials s
+                JOIN purchase_details pd
+                  ON pd.IMEI = s.IMEI AND pd.PurchaseID = ?
+                WHERE s.ItemID = ? AND s.Status = 'returned'
+                ORDER BY s.SerialID
+                LIMIT ?
+              `).all(ret.PurchaseID, line.ItemID, Math.ceil(line.Quantity)) as any[];
+              for (const b of back) {
+                db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(b.SerialID);
+              }
+            }
+          }
+          if (line.ItemID && line.WarehouseID) {
             // Back in at the LANDED cost — the value that actually left the
             // warehouse — not the supplier's price.
             //
@@ -794,6 +1025,20 @@ export function registerPurchasesHandlers() {
                 // Full precision, for the same reason as on the way in.
                 const newCost = ((row.CostPrice || 0) * row.Quantity - absorbed) / row.Quantity;
                 db.prepare('UPDATE stock_quantities SET CostPrice = ? WHERE ID = ?').run(newCost, row.ID);
+              }
+              // Take it back off the devices that absorbed it, mirroring the
+              // create side so the two records stay in step.
+              const bearers = db.prepare(`
+                SELECT SerialID FROM item_serials
+                WHERE ItemID = ? AND WarehouseID = ? AND Status = 'available'
+              `).all(line.ItemID, line.WarehouseID) as any[];
+              if (bearers.length) {
+                const share = absorbed / bearers.length;
+                for (const bv of bearers) {
+                  db.prepare(
+                    'UPDATE item_serials SET CostPrice = COALESCE(CostPrice,0) - ? WHERE SerialID = ?',
+                  ).run(share, bv.SerialID);
+                }
               }
             }
           }
@@ -844,6 +1089,16 @@ export function registerPurchasesHandlers() {
             `).run(offset, offset, ret.PurchaseID);
           }
         }
+
+        // Cancel the valuation adjustments this return recorded.
+        //
+        // The stock movements above have already put that value back, so
+        // leaving the ledger rows in place would charge the loss a second time:
+        // the profit report reads this ledger, and the return it belonged to no
+        // longer exists. Deleted rather than negated, because the document
+        // itself is being erased.
+        db.prepare("DELETE FROM inventory_adjustments WHERE RefType = 'purchase_return' AND RefID = ?")
+          .run(returnId);
 
         db.prepare('DELETE FROM purchase_return_details WHERE ReturnID = ?').run(returnId);
         db.prepare('DELETE FROM purchase_returns WHERE ReturnID = ?').run(returnId);

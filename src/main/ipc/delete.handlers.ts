@@ -63,14 +63,18 @@ export function registerDeleteHandlers() {
           db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(Math.abs(sale.RemainingAmount), sale.CustomerID);
         }
 
-        // Reverse cash account
+        // Reverse the payment. The sale credited the amount NET of the
+        // machine's commission, so the reversal must remove the same net
+        // figure — subtracting the gross would destroy the fee's worth of cash
+        // on every deleted card sale.
+        const netReceived = +((sale.PaidAmount || 0) - (sale.TransferCost || 0)).toFixed(2);
+
         if (sale.CashAccountID && sale.PaidAmount > 0) {
-          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(sale.PaidAmount, sale.CashAccountID);
+          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(netReceived, sale.CashAccountID);
         }
 
-        // Reverse payment method
         if (sale.PaymentMethodID && sale.PaidAmount > 0) {
-          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(sale.PaidAmount, sale.PaymentMethodID);
+          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(netReceived, sale.PaymentMethodID);
         }
 
         // Delete sale details and sale

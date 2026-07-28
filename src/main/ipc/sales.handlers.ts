@@ -58,6 +58,77 @@ export function registerSalesHandlers() {
     const cashAccountId = paymentMethodId ? null : (data.CashAccountID ?? null);
 
     try {
+      // === INPUT VALIDATION ===
+      // The renderer checks these too, but the renderer is not a security or
+      // integrity boundary: any of these values arriving malformed writes a
+      // permanently wrong invoice that no report can later explain.
+      if (!Array.isArray(data.items) || data.items.length === 0) {
+        return { success: false, message: 'لا يمكن حفظ فاتورة بدون أصناف' };
+      }
+
+      const num = (v: unknown) => (typeof v === 'number' ? v : Number(v));
+      for (const item of data.items) {
+        const qty = num(item.Quantity);
+        const price = num(item.UnitPrice);
+        // `Number.isFinite` rejects NaN and Infinity together. A NaN would
+        // propagate into Subtotal/TotalAmount and, because SQLite stores NaN as
+        // NULL, the invoice would silently disappear from every SUM().
+        if (!Number.isFinite(qty) || qty <= 0) {
+          return { success: false, message: 'الكمية يجب أن تكون رقماً أكبر من صفر' };
+        }
+        if (!Number.isFinite(price) || price < 0) {
+          return { success: false, message: 'السعر يجب أن يكون رقماً غير سالب' };
+        }
+      }
+
+      const discountIn = num(data.Discount ?? 0);
+      const taxIn = num(data.TaxAmount ?? 0);
+      const paidIn = num(data.PaidAmount ?? 0);
+      if (!Number.isFinite(discountIn) || discountIn < 0) {
+        return { success: false, message: 'الخصم يجب أن يكون رقماً غير سالب' };
+      }
+      if (!Number.isFinite(taxIn) || taxIn < 0) {
+        return { success: false, message: 'الضريبة يجب أن تكون رقماً غير سالب' };
+      }
+      if (!Number.isFinite(paidIn) || paidIn < 0) {
+        return { success: false, message: 'المبلغ المدفوع يجب أن يكون رقماً غير سالب' };
+      }
+
+      // A discount larger than the goods turns the invoice negative, which the
+      // balance logic then books as money the SHOP owes the customer.
+      const rawSubtotal = data.items.reduce((sum, i) => sum + (num(i.Quantity) * num(i.UnitPrice)), 0);
+      if (discountIn > rawSubtotal) {
+        return {
+          success: false,
+          message: `الخصم (${discountIn.toFixed(2)}) أكبر من إجمالي الأصناف (${rawSubtotal.toFixed(2)})`,
+        };
+      }
+
+      // === PAYMENT TARGET MUST EXIST AND BE ACTIVE ===
+      // `UPDATE ... WHERE ID = ?` against a missing id affects zero rows and
+      // raises nothing, so the money simply evaporated while the invoice was
+      // still saved as paid. Crediting an INACTIVE account is just as bad: every
+      // report filters on IsActive = 1, so the cash becomes invisible.
+      if (paidIn > 0) {
+        if (!paymentMethodId && !cashAccountId) {
+          return { success: false, message: 'اختر مصدر استلام المبلغ (خزنة أو ماكينة)' };
+        }
+        if (paymentMethodId) {
+          const pm = db.prepare('SELECT IsActive FROM payment_methods WHERE PaymentMethodID = ?')
+            .get(paymentMethodId) as any;
+          if (!pm) return { success: false, message: 'ماكينة الدفع المختارة غير موجودة' };
+          if (!pm.IsActive) return { success: false, message: 'ماكينة الدفع المختارة غير مفعّلة' };
+        } else if (cashAccountId) {
+          const acc = db.prepare('SELECT IsActive FROM cash_accounts WHERE CashAccountID = ?')
+            .get(cashAccountId) as any;
+          if (!acc) return { success: false, message: 'الخزنة المختارة غير موجودة' };
+          if (!acc.IsActive) return { success: false, message: 'الخزنة المختارة غير مفعّلة' };
+        }
+      }
+
+      // A walk-in customer with no account cannot be left owing money, and
+      // cannot be given credit — there is no account to hold either.
+      const transferCost = Number.isFinite(num(data.TransferCost)) ? Math.max(0, num(data.TransferCost)) : 0;
       // Check if customer is suspended
       if (data.CustomerID) {
         const customer = db.prepare('SELECT Status, Balance FROM customers WHERE CustomerID = ?').get(data.CustomerID) as any;
@@ -158,15 +229,17 @@ export function registerSalesHandlers() {
         const result = db.prepare(`
           INSERT INTO sales (SaleNumber, FiscalYearID, Date, CustomerID, CustomerName, CustomerPhone,
             Subtotal, Discount, TaxRate, TaxAmount, TotalAmount, PaidAmount, RemainingAmount,
-            PaymentMethod, CashAccountID, PaymentMethodID, Status, UserID, Notes)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            PaymentMethod, CashAccountID, PaymentMethodID, Status, UserID, Notes, TransferCost)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           saleNumber, data.fiscalYearId, dateStr,
           data.CustomerID ?? null, data.CustomerName ?? null, data.CustomerPhone ?? null,
           subtotal, data.Discount, data.TaxRate, data.TaxAmount, totalAmount,
           paidAmount, remaining, data.PaymentMethod,
           cashAccountId, paymentMethodId,
-          status, data.userId, data.Notes ? `${data.Notes} | عمولة تحويل: ${data.TransferCost || 0}` : (data.TransferCost ? `عمولة تحويل: ${data.TransferCost}` : null)
+          // Stored as a NUMBER in its own column so the P&L can charge it as a
+          // cost. `Notes` keeps only what the user actually typed.
+          status, data.userId, data.Notes ?? null, transferCost
         );
 
         const saleId = result.lastInsertRowid;
@@ -227,10 +300,19 @@ export function registerSalesHandlers() {
         // independent `if`s, so selecting a cash account AND a payment method
         // credited the paid amount twice, inventing cash out of thin air.
         if (paidAmount > 0) {
+          // The commission never reaches the shop: a card machine or wallet
+          // settles the sale MINUS its fee. Crediting the gross amount
+          // overstated the asset by the fee on every single card sale, and the
+          // fee itself was never expensed, so profit was overstated twice over.
+          //
+          // The customer still owes the full TotalAmount — only what lands in
+          // our account is reduced. The fee is carried on the sale row as
+          // TransferCost and charged as a cost in the profit & loss report.
+          const netReceived = +(paidAmount - transferCost).toFixed(2);
           if (paymentMethodId) {
-            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(paidAmount, paymentMethodId);
+            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(netReceived, paymentMethodId);
           } else if (cashAccountId) {
-            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(paidAmount, cashAccountId);
+            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(netReceived, cashAccountId);
           }
         }
       });

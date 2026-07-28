@@ -1063,6 +1063,17 @@ export function runMigrations(db: Database.Database) {
     db.exec(`ALTER TABLE sales ADD COLUMN IsWarranty INTEGER DEFAULT 0`);
   } catch {}
 
+  // The card-machine / wallet commission on a sale.
+  //
+  // It used to be appended to the free-text `Notes` field ("عمولة تحويل: 25"),
+  // so it existed as prose but not as money: the full amount was credited to
+  // the machine even though the bank settles net of the fee, and no report
+  // could ever find it. Assets and profit were both overstated by every
+  // commission ever charged.
+  try {
+    db.exec(`ALTER TABLE sales ADD COLUMN TransferCost REAL DEFAULT 0`);
+  } catch {}
+
   // Track WHICH warehouse each sale line was taken from, so a return/delete
   // credits the same warehouse it originally debited. Without this the reversal
   // guessed the warehouse and could move stock between locations.

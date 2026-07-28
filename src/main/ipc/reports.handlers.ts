@@ -417,6 +417,16 @@ export function registerReportsHandlers() {
       FROM service_sales WHERE 1=1 ${dateFilter}
     `).get(...params) as any;
 
+    // 4b. Card-machine / wallet commission charged on direct sales.
+    // The customer pays the full invoice but the provider settles net of its
+    // fee, so the difference is a real cost of doing business. It is excluded
+    // for maintenance-sourced rows for the same reason their revenue is: the
+    // repair side reports its own figures.
+    const saleTransferCost = db.prepare(`
+      SELECT COALESCE(SUM(COALESCE(TransferCost,0)),0) as total FROM sales
+      WHERE IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance' ${dateFilter}
+    `).get(...params) as any;
+
     // 5. Purchase Returns value (items returned to supplier - reduces our stock cost basis)
     const purchaseReturnsCost = db.prepare(`
       SELECT COALESCE(SUM(r.TotalAmount),0) as total
@@ -425,7 +435,8 @@ export function registerReportsHandlers() {
       WHERE 1=1 ${joinFilterReturn}
     `).get(...params) as any;
 
-    const totalDirectCosts = cogs.total - cogsReturns.total + partsCost.total + serviceCost.total;
+    const totalDirectCosts = cogs.total - cogsReturns.total + partsCost.total + serviceCost.total
+      + saleTransferCost.total;
 
     // Gross Profit = Revenue - Direct Costs
     const grossProfit = totalRevenue - totalDirectCosts;
@@ -491,6 +502,7 @@ export function registerReportsHandlers() {
         cogsReturns: cogsReturns.total,
         parts: partsCost.total,
         serviceCosts: serviceCost.total,
+        saleTransferCosts: saleTransferCost.total,
         // NOTE: warranty parts are an operating EXPENSE (see `expenses` below),
         // they are intentionally NOT part of `total` here. Exposed for display.
         warrantyParts: warrantyPartsCost.total,

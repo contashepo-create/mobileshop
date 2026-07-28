@@ -4,20 +4,66 @@ import { Badge } from '../../components/ui/Badge';
 
 export function Dashboard() {
   const [stats, setStats] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     (async () => {
-      const data = await window.api.invoke('reports:dashboard');
-      setStats(data);
+      try {
+        const data = await window.api.invoke('reports:dashboard');
+        // The IPC guard answers a denied call with { success:false, ... }
+        // rather than throwing. Without this check the page rendered a
+        // dashboard of zeros, which reads exactly like a real day with no
+        // trading — the worst possible way to report "you lack permission".
+        if (data && data.success === false) {
+          setError(data.message || 'ليس لديك صلاحية لعرض لوحة التحكم');
+        } else {
+          setStats(data);
+        }
+      } catch {
+        setError('تعذّر تحميل بيانات لوحة التحكم');
+      } finally {
+        setLoading(false);
+      }
     })();
   }, []);
 
+  const money = (n: number) => `${(n || 0).toFixed(2)} ج.م`;
+
   const cards = [
-    { label: 'مبيعات اليوم', value: `${(stats?.todaySales || 0).toFixed(2)} ج.م`, icon: TrendingUp, color: 'bg-green-500' },
+    // "Invoiced" and "collected" are different numbers and are now labelled as
+    // such: a credit sale is revenue today but cash later.
+    {
+      label: 'مبيعات اليوم (فواتير)',
+      value: money(stats?.todayInvoiced ?? stats?.todaySales),
+      hint: `المحصّل نقداً: ${money(stats?.todayCollected)}`,
+      icon: TrendingUp, color: 'bg-green-500',
+    },
     { label: 'صيانة معلقة', value: stats?.pendingMaintenance || 0, icon: Wrench, color: 'bg-orange-500' },
     { label: 'مخزون منخفض', value: stats?.lowStock || 0, icon: PackageX, color: 'bg-red-500' },
-    { label: 'رصيد الخزائن', value: `${(stats?.cashBalance || 0).toFixed(2)} ج.م`, icon: Wallet, color: 'bg-blue-500' },
+    {
+      label: 'السيولة المتاحة',
+      value: money(stats?.totalLiquid ?? stats?.cashBalance),
+      hint: `خزائن: ${money(stats?.cashBalance)} · محافظ: ${money(stats?.paymentMethodBalance)}`,
+      icon: Wallet, color: 'bg-blue-500',
+    },
   ];
+
+  if (loading) {
+    return <div className="text-slate-500 dark:text-slate-400">جاري التحميل...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-slate-800 dark:text-white">لوحة التحكم</h1>
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-4 flex items-center gap-3">
+          <AlertTriangle size={20} className="text-red-500 flex-shrink-0" />
+          <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -47,6 +93,9 @@ export function Dashboard() {
               </div>
               <div className="text-2xl font-bold text-slate-800 dark:text-white">{card.value}</div>
               <div className="text-sm text-slate-500 dark:text-slate-500 dark:text-slate-400 mt-1">{card.label}</div>
+              {card.hint && (
+                <div className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">{card.hint}</div>
+              )}
             </div>
           );
         })}

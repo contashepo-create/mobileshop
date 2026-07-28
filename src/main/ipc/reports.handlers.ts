@@ -10,15 +10,64 @@ export function registerReportsHandlers() {
     // made "today's sales" show zero for the first hours after midnight.
     const today = businessToday();
 
-    const todaySales = db.prepare("SELECT COALESCE(SUM(PaidAmount),0) as total FROM sales WHERE Date = ? AND IsVoided = 0").get(today) as any;
-    const pendingMaintenance = db.prepare("SELECT COUNT(*) as count FROM maintenance_tickets WHERE Status NOT IN ('delivered','cancelled','returned')").get() as any;
-    const lowStock = db.prepare("SELECT COUNT(*) as count FROM items WHERE MinStock > 0 AND IsActive = 1 AND (SELECT COALESCE(SUM(Quantity),0) FROM stock_quantities WHERE ItemID = items.ItemID) < MinStock").get() as any;
-    const cashBalance = db.prepare("SELECT COALESCE(SUM(Balance),0) as total FROM cash_accounts WHERE IsActive = 1").get() as any;
+    // ---- Today's trading.
+    //
+    // Two DIFFERENT questions were previously conflated into one card:
+    //   - how much did we INVOICE today (revenue earned), and
+    //   - how much CASH did we actually collect today.
+    // The card summed PaidAmount and was labelled "today's sales", so a credit
+    // sale of 500 simply did not appear. Both figures are now returned and the
+    // UI labels each one honestly.
+    //
+    // `Source <> 'maintenance'` matters: delivering a repair also writes a
+    // mirror row into `sales` so the customer gets a printable invoice. That
+    // money is already reported as maintenance revenue, so counting the mirror
+    // here made the dashboard disagree with the profit & loss report.
+    // Warranty invoices are excluded for the same reason as in the P&L — they
+    // carry no revenue.
+    const REAL_SALES = "IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance'";
 
-    // Monthly sales chart (last 6 months)
+    const todayInvoiced = db.prepare(
+      `SELECT COALESCE(SUM(TotalAmount),0) as total FROM sales WHERE Date = ? AND ${REAL_SALES}`,
+    ).get(today) as any;
+    const todayCollected = db.prepare(
+      `SELECT COALESCE(SUM(PaidAmount),0) as total FROM sales WHERE Date = ? AND ${REAL_SALES}`,
+    ).get(today) as any;
+
+    const pendingMaintenance = db.prepare("SELECT COUNT(*) as count FROM maintenance_tickets WHERE Status NOT IN ('delivered','cancelled','returned')").get() as any;
+
+    // Serialised items track availability in `item_serials`, not in
+    // `stock_quantities` — that table stays empty for them. Counting only
+    // stock_quantities therefore reported EVERY serialised item with a MinStock
+    // as "low", even with fifty handsets on the shelf. This now mirrors the
+    // notification engine exactly, so the badge and the alert list agree.
+    const lowStock = db.prepare(`
+      SELECT COUNT(*) as count FROM items i
+      WHERE i.IsActive = 1 AND i.MinStock > 0
+        AND ((i.IsSerialized = 0
+              AND (SELECT COALESCE(SUM(Quantity),0) FROM stock_quantities WHERE ItemID = i.ItemID) < i.MinStock)
+          OR (i.IsSerialized = 1
+              AND (SELECT COUNT(*) FROM item_serials WHERE ItemID = i.ItemID AND Status = 'available') < i.MinStock))
+    `).get() as any;
+
+    // Liquid funds live in two places: physical cash drawers and the wallets /
+    // card machines in `payment_methods`. Showing only the first hid real money
+    // — for a shop taking most payments by wallet the card was badly wrong.
+    const cashBalance = db.prepare("SELECT COALESCE(SUM(Balance),0) as total FROM cash_accounts WHERE IsActive = 1").get() as any;
+    const paymentMethodBalance = db.prepare("SELECT COALESCE(SUM(Balance),0) as total FROM payment_methods WHERE IsActive = 1").get() as any;
+
+    // Monthly sales chart.
+    //
+    // Anchored to the FIRST DAY of the month five months back, so every bar
+    // covers a whole month. `-6 months` from today started mid-month, so the
+    // oldest bar held only a few days' trading yet was drawn the same width as
+    // the others — it always looked like a collapse in business.
+    // Same revenue definition as above, so the chart and the cards agree.
     const monthlySales = db.prepare(`
       SELECT strftime('%Y-%m', Date) as month, COALESCE(SUM(TotalAmount),0) as total
-      FROM sales WHERE Date >= date('now','localtime','-6 months') AND IsVoided = 0
+      FROM sales
+      WHERE Date >= date('now','localtime','start of month','-5 months')
+        AND ${REAL_SALES}
       GROUP BY month ORDER BY month ASC
     `).all();
 
@@ -30,10 +79,16 @@ export function registerReportsHandlers() {
     const overdueMaintenance = db.prepare("SELECT COUNT(*) as count FROM maintenance_tickets WHERE AgreedDeliveryDate < ? AND Status NOT IN ('delivered','cancelled','returned')").get(today) as any;
 
     return {
-      todaySales: todaySales.total,
+      // Kept as an alias so nothing that already reads `todaySales` breaks;
+      // it now means "invoiced today", which is what the label promises.
+      todaySales: todayInvoiced.total,
+      todayInvoiced: todayInvoiced.total,
+      todayCollected: todayCollected.total,
       pendingMaintenance: pendingMaintenance.count,
       lowStock: lowStock.count,
       cashBalance: cashBalance.total,
+      paymentMethodBalance: paymentMethodBalance.total,
+      totalLiquid: cashBalance.total + paymentMethodBalance.total,
       monthlySales,
       recentSales,
       recentMaintenance,

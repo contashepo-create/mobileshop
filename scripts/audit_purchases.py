@@ -171,9 +171,10 @@ report(abs(bal + 200) < 0.01,
 
 # ---------------------------------------------------------------- 5
 print('\n[5] ACCOUNTING — the return splits debt and cash correctly')
-report('const debtRelief = Math.min(totalAmount, remainingDebtAfterPriorReturns);' in PUR,
-       'a return first cancels what we still owe, then takes cash back',
-       'taking cash for goods never paid for would be money we never spent')
+report('suggestSettlement(' in PUR and 'validateSettlement({' in PUR,
+       'the settlement is chosen by the user and validated server-side',
+       'debt-first-then-cash is still the SUGGESTED default, but the shop may\n'
+       'take it all in cash, leave it on the supplier account, or split it')
 report('priorReturns + totalAmount > (originalPurchase.TotalAmount || 0) + 0.001' in PUR,
        'repeated returns cannot exceed the invoice total')
 outstanding, ret = 600.0, 1000.0

@@ -3,6 +3,7 @@ import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, deductStock, restoreStock, restoreStockAtCost, totalStock } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
+import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
 
 export function registerSalesHandlers() {
   // ===== SALES =====
@@ -349,18 +350,18 @@ export function registerSalesHandlers() {
 
   ipcMain.handle('saleReturns:create', async (_event, data: {
     SaleID: number; items: { ItemID: number; SerialID?: number; Quantity: number; UnitPrice: number }[];
-    Reason?: string; CashAccountID?: number; userId: number;
+    Reason?: string; userId: number;
+    // How the value is settled. Omitted entirely = use the suggested split, so
+    // an older caller keeps working.
+    AccountCredit?: number; CashRefund?: number; TransferRefund?: number;
+    CashAccountID?: number; PaymentMethodID?: number;
+    TransferCost?: number; TransferCostBearer?: 'shop' | 'party';
   }) => {
     const db = getDb();
-    const totalAmount = data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitPrice), 0);
+    const totalAmount = money(data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitPrice), 0));
     const dateStr = businessToday();
     const returnNumber = nextDocNumber(db, 'sale_returns', 'ReturnNumber', 'SR', dateStr);
 
-    // === SPLIT THE REFUND BETWEEN DEBT RELIEF AND CASH ===
-    // A return must first cancel whatever the customer still OWES on that
-    // invoice; only the remainder is genuinely refundable in cash.
-    // Previously the full amount was BOTH paid out in cash AND deducted from
-    // the customer balance, refunding the money twice.
     const originalSale = db.prepare(
       'SELECT CustomerID, TotalAmount, PaidAmount, RemainingAmount FROM sales WHERE SaleID = ?'
     ).get(data.SaleID) as any;
@@ -380,17 +381,58 @@ export function registerSalesHandlers() {
       };
     }
 
-    // Debt relief comes first, cash refund covers what the customer actually paid.
-    const remainingDebtAfterPriorReturns = Math.max(0, outstanding - priorReturns);
-    const debtRelief = Math.min(totalAmount, remainingDebtAfterPriorReturns);
-    const cashRefund = +(totalAmount - debtRelief).toFixed(2);
+    // === HOW THE VALUE IS SETTLED ===
+    // Chosen by the user, not computed. See src/shared/returnSettlement.ts for
+    // why a fixed formula could not express the real situations a shop meets.
+    // A walk-in customer has no account, so nothing may be left on one.
+    const hasAccount = !!originalSale.CustomerID;
+    const explicit = data.AccountCredit != null || data.CashRefund != null || data.TransferRefund != null;
+    const proposed = explicit
+      ? {
+          accountCredit: data.AccountCredit ?? 0,
+          cashRefund: data.CashRefund ?? 0,
+          transferRefund: data.TransferRefund ?? 0,
+        }
+      : suggestSettlement(totalAmount, Math.max(0, outstanding - priorReturns), hasAccount);
 
-    // Check sufficient cash for the portion actually paid back in cash
+    const settlement = validateSettlement({
+      total: totalAmount,
+      ...proposed,
+      hasAccount,
+      cashAccountId: data.CashAccountID ?? null,
+      paymentMethodId: data.PaymentMethodID ?? null,
+      transferCost: data.TransferCost ?? 0,
+      transferCostBearer: data.TransferCostBearer,
+    });
+    if (!settlement.ok) return { success: false, message: settlement.message };
+
+    // `DebtRelief` keeps its old name in the database: it is the portion that
+    // touches the customer account, which is exactly what the statement reads.
+    const debtRelief = settlement.accountCredit;
+    const cashRefund = settlement.cashRefund;
+
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
-    if (allowNegCash?.Value !== '1' && data.CashAccountID && cashRefund > 0) {
-      const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
-      if (!acc || (acc.Balance || 0) < cashRefund) {
-        return { success: false, message: `الرصيد غير كافٍ في الخزينة لرد المبلغ: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${cashRefund.toFixed(2)}` };
+    const allowNegative = allowNegCash?.Value === '1';
+
+    // Every account that money actually leaves must exist, be active, and —
+    // unless negative balances are permitted — hold enough to cover its share.
+    if (cashRefund > 0) {
+      const acc = db.prepare('SELECT Balance, IsActive FROM cash_accounts WHERE CashAccountID = ?')
+        .get(data.CashAccountID) as any;
+      if (!acc) return { success: false, message: 'الخزنة المختارة غير موجودة' };
+      if (!acc.IsActive) return { success: false, message: 'الخزنة المختارة غير مفعّلة' };
+      if (!allowNegative && (acc.Balance || 0) < cashRefund) {
+        return { success: false, message: `الرصيد غير كافٍ في الخزينة لرد المبلغ: المتاح ${(acc.Balance || 0).toFixed(2)}، المطلوب ${cashRefund.toFixed(2)}` };
+      }
+    }
+    if (settlement.transferRefund > 0) {
+      const pm = db.prepare('SELECT Balance, IsActive FROM payment_methods WHERE PaymentMethodID = ?')
+        .get(data.PaymentMethodID) as any;
+      if (!pm) return { success: false, message: 'المحفظة/الماكينة المختارة غير موجودة' };
+      if (!pm.IsActive) return { success: false, message: 'المحفظة/الماكينة المختارة غير مفعّلة' };
+      // The outflow includes the fee when the shop absorbs it.
+      if (!allowNegative && (pm.Balance || 0) < settlement.transferOutflow) {
+        return { success: false, message: `الرصيد غير كافٍ في المحفظة/الماكينة: المتاح ${(pm.Balance || 0).toFixed(2)}، المطلوب ${settlement.transferOutflow.toFixed(2)}` };
       }
     }
 
@@ -398,10 +440,12 @@ export function registerSalesHandlers() {
       const tx = db.transaction(() => {
         const result = db.prepare(`
           INSERT INTO sale_returns (ReturnNumber, SaleID, Date, TotalAmount, Reason, UserID, CashAccountID,
-            DebtRelief, CashRefund)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            DebtRelief, CashRefund, TransferRefund, PaymentMethodID, TransferCost, TransferCostBearer)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(returnNumber, data.SaleID, dateStr, totalAmount, data.Reason ?? null, data.userId,
-               data.CashAccountID ?? null, debtRelief, cashRefund);
+               data.CashAccountID ?? null, debtRelief, cashRefund,
+               settlement.transferRefund, data.PaymentMethodID ?? null,
+               settlement.transferCost, settlement.transferCostBearer);
 
         const returnId = result.lastInsertRowid;
 
@@ -438,23 +482,43 @@ export function registerSalesHandlers() {
           }
         }
 
-        // Pay back only the cash portion (what the customer actually handed over)
+        // --- Settle the value, exactly as the user chose.
+
+        // Cash leg: money physically leaves the drawer.
         if (data.CashAccountID && cashRefund > 0) {
           db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(cashRefund, data.CashAccountID);
         }
 
-        // Cancel the outstanding debt portion on the customer account
+        // Transfer leg: money leaves the wallet/machine. When the shop absorbs
+        // the provider's fee, MORE leaves than the customer receives — that
+        // extra is the fee, and it is a real cost to the shop.
+        if (data.PaymentMethodID && settlement.transferOutflow > 0) {
+          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?')
+            .run(settlement.transferOutflow, data.PaymentMethodID);
+        }
+
+        // Account leg: reduces what the customer owes. If they owed nothing,
+        // the balance goes NEGATIVE — money the shop now owes them, which is
+        // exactly right for a credit left on account.
         if (originalSale.CustomerID && debtRelief > 0) {
           db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(debtRelief, originalSale.CustomerID);
         }
 
-        // Keep the invoice consistent with what is still owed after the return
-        db.prepare(`
-          UPDATE sales
-          SET RemainingAmount = MAX(0, RemainingAmount - ?),
-              Status = CASE WHEN MAX(0, RemainingAmount - ?) <= 0 THEN 'completed' ELSE Status END
-          WHERE SaleID = ?
-        `).run(debtRelief, debtRelief, data.SaleID);
+        // Keep the invoice consistent with what is still owed after the return.
+        //
+        // Only the part of the account credit that offsets THIS invoice's
+        // outstanding amount reduces it. Credit beyond that is a balance the
+        // customer carries forward, not a change to this invoice — writing it
+        // here would drive RemainingAmount below zero and misreport the status.
+        const invoiceOffset = money(Math.min(debtRelief, outstanding));
+        if (invoiceOffset > 0) {
+          db.prepare(`
+            UPDATE sales
+            SET RemainingAmount = MAX(0, RemainingAmount - ?),
+                Status = CASE WHEN MAX(0, RemainingAmount - ?) <= 0 THEN 'completed' ELSE Status END
+            WHERE SaleID = ?
+          `).run(invoiceOffset, invoiceOffset, data.SaleID);
+        }
       });
 
       tx();
@@ -772,15 +836,11 @@ export function registerSalesHandlers() {
       // balance from going negative behind the user's back.
       const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
       const cashRefund = ret.CashRefund || 0;
+      // Undoing the return means taking the refunded money back IN, so no
+      // balance check is needed for that direction. What must be checked is the
+      // reverse: nothing here removes money.
       if (allowNegCash?.Value !== '1' && ret.CashAccountID && cashRefund > 0) {
-        const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?')
-          .get(ret.CashAccountID) as any;
-        if (!acc || (acc.Balance || 0) < cashRefund) {
-          return {
-            success: false,
-            message: `الرصيد غير كافٍ لاسترجاع المبلغ المدفوع للعميل: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${cashRefund.toFixed(2)}`,
-          };
-        }
+        // Cash comes back into the drawer — always safe.
       }
 
       const tx = db.transaction(() => {
@@ -793,25 +853,40 @@ export function registerSalesHandlers() {
           }
         }
 
-        // Give back the cash that was refunded to the customer.
+        // Take back the cash that was handed over.
         if (ret.CashAccountID && cashRefund > 0) {
           db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?')
             .run(cashRefund, ret.CashAccountID);
         }
 
-        // Restore the debt that the return had cancelled.
+        // Take back the transfer, including the fee if the shop absorbed it —
+        // the same figure that left, so the wallet returns to its prior value.
+        const transferOutflow = (ret.TransferCostBearer ?? 'shop') === 'shop'
+          ? money((ret.TransferRefund || 0) + (ret.TransferCost || 0))
+          : (ret.TransferRefund || 0);
+        if (ret.PaymentMethodID && transferOutflow > 0) {
+          db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?')
+            .run(transferOutflow, ret.PaymentMethodID);
+        }
+
+        // Restore the account credit the return had given.
         const debtRelief = ret.DebtRelief || 0;
         if (sale?.CustomerID && debtRelief > 0) {
           db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?')
             .run(debtRelief, sale.CustomerID);
-          db.prepare(`
-            UPDATE sales
-            SET RemainingAmount = RemainingAmount + ?,
-                Status = CASE WHEN RemainingAmount + ? > 0
-                              THEN (CASE WHEN PaidAmount > 0 THEN 'partial' ELSE 'unpaid' END)
-                              ELSE 'completed' END
-            WHERE SaleID = ?
-          `).run(debtRelief, debtRelief, ret.SaleID);
+          // Only the portion that actually reduced THIS invoice is added back,
+          // mirroring the `invoiceOffset` applied when the return was created.
+          const restoredOnInvoice = money(Math.min(debtRelief, (sale.TotalAmount || 0) - (sale.PaidAmount || 0)));
+          if (restoredOnInvoice > 0) {
+            db.prepare(`
+              UPDATE sales
+              SET RemainingAmount = RemainingAmount + ?,
+                  Status = CASE WHEN RemainingAmount + ? > 0
+                                THEN (CASE WHEN PaidAmount > 0 THEN 'partial' ELSE 'unpaid' END)
+                                ELSE 'completed' END
+              WHERE SaleID = ?
+            `).run(restoredOnInvoice, restoredOnInvoice, ret.SaleID);
+          }
         }
 
         db.prepare('DELETE FROM sale_return_details WHERE ReturnID = ?').run(returnId);

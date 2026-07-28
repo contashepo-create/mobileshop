@@ -3,6 +3,7 @@ import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, warehouseStock, deductStock, restoreStockAtCost } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
+import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
 
 export function registerPurchasesHandlers() {
   ipcMain.handle('purchases:list', async (_event, filters?: { fromDate?: string; toDate?: string; supplierId?: number }) => {
@@ -279,10 +280,14 @@ export function registerPurchasesHandlers() {
 
   ipcMain.handle('purchaseReturns:create', async (_event, data: {
     PurchaseID: number; items: { ItemID: number; SerialID?: number; Quantity: number; UnitCost: number; WarehouseID?: number }[];
-    Reason?: string; CashAccountID?: number; userId: number;
+    Reason?: string; userId: number;
+    // How the value is settled — chosen, not computed. Omitted = suggested.
+    AccountCredit?: number; CashRefund?: number; TransferRefund?: number;
+    CashAccountID?: number; PaymentMethodID?: number;
+    TransferCost?: number; TransferCostBearer?: 'shop' | 'party';
   }) => {
     const db = getDb();
-    const totalAmount = data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitCost), 0);
+    const totalAmount = money(data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitCost), 0));
     const dateStr = businessToday();
     const returnNumber = nextDocNumber(db, 'purchase_returns', 'ReturnNumber', 'PR', dateStr);
 
@@ -308,9 +313,45 @@ export function registerPurchasesHandlers() {
       };
     }
 
-    const remainingDebtAfterPriorReturns = Math.max(0, outstanding - priorReturns);
-    const debtRelief = Math.min(totalAmount, remainingDebtAfterPriorReturns);
-    const cashRefund = +(totalAmount - debtRelief).toFixed(2);
+    // === HOW THE VALUE IS SETTLED ===
+    // Mirror of the sale-return model. A supplier always has an account, so
+    // every combination is available: leave it against what we owe them, take
+    // it back in cash, receive it by transfer, or any mix.
+    const explicit = data.AccountCredit != null || data.CashRefund != null || data.TransferRefund != null;
+    const proposed = explicit
+      ? {
+          accountCredit: data.AccountCredit ?? 0,
+          cashRefund: data.CashRefund ?? 0,
+          transferRefund: data.TransferRefund ?? 0,
+        }
+      : suggestSettlement(totalAmount, Math.max(0, outstanding - priorReturns), true);
+
+    const settlement = validateSettlement({
+      total: totalAmount,
+      ...proposed,
+      hasAccount: true,
+      cashAccountId: data.CashAccountID ?? null,
+      paymentMethodId: data.PaymentMethodID ?? null,
+      transferCost: data.TransferCost ?? 0,
+      transferCostBearer: data.TransferCostBearer,
+    });
+    if (!settlement.ok) return { success: false, message: settlement.message };
+
+    const debtRelief = settlement.accountCredit;
+    const cashRefund = settlement.cashRefund;
+
+    // Money coming IN needs a valid destination, but no balance check: a
+    // deposit can never overdraw an account.
+    if (cashRefund > 0) {
+      const acc = db.prepare('SELECT IsActive FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+      if (!acc) return { success: false, message: 'الخزنة المختارة غير موجودة' };
+      if (!acc.IsActive) return { success: false, message: 'الخزنة المختارة غير مفعّلة' };
+    }
+    if (settlement.transferRefund > 0) {
+      const pm = db.prepare('SELECT IsActive FROM payment_methods WHERE PaymentMethodID = ?').get(data.PaymentMethodID) as any;
+      if (!pm) return { success: false, message: 'المحفظة/الماكينة المختارة غير موجودة' };
+      if (!pm.IsActive) return { success: false, message: 'المحفظة/الماكينة المختارة غير مفعّلة' };
+    }
 
     // Check sufficient stock before return (unless negative stock allowed)
     // Goods go back to the supplier FROM the warehouse they were received into.
@@ -344,10 +385,12 @@ export function registerPurchasesHandlers() {
     const tx = db.transaction(() => {
       const result = db.prepare(`
         INSERT INTO purchase_returns (ReturnNumber, PurchaseID, Date, TotalAmount, Reason, UserID, CashAccountID,
-          DebtRelief, CashRefund)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          DebtRelief, CashRefund, TransferRefund, PaymentMethodID, TransferCost, TransferCostBearer)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(returnNumber, data.PurchaseID, dateStr, totalAmount, data.Reason ?? null, data.userId,
-             data.CashAccountID ?? null, debtRelief, cashRefund);
+             data.CashAccountID ?? null, debtRelief, cashRefund,
+             settlement.transferRefund, data.PaymentMethodID ?? null,
+             settlement.transferCost, settlement.transferCostBearer);
 
       const returnId = result.lastInsertRowid;
 
@@ -375,18 +418,30 @@ export function registerPurchasesHandlers() {
         db.prepare('UPDATE suppliers SET Balance = Balance - ? WHERE SupplierID = ?').run(debtRelief, originalPurchase.SupplierID);
       }
 
-      // Take back in cash only what we had already paid
+      // Cash leg: the supplier hands money back into the drawer.
       if (data.CashAccountID && cashRefund > 0) {
         db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(cashRefund, data.CashAccountID);
       }
 
+      // Transfer leg: money arrives in the wallet/machine. If the supplier
+      // deducted the provider's fee, we receive less than the agreed figure.
+      if (data.PaymentMethodID && settlement.transferRefund > 0) {
+        db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?')
+          .run(settlement.transferReceived, data.PaymentMethodID);
+      }
+
       // Keep the purchase consistent with what remains owed
-      db.prepare(`
-        UPDATE purchases
-        SET RemainingAmount = MAX(0, RemainingAmount - ?),
-            Status = CASE WHEN MAX(0, RemainingAmount - ?) <= 0 THEN 'completed' ELSE Status END
-        WHERE PurchaseID = ?
-      `).run(debtRelief, debtRelief, data.PurchaseID);
+      // Only the portion that offsets THIS invoice's outstanding amount
+      // reduces it; credit beyond that is carried on the supplier account.
+      const invoiceOffset = money(Math.min(debtRelief, outstanding));
+      if (invoiceOffset > 0) {
+        db.prepare(`
+          UPDATE purchases
+          SET RemainingAmount = MAX(0, RemainingAmount - ?),
+              Status = CASE WHEN MAX(0, RemainingAmount - ?) <= 0 THEN 'completed' ELSE Status END
+          WHERE PurchaseID = ?
+        `).run(invoiceOffset, invoiceOffset, data.PurchaseID);
+      }
     });
 
     tx();
@@ -501,6 +556,16 @@ export function registerPurchasesHandlers() {
         if (ret.CashAccountID && cashRefund > 0) {
           db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?')
             .run(cashRefund, ret.CashAccountID);
+        }
+
+        // Send back what arrived by transfer — the amount actually received,
+        // which is net of the fee when the supplier deducted it.
+        const transferReceived = (ret.TransferCostBearer ?? 'shop') === 'party'
+          ? money((ret.TransferRefund || 0) - (ret.TransferCost || 0))
+          : (ret.TransferRefund || 0);
+        if (ret.PaymentMethodID && transferReceived > 0) {
+          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?')
+            .run(transferReceived, ret.PaymentMethodID);
         }
 
         const debtRelief = ret.DebtRelief || 0;

@@ -27,6 +27,12 @@ export function PurchasesPage() {
   const [returnLines, setReturnLines] = useState<any[]>([]);
   const [returnReason, setReturnReason] = useState('');
   const [returnCashAccountId, setReturnCashAccountId] = useState('');
+  const [retAccountCredit, setRetAccountCredit] = useState('');
+  const [retCashRefund, setRetCashRefund] = useState('');
+  const [retTransferRefund, setRetTransferRefund] = useState('');
+  const [retPaymentMethodId, setRetPaymentMethodId] = useState('');
+  const [retTransferCost, setRetTransferCost] = useState('');
+  const [retFeeBearer, setRetFeeBearer] = useState<'shop' | 'party'>('shop');
   const [search, setSearch] = useState('');
 
   const [supplierId, setSupplierId] = useState('');
@@ -137,11 +143,28 @@ export function PurchasesPage() {
     setReturnLines(open.map((l: any) => ({ ...l, ReturnQty: 0 })));
     setReturnReason('');
     setReturnCashAccountId('');
+    setRetAccountCredit(''); setRetCashRefund(''); setRetTransferRefund('');
+    setRetPaymentMethodId(''); setRetTransferCost(''); setRetFeeBearer('shop');
     setShowReturnModal(true);
   };
 
-  const returnTotal = returnLines.reduce(
-    (sum, l) => sum + (Number(l.ReturnQty) || 0) * (l.UnitCost || 0), 0);
+  const returnTotal = Math.round(returnLines.reduce(
+    (sum, l) => sum + (Number(l.ReturnQty) || 0) * (l.UnitCost || 0), 0) * 100) / 100;
+
+  const retAllocated = Math.round(
+    ((parseFloat(retAccountCredit) || 0) + (parseFloat(retCashRefund) || 0)
+      + (parseFloat(retTransferRefund) || 0)) * 100) / 100;
+  const retUnallocated = Math.round((returnTotal - retAllocated) * 100) / 100;
+
+  /** Suggests debt-first, the rest in cash. Every field stays editable. */
+  useEffect(() => {
+    if (!showReturnModal || returnTotal <= 0) return;
+    const outstanding = Math.max(0, returnPurchase?.RemainingAmount || 0);
+    const credit = Math.min(returnTotal, outstanding);
+    setRetAccountCredit(credit.toFixed(2));
+    setRetCashRefund((returnTotal - credit).toFixed(2));
+    setRetTransferRefund('0');
+  }, [returnTotal, showReturnModal]);
 
   const submitReturn = async () => {
     const picked = returnLines.filter(l => (Number(l.ReturnQty) || 0) > 0);
@@ -159,7 +182,13 @@ export function PurchasesPage() {
         UnitCost: l.UnitCost, WarehouseID: l.WarehouseID,
       })),
       Reason: returnReason || undefined,
+      AccountCredit: parseFloat(retAccountCredit) || 0,
+      CashRefund: parseFloat(retCashRefund) || 0,
+      TransferRefund: parseFloat(retTransferRefund) || 0,
       CashAccountID: returnCashAccountId ? parseInt(returnCashAccountId) : undefined,
+      PaymentMethodID: retPaymentMethodId ? parseInt(retPaymentMethodId) : undefined,
+      TransferCost: parseFloat(retTransferCost) || 0,
+      TransferCostBearer: retFeeBearer,
       userId: currentUserId(),
     });
     if (res?.success) {
@@ -398,36 +427,85 @@ export function PurchasesPage() {
             </table>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <Input label="سبب الإرجاع" value={returnReason}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
-              placeholder="بضاعة تالفة، مخالفة للمواصفات..." />
-            <Select label="خزنة استلام المبلغ" value={returnCashAccountId}
-              onChange={(e) => setReturnCashAccountId(e.target.value)}>
-              <option value="">— بدون استرداد نقدي —</option>
-              {cashAccounts.map((ca: any) => (
-                <option key={ca.CashAccountID} value={ca.CashAccountID}>
-                  {ca.AccountName} ({ca.Balance?.toFixed(2)})
-                </option>
-              ))}
-            </Select>
-          </div>
+          <Input label="سبب الإرجاع" value={returnReason}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
+            placeholder="بضاعة تالفة، مخالفة للمواصفات..." />
 
-          {returnTotal > 0 && (() => {
-            const outstanding = Math.max(0, returnPurchase?.RemainingAmount || 0);
-            const debtRelief = Math.min(returnTotal, outstanding);
-            const cashBack = +(returnTotal - debtRelief).toFixed(2);
-            return (
-              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 text-sm text-amber-800 dark:text-amber-300 space-y-1">
-                <div>قيمة المرتجع: <b>{returnTotal.toFixed(2)}</b></div>
-                <div>يُخصم من دَينك للمورد: <b>{debtRelief.toFixed(2)}</b></div>
-                <div>تسترده نقداً: <b>{cashBack.toFixed(2)}</b></div>
-                <div className="pt-1 border-t border-amber-200 dark:border-amber-800 text-xs">
-                  يُسدَّد ما عليك أولاً، ولا تسترد نقداً إلا ما دفعته فعلاً.
-                </div>
+          {returnTotal > 0 && (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                  كيف تُسوّى قيمة المرتجع؟
+                </span>
+                <span className="text-sm font-bold text-slate-800 dark:text-white">
+                  {returnTotal.toFixed(2)}
+                </span>
               </div>
-            );
-          })()}
+
+              <div className="grid grid-cols-3 gap-3">
+                <Input label="يبقى على حساب المورد" type="number" value={retAccountCredit}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRetAccountCredit(e.target.value)}
+                  hint="يُخصم مما عليك أو يصبح لك عنده" />
+                <Input label="نقداً للخزنة" type="number" value={retCashRefund}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRetCashRefund(e.target.value)} />
+                <Input label="تحويل/محفظة" type="number" value={retTransferRefund}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRetTransferRefund(e.target.value)} />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                {(parseFloat(retCashRefund) || 0) > 0 && (
+                  <Select label="الخزنة" value={returnCashAccountId}
+                    onChange={(e) => setReturnCashAccountId(e.target.value)}>
+                    <option value="">— اختر —</option>
+                    {cashAccounts.map((ca: any) => (
+                      <option key={ca.CashAccountID} value={ca.CashAccountID}>
+                        {ca.AccountName} ({ca.Balance?.toFixed(2)})
+                      </option>
+                    ))}
+                  </Select>
+                )}
+                {(parseFloat(retTransferRefund) || 0) > 0 && (
+                  <Select label="المحفظة / الماكينة" value={retPaymentMethodId}
+                    onChange={(e) => setRetPaymentMethodId(e.target.value)}>
+                    <option value="">— اختر —</option>
+                    {paymentMethods.map((pm: any) => (
+                      <option key={pm.PaymentMethodID} value={pm.PaymentMethodID}>
+                        {pm.MethodName} ({pm.Balance?.toFixed(2)})
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </div>
+
+              {(parseFloat(retTransferRefund) || 0) > 0 && (
+                <div className="grid grid-cols-2 gap-3">
+                  <Input label="عمولة التحويل" type="number" value={retTransferCost}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRetTransferCost(e.target.value)} />
+                  {(parseFloat(retTransferCost) || 0) > 0 && (
+                    <Select label="من يتحمل العمولة؟" value={retFeeBearer}
+                      onChange={(e) => setRetFeeBearer(e.target.value as 'shop' | 'party')}>
+                      <option value="shop">المحل</option>
+                      <option value="party">المورد (يصلك أقل)</option>
+                    </Select>
+                  )}
+                </div>
+              )}
+
+              <div className={`rounded-lg p-2 text-sm flex items-center justify-between ${
+                Math.abs(retUnallocated) < 0.005
+                  ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+                  : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'}`}>
+                <span>الموزّع: <b>{retAllocated.toFixed(2)}</b> من <b>{returnTotal.toFixed(2)}</b></span>
+                <span>
+                  {Math.abs(retUnallocated) < 0.005
+                    ? 'مطابق ✓'
+                    : retUnallocated > 0
+                      ? `متبقٍ ${retUnallocated.toFixed(2)}`
+                      : `زائد ${Math.abs(retUnallocated).toFixed(2)}`}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </Modal>
     </div>

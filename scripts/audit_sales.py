@@ -202,9 +202,11 @@ report(missing == 0,
 print('\n[5] ACCOUNTING — returns cannot refund more than was taken')
 report('priorReturns + totalAmount > (originalSale.TotalAmount || 0) + 0.001' in SALES,
        'repeated partial returns cannot exceed the invoice total')
-report('const debtRelief = Math.min(totalAmount, remainingDebtAfterPriorReturns);' in SALES,
-       'a return cancels outstanding debt before paying cash',
-       'refunding cash on an unpaid invoice would hand back money never received')
+report('suggestSettlement(' in SALES and 'validateSettlement({' in SALES,
+       'the refund split is chosen by the user and validated server-side',
+       'the old fixed formula (cancel debt, force the rest out as cash) could not\n'
+       'express a walk-in paid part cash part wallet, or a registered customer\n'
+       'who wants the value left on account — see audit_return_settlement.py')
 report('cashRefund > 0' in SALES and 'الرصيد غير كافٍ في الخزينة' in SALES,
        'a cash refund checks the drawer can cover it')
 

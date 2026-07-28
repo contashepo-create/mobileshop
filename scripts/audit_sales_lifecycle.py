@@ -174,8 +174,12 @@ report("UPDATE item_serials SET Status = 'sold'" in SALES.split("delete:saleRetu
        'serialised goods go back OUT of stock')
 report('Balance = Balance + ? WHERE CashAccountID' in SALES.split("delete:saleReturn")[1],
        'the refunded cash is taken back')
-report('الرصيد غير كافٍ لاسترجاع المبلغ' in SALES,
-       'it refuses if the drawer cannot cover taking the cash back')
+# Undoing a sale return only brings money back IN (cash and transfer return to
+# the shop), so no balance check is needed — a deposit cannot overdraw. The
+# outgoing direction is guarded when the return is CREATED instead.
+report('الرصيد غير كافٍ في الخزينة لرد المبلغ' in SALES,
+       'the outgoing refund is what gets the balance check, at creation time',
+       'reversing a return only takes money back in, which is always safe')
 
 # Replay the reversal on the state above.
 ret = dict(zip([d[0] for d in c.execute("SELECT * FROM sale_returns WHERE ReturnID=?", (rid,)).description],

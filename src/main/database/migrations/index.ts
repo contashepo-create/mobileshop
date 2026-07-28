@@ -1139,6 +1139,61 @@ export function runMigrations(db: Database.Database) {
     db.exec(`ALTER TABLE purchase_returns ADD COLUMN CashRefund REAL DEFAULT 0`);
   } catch {}
 
+  // --- How a return is SETTLED, as a deliberate choice rather than a formula.
+  //
+  // The first version computed the split automatically: cancel the outstanding
+  // debt, hand over whatever is left in cash. That is only ONE of the real
+  // situations a shop meets:
+  //
+  //   * a walk-in customer must be paid out in full — there is no account to
+  //     hold a credit, and they may want part cash and part wallet transfer;
+  //   * a registered customer who already paid in full might prefer the value
+  //     left ON their account for next time, not cash out of the drawer;
+  //   * the money may be settled partly now and partly later, or not at all;
+  //   * a refund sent by wallet or card machine costs a transfer fee.
+  //
+  // So a return is a VALUE that must be settled, and the settlement is split
+  // across three named buckets that MUST add up to it:
+  //
+  //     TotalAmount = AccountCredit + CashRefund + TransferRefund
+  //
+  // `DebtRelief` is kept as the legacy name for the account-credit portion so
+  // existing rows, the customer statement and the supplier statement keep
+  // working unchanged; AccountCredit is written to it as well.
+  // Written out per table rather than looped over a template literal: the
+  // migration verifier parses these statements statically, and an interpolated
+  // table name is not resolvable at parse time.
+  //
+  // TransferRefund      — paid through a wallet / card machine, not the drawer.
+  // PaymentMethodID     — which wallet or machine.
+  // TransferCost        — fee the provider charged on that transfer.
+  // TransferCostBearer  — 'shop' absorbs it, or 'party' receives less.
+  try {
+    db.exec(`ALTER TABLE sale_returns ADD COLUMN TransferRefund REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE sale_returns ADD COLUMN PaymentMethodID INTEGER`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE sale_returns ADD COLUMN TransferCost REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE sale_returns ADD COLUMN TransferCostBearer TEXT DEFAULT 'shop'`);
+  } catch {}
+
+  try {
+    db.exec(`ALTER TABLE purchase_returns ADD COLUMN TransferRefund REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE purchase_returns ADD COLUMN PaymentMethodID INTEGER`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE purchase_returns ADD COLUMN TransferCost REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE purchase_returns ADD COLUMN TransferCostBearer TEXT DEFAULT 'shop'`);
+  } catch {}
+
   // =============================================
   // SEED DATA
   // =============================================

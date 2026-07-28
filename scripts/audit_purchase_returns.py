@@ -136,11 +136,12 @@ report(returnable == 4,
 
 # ---------------------------------------------------------------- 3
 print('\n[3] The money is unwound debt-first, then cash')
-report('const debtRelief = Math.min(totalAmount, remainingDebtAfterPriorReturns);' in PUR,
-       'what is still owed is cancelled before any cash comes back',
-       'taking cash for goods never paid for would be money never spent')
-report('يُخصم من دَينك للمورد' in UI and 'تسترده نقداً' in UI,
-       'the split is shown in figures before confirming')
+report('suggestSettlement(' in PUR and 'validateSettlement({' in PUR,
+       'the settlement is chosen, with debt-first offered as the default',
+       'audit_return_settlement.py proves every combination balances')
+report('كيف تُسوّى قيمة المرتجع؟' in UI and 'الموزّع' in UI,
+       'the screen lets the user set each part and shows a running total',
+       'it refuses to submit until the parts add up to the return value')
 
 # Invoice 1000, paid 400, return the lot.
 outstanding, ret = 600.0, 1000.0

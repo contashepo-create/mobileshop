@@ -287,8 +287,75 @@ export function registerPurchasesHandlers() {
     TransferCost?: number; TransferCostBearer?: 'shop' | 'party';
   }) => {
     const db = getDb();
-    const totalAmount = money(data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitCost), 0));
     const dateStr = businessToday();
+
+    // === EVERY FIGURE COMES FROM THE ORIGINAL PURCHASE, NOT THE CALLER ===
+    //
+    // Same reasoning as the sale return: the caller names the line and the
+    // quantity, nothing more. The unit cost is read from `purchase_details`.
+    // Trusting the payload let a cheap line be returned at an expensive price —
+    //
+    //   bought 1 phone @900 + 10 cables @10  (total 1000)
+    //   "return 10 cables @100"  -> 1000, the total guard passes
+    //     -> 1000 of supplier debt cleared for 100 of goods
+    //
+    // and let more be sent back than ever arrived on that line.
+    if (!Array.isArray(data.items) || data.items.length === 0) {
+      return { success: false, message: 'حدد الأصناف المرتجعة' };
+    }
+
+    const boughtLines = db.prepare(`
+      SELECT pd.ItemID, pd.Quantity, pd.UnitCost, pd.EffectiveUnitCost, pd.WarehouseID,
+             COALESCE((
+               SELECT SUM(rd.Quantity) FROM purchase_return_details rd
+               JOIN purchase_returns r ON rd.ReturnID = r.ReturnID
+               WHERE r.PurchaseID = pd.PurchaseID AND rd.ItemID = pd.ItemID
+             ), 0) AS AlreadyReturned
+      FROM purchase_details pd WHERE pd.PurchaseID = ?
+    `).all(data.PurchaseID) as any[];
+
+    const verified: Array<{
+      ItemID: number; SerialID: number | null; Quantity: number;
+      UnitCost: number; WarehouseID: number | null;
+    }> = [];
+
+    // Guards against the same line appearing twice in one payload: each entry
+    // would otherwise be checked against the committed total only, which is
+    // unchanged for both, letting a line of 1 be returned as 2.
+    const claimedInThisPayload = new Map<number, number>();
+
+    for (const req of data.items) {
+      const qty = Number(req.Quantity);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return { success: false, message: 'الكمية المرتجعة يجب أن تكون رقماً أكبر من صفر' };
+      }
+      const line = boughtLines.find(l => l.ItemID === req.ItemID);
+      if (!line) {
+        return { success: false, message: 'أحد الأصناف المرتجعة غير موجود في فاتورة الشراء الأصلية' };
+      }
+      const alreadyClaimed = claimedInThisPayload.get(line.ItemID) || 0;
+      const remainingOnLine = money(
+        (line.Quantity || 0) - (line.AlreadyReturned || 0) - alreadyClaimed);
+      if (qty > remainingOnLine + 0.001) {
+        const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(req.ItemID) as any;
+        return {
+          success: false,
+          message: `الكمية المرتجعة من "${info?.ItemName || req.ItemID}" أكبر من المشترى: المطلوب ${qty}، المتاح ${Math.max(0, remainingOnLine)}`,
+        };
+      }
+      claimedInThisPayload.set(line.ItemID, alreadyClaimed + qty);
+      verified.push({
+        ItemID: line.ItemID,
+        SerialID: req.SerialID ?? null,
+        Quantity: qty,
+        // The supplier credits what they charged, so the return is valued at the
+        // invoice price — not the landed cost, which includes our own shipping.
+        UnitCost: line.UnitCost || 0,
+        WarehouseID: line.WarehouseID ?? null,
+      });
+    }
+
+    const totalAmount = money(verified.reduce((sum, l) => sum + (l.Quantity * l.UnitCost), 0));
     const returnNumber = nextDocNumber(db, 'purchase_returns', 'ReturnNumber', 'PR', dateStr);
 
     // === SPLIT THE REFUND BETWEEN DEBT RELIEF AND CASH ===
@@ -367,7 +434,7 @@ export function registerPurchasesHandlers() {
 
     const allowNegStock = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_stock'").get() as any;
     if (allowNegStock?.Value !== '1') {
-      for (const item of data.items) {
+      for (const item of verified) {
         const wh = lineWarehouse(item.ItemID, item.WarehouseID);
         // Checked against THAT warehouse, not the total across all of them:
         // stock sitting in another branch cannot be handed to this supplier.
@@ -394,12 +461,12 @@ export function registerPurchasesHandlers() {
 
       const returnId = result.lastInsertRowid;
 
-      for (const item of data.items) {
+      for (const item of verified) {
         db.prepare(`
           INSERT INTO purchase_return_details (ReturnID, ItemID, SerialID, Quantity, UnitCost, Total, WarehouseID)
           VALUES (?, ?, ?, ?, ?, ?, ?)
         `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitCost,
-               item.Quantity * item.UnitCost, lineWarehouse(item.ItemID, item.WarehouseID));
+               money(item.Quantity * item.UnitCost), lineWarehouse(item.ItemID, item.WarehouseID));
 
         // Mark serial as returned
         if (item.SerialID) {

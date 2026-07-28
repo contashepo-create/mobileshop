@@ -358,14 +358,116 @@ export function registerSalesHandlers() {
     TransferCost?: number; TransferCostBearer?: 'shop' | 'party';
   }) => {
     const db = getDb();
-    const totalAmount = money(data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitPrice), 0));
     const dateStr = businessToday();
+
+    // === EVERY FIGURE COMES FROM THE ORIGINAL INVOICE, NOT THE CALLER ===
+    //
+    // The caller supplies only WHICH line and HOW MANY. The price is read from
+    // `sale_details`, and the quantity is capped at what that line still has
+    // outstanding. Trusting the payload allowed two attacks that the total-value
+    // guard alone did not stop, because it only compared sums:
+    //
+    //   invoice = 1 phone @1000 + 1 cable @20  (total 1020)
+    //   "return 51 cables @20"  -> 1020, total check passes
+    //     -> 51 cables appear in stock from nothing, 1020 refunded for 20 of goods
+    //
+    //   "return 1 cable @1000"  -> 1000, total check passes
+    //     -> 1000 refunded for an item sold at 20
+    //
+    // The screen already caps both, but the renderer is not a trust boundary.
+    if (!Array.isArray(data.items) || data.items.length === 0) {
+      return { success: false, message: 'حدد الأصناف المرتجعة' };
+    }
+
+    const soldLines = db.prepare(`
+      SELECT sd.ItemID, sd.SerialID, sd.Quantity, sd.UnitPrice, sd.UnitCost, sd.WarehouseID,
+             COALESCE((
+               SELECT SUM(rd.Quantity) FROM sale_return_details rd
+               JOIN sale_returns r ON rd.ReturnID = r.ReturnID
+               WHERE r.SaleID = sd.SaleID AND rd.ItemID IS sd.ItemID
+             ), 0) AS AlreadyReturned
+      FROM sale_details sd WHERE sd.SaleID = ?
+    `).all(data.SaleID) as any[];
+
+    const verified: Array<{
+      ItemID: number | null; SerialID: number | null; Quantity: number;
+      UnitPrice: number; UnitCost: number; WarehouseID: number | null;
+    }> = [];
+
+    // Quantities already claimed by EARLIER entries in this same payload.
+    // Without this the same line sent twice passes the cap twice: each entry
+    // is checked against the committed `AlreadyReturned`, which is still 0
+    // for both, so a line of 1 could be returned as 2.
+    const claimedInThisPayload = new Map<string, number>();
+
+    for (const req of data.items) {
+      const qty = Number(req.Quantity);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return { success: false, message: 'الكمية المرتجعة يجب أن تكون رقماً أكبر من صفر' };
+      }
+      // `ItemID IS ?` rather than `=` so service lines (ItemID NULL) match too.
+      const line = soldLines.find(l =>
+        (l.ItemID ?? null) === (req.ItemID ?? null)
+        && (req.SerialID ? l.SerialID === req.SerialID : true));
+      if (!line) {
+        return { success: false, message: 'أحد الأصناف المرتجعة غير موجود في الفاتورة الأصلية' };
+      }
+      const lineKey = `${line.ItemID ?? 'svc'}:${line.SerialID ?? ''}`;
+      const alreadyClaimed = claimedInThisPayload.get(lineKey) || 0;
+      const remainingOnLine = money(
+        (line.Quantity || 0) - (line.AlreadyReturned || 0) - alreadyClaimed);
+      if (qty > remainingOnLine + 0.001) {
+        const info = req.ItemID
+          ? (db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(req.ItemID) as any)
+          : null;
+        return {
+          success: false,
+          message: `الكمية المرتجعة من "${info?.ItemName || 'بند'}" أكبر من المتاح: المطلوب ${qty}، المتاح ${Math.max(0, remainingOnLine)}`,
+        };
+      }
+      claimedInThisPayload.set(lineKey, alreadyClaimed + qty);
+      verified.push({
+        ItemID: line.ItemID ?? null,
+        SerialID: req.SerialID ?? line.SerialID ?? null,
+        Quantity: qty,
+        // Authoritative price and cost, straight from the invoice.
+        UnitPrice: line.UnitPrice || 0,
+        UnitCost: line.UnitCost ?? 0,
+        WarehouseID: line.WarehouseID ?? null,
+      });
+    }
+
+    const totalAmount = money(verified.reduce((sum, l) => sum + (l.Quantity * l.UnitPrice), 0));
     const returnNumber = nextDocNumber(db, 'sale_returns', 'ReturnNumber', 'SR', dateStr);
 
     const originalSale = db.prepare(
-      'SELECT CustomerID, TotalAmount, PaidAmount, RemainingAmount FROM sales WHERE SaleID = ?'
+      `SELECT CustomerID, TotalAmount, PaidAmount, RemainingAmount, IsVoided, IsWarranty,
+              COALESCE(Source,'direct') AS Source
+         FROM sales WHERE SaleID = ?`
     ).get(data.SaleID) as any;
     if (!originalSale) return { success: false, message: 'الفاتورة الأصلية غير موجودة' };
+
+    // A voided invoice has already been reversed in full — stock returned and
+    // balances undone. Returning against it would credit the customer a second
+    // time for goods the shop never gave up.
+    if (originalSale.IsVoided) {
+      return { success: false, message: 'الفاتورة ملغاة - تم عكسها بالفعل ولا يمكن عمل مرتجع لها' };
+    }
+
+    // A maintenance delivery writes a mirror invoice into `sales` so the
+    // customer gets something printable. Its revenue is reported from the
+    // maintenance side, and the profit report deliberately excludes it here —
+    // so a return booked against it would reduce DIRECT sales for money that
+    // was never counted as direct sales. Repairs are reversed from their own
+    // screen, which also puts the spare parts back.
+    if (originalSale.Source === 'maintenance') {
+      return { success: false, message: 'فاتورة صيانة - نفّذ الإرجاع من شاشة الصيانة' };
+    }
+
+    // A warranty invoice carries no value, so there is nothing to refund.
+    if (originalSale.IsWarranty) {
+      return { success: false, message: 'فاتورة ضمان بدون قيمة - لا يوجد مبلغ للإرجاع' };
+    }
 
     // How much of this invoice is still outstanding (never below zero).
     const outstanding = Math.max(0, originalSale.RemainingAmount || 0);
@@ -449,20 +551,18 @@ export function registerSalesHandlers() {
 
         const returnId = result.lastInsertRowid;
 
-        for (const item of data.items) {
-          // Put the goods back into the warehouse the sale took them from, at
-          // the cost they LEFT at.
-          const origLine = db.prepare(
-            'SELECT WarehouseID, UnitCost FROM sale_details WHERE SaleID = ? AND ItemID IS ? LIMIT 1'
-          ).get(data.SaleID, item.ItemID) as any;
-          const returnWarehouse = origLine?.WarehouseID
-            ?? resolveSourceWarehouse(db, item.ItemID, 0, null);
-          const returnedUnitCost = origLine?.UnitCost ?? 0;
+        // `verified` carries the invoice's own prices, costs and warehouse —
+        // the caller's numbers were only ever used to choose the line.
+        for (const item of verified) {
+          const returnWarehouse = item.WarehouseID
+            ?? (item.ItemID ? resolveSourceWarehouse(db, item.ItemID, 0, null) : null);
+          const returnedUnitCost = item.UnitCost;
 
           db.prepare(`
             INSERT INTO sale_return_details (ReturnID, ItemID, SerialID, Quantity, UnitPrice, Total, WarehouseID)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitPrice, item.Quantity * item.UnitPrice, returnWarehouse);
+          `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitPrice,
+                 money(item.Quantity * item.UnitPrice), returnWarehouse);
 
           // Restore serial status
           if (item.SerialID) {
@@ -477,7 +577,9 @@ export function registerSalesHandlers() {
           // existing CostPrice untouched, so goods sold at 30 and returned after
           // a restock at 50 came back valued at 50: inventory was overstated by
           // the difference while COGS was credited the smaller amount.
-          if (!item.SerialID && returnWarehouse) {
+          // `ItemID` is null for a service line (labour, a custom charge).
+          // Those carry no stock, so only their value is refunded.
+          if (!item.SerialID && item.ItemID && returnWarehouse) {
             restoreStockAtCost(db, item.ItemID, returnWarehouse, item.Quantity, returnedUnitCost);
           }
         }

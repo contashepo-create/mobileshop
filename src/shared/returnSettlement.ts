@@ -53,6 +53,14 @@ export interface SettlementInput {
   transferCost?: number;
   /** Who absorbs that fee. */
   transferCostBearer?: FeeBearer;
+  /**
+   * How much the party has actually PAID on this document, net of refunds
+   * already given. Cash and transfer legs may not exceed it.
+   *
+   * Omitted means "unknown" and the limit is not applied — kept optional so an
+   * older caller still works, but every caller in this codebase supplies it.
+   */
+  paidSoFar?: number;
 }
 
 export interface SettlementResult {
@@ -127,6 +135,28 @@ export function validateSettlement(input: SettlementInput): SettlementResult {
   // A destination is required for money that actually moves.
   if (cash > 0 && !input.cashAccountId) return fail('اختر الخزنة التي سيُصرف منها المبلغ النقدي');
   if (transfer > 0 && !input.paymentMethodId) return fail('اختر المحفظة/الماكينة التي سيتم التحويل منها');
+
+  // You cannot hand back money that was never handed to you.
+  //
+  // Balancing the three parts is not sufficient on its own. On a credit sale
+  // where the customer has paid nothing, "refund 200 in cash" balances
+  // perfectly against a 200 return — and the shop ends up giving away the
+  // goods AND 200 in cash while the customer still owes the original 200.
+  //
+  // The cash and transfer legs are therefore capped at what the party has
+  // actually paid on this document, net of refunds already made. Anything
+  // above that has to be settled against the account, which is the only
+  // truthful place for it.
+  const paidOut = money(cash + transfer);
+  if (input.paidSoFar != null) {
+    const refundable = money(Math.max(0, finite(input.paidSoFar) || 0));
+    if (paidOut > refundable + EPSILON) {
+      return fail(
+        `لا يمكن رد ${paidOut.toFixed(2)} نقداً/تحويلاً — المدفوع فعلياً على هذه الفاتورة ${refundable.toFixed(2)} فقط. `
+        + `الباقي يجب أن يُسجَّل على الحساب.`,
+      );
+    }
+  }
 
   const fee = money(Math.max(0, finite(input.transferCost ?? 0) || 0));
   if (fee > 0 && transfer <= 0) {

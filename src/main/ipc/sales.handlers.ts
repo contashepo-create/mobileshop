@@ -129,6 +129,25 @@ export function registerSalesHandlers() {
         }
       }
 
+
+      // A walk-in has no account, so there is nowhere to record a debt or a
+      // credit. Leaving an unpaid balance on such an invoice puts the amount in
+      // `sales.RemainingAmount` while NO customer balance carries it: the money
+      // is owed by nobody, invisible in receivables, and unrecoverable.
+      //
+      // `sales:update` and the screen already enforced this; `sales:create` did
+      // not, so calling the channel directly bypassed the rule entirely.
+      {
+        const provisionalRemaining = money((rawSubtotal - discountIn + taxIn) - paidIn);
+        if (!data.CustomerID && Math.abs(provisionalRemaining) > 0.005) {
+          return {
+            success: false,
+            message: provisionalRemaining > 0
+              ? `العميل النقدي يجب أن يدفع المبلغ كاملاً - المتبقي ${provisionalRemaining.toFixed(2)}. سجّل العميل أو حصّل المبلغ كاملاً.`
+              : 'لا يمكن استلام مبلغ أكبر من الفاتورة لعميل نقدي - لا يوجد حساب لحفظ الزيادة',
+          };
+        }
+      }
       const transferCost = Number.isFinite(num(data.TransferCost)) ? Math.max(0, num(data.TransferCost)) : 0;
       // Who absorbs the machine's commission. Anything other than an explicit
       // 'customer' means the shop pays it, which is the safer default: it books
@@ -483,6 +502,13 @@ export function registerSalesHandlers() {
       };
     }
 
+    // Money already handed back on earlier returns for this invoice.
+    const priorCashOut = (db.prepare(
+      `SELECT COALESCE(SUM(COALESCE(CashRefund,0) + COALESCE(TransferRefund,0)),0) AS total
+         FROM sale_returns WHERE SaleID = ?`
+    ).get(data.SaleID) as any)?.total || 0;
+    const refundableCash = money(Math.max(0, (originalSale.PaidAmount || 0) - priorCashOut));
+
     // === HOW THE VALUE IS SETTLED ===
     // Chosen by the user, not computed. See src/shared/returnSettlement.ts for
     // why a fixed formula could not express the real situations a shop meets.
@@ -505,6 +531,9 @@ export function registerSalesHandlers() {
       paymentMethodId: data.PaymentMethodID ?? null,
       transferCost: data.TransferCost ?? 0,
       transferCostBearer: data.TransferCostBearer,
+      // Cash can only be handed back out of what the customer actually paid,
+      // less anything already refunded on earlier returns for this invoice.
+      paidSoFar: refundableCash,
     });
     if (!settlement.ok) return { success: false, message: settlement.message };
 

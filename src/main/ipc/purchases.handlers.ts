@@ -380,6 +380,12 @@ export function registerPurchasesHandlers() {
       };
     }
 
+    const priorCashIn = (db.prepare(
+      `SELECT COALESCE(SUM(COALESCE(CashRefund,0) + COALESCE(TransferRefund,0)),0) AS total
+         FROM purchase_returns WHERE PurchaseID = ?`
+    ).get(data.PurchaseID) as any)?.total || 0;
+    const refundableCash = money(Math.max(0, (originalPurchase.PaidAmount || 0) - priorCashIn));
+
     // === HOW THE VALUE IS SETTLED ===
     // Mirror of the sale-return model. A supplier always has an account, so
     // every combination is available: leave it against what we owe them, take
@@ -401,6 +407,8 @@ export function registerPurchasesHandlers() {
       paymentMethodId: data.PaymentMethodID ?? null,
       transferCost: data.TransferCost ?? 0,
       transferCostBearer: data.TransferCostBearer,
+      // We can only take back money we actually paid the supplier.
+      paidSoFar: refundableCash,
     });
     if (!settlement.ok) return { success: false, message: settlement.message };
 

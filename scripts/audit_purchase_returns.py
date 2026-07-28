@@ -186,15 +186,24 @@ print('\n[4] A debit note can itself be cancelled')
 report("ipcMain.handle('delete:purchaseReturn'" in PUR,
        'the reversal handler exists')
 undo = PUR.split("delete:purchaseReturn")[1]
-report('restoreStockAtCost(db, line.ItemID, line.WarehouseID, line.Quantity, line.UnitCost || 0)' in undo,
-       'goods come back at the cost they left at')
+# Checked by BEHAVIOUR, not by matching the source text.
+#
+# This used to assert that one exact line of TypeScript appeared in the file.
+# That proves nothing about what the code does, and it broke the moment the
+# reversal was corrected to restore the LANDED cost (supplier price plus this
+# line's share of the delivery charge) rather than the bare supplier price —
+# reporting a failure for a genuine fix. The numeric round trip at the end of
+# this section is the real test; here we only require that the reversal reads a
+# recorded cost instead of re-deriving one.
+report('restoreStockAtCost(' in undo and 'LandedUnitCost' in undo,
+       'goods come back at the cost recorded when they left')
 report('Balance = Balance - ? WHERE CashAccountID' in undo,
        'the cash the supplier refunded goes back out')
 report('Balance = Balance + ? WHERE SupplierID' in undo,
        'the cancelled debt is restored')
 report('الرصيد غير كافٍ لإعادة المبلغ للمورد' in PUR,
        'it refuses when the drawer cannot cover repaying the supplier')
-report('RemainingAmount = RemainingAmount + ?' in undo and 'Status = CASE WHEN' in undo,
+report('RemainingAmount = ROUND(RemainingAmount + ?' in undo and 'Status = CASE WHEN' in undo,
        'the purchase invoice status is recalculated, not left stale')
 
 # Numeric round trip.

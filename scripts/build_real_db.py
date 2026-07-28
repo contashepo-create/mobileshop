@@ -21,6 +21,71 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 MIG = os.path.join(ROOT, 'src/main/database/migrations/index.ts')
 
 
+def split_statements(sql):
+    """Split a SQL script on semicolons that are real statement separators.
+
+    A plain ``sql.split(';')`` breaks on any semicolon inside a ``--`` comment
+    or a quoted string, and — worse — leaves the comment glued to the previous
+    fragment so the FOLLOWING statement never runs. A CREATE TABLE preceded by
+    an explanatory comment was silently skipped, and the migration verifier then
+    reported a syntax error for text that SQLite would never have seen.
+
+    Comments are stripped and quotes tracked, so the result matches what SQLite
+    itself would execute.
+    """
+    out, buf = [], []
+    quote = None
+    line_comment = block_comment = False
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ''
+        if line_comment:
+            if c == '\n':
+                line_comment = False
+                buf.append(c)
+            i += 1
+            continue
+        if block_comment:
+            if c == '*' and nxt == '/':
+                block_comment = False
+                i += 1
+            i += 1
+            continue
+        if quote is None and c == '-' and nxt == '-':
+            line_comment = True
+            i += 2
+            continue
+        if quote is None and c == '/' and nxt == '*':
+            block_comment = True
+            i += 2
+            continue
+        if quote is not None:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == ';':
+            stmt = ''.join(buf).strip()
+            if stmt:
+                out.append(stmt)
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    tail = ''.join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
 def parse_blocks(ts_source):
     """
     Returns an ordered list of (guarded: bool, [sql, ...]).
@@ -63,7 +128,7 @@ def parse_blocks(ts_source):
 
     blocks, current_key, current = [], None, []
     for pos, raw in calls:
-        parts = [p.strip() for p in raw.split(';') if p.strip()]
+        parts = split_statements(raw)
         key = in_try(pos)
         if key != current_key:
             if current:

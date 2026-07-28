@@ -451,6 +451,19 @@ export function registerReportsHandlers() {
       FROM purchase_returns WHERE 1=1 ${dateFilter}
     `).get(...params) as any;
 
+    // Inventory value that had nowhere left to sit when a movement emptied a
+    // warehouse — see `inventory_adjustments` in the migrations.
+    //
+    // Stock is carried at a weighted average while each movement is valued at
+    // the cost of the specific units involved. The gap normally stays with the
+    // units left behind, but at zero quantity there are none, and it becomes a
+    // real gain or loss. It used to disappear without trace, so inventory and
+    // cost of sales silently disagreed. Positive = written off.
+    const valuationAdjustments = db.prepare(`
+      SELECT COALESCE(SUM(COALESCE(Amount,0)),0) as total
+      FROM inventory_adjustments WHERE 1=1 ${dateFilter}
+    `).get(...params) as any;
+
     // 5. Purchase Returns value (items returned to supplier - reduces our stock cost basis)
     const purchaseReturnsCost = db.prepare(`
       SELECT COALESCE(SUM(r.TotalAmount),0) as total
@@ -460,7 +473,8 @@ export function registerReportsHandlers() {
     `).get(...params) as any;
 
     const totalDirectCosts = cogs.total - cogsReturns.total + partsCost.total + serviceCost.total
-      + saleTransferCost.total + refundTransferCost.total + freightWrittenOff.total;
+      + saleTransferCost.total + refundTransferCost.total + freightWrittenOff.total
+      + valuationAdjustments.total;
 
     // Gross Profit = Revenue - Direct Costs
     const grossProfit = totalRevenue - totalDirectCosts;
@@ -529,6 +543,7 @@ export function registerReportsHandlers() {
         saleTransferCosts: saleTransferCost.total,
         refundTransferCosts: refundTransferCost.total,
         freightWrittenOff: freightWrittenOff.total,
+        valuationAdjustments: valuationAdjustments.total,
         // NOTE: warranty parts are an operating EXPENSE (see `expenses` below),
         // they are intentionally NOT part of `total` here. Exposed for display.
         warrantyParts: warrantyPartsCost.total,

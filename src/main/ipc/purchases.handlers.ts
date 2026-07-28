@@ -484,11 +484,16 @@ export function registerPurchasesHandlers() {
       let freightWrittenOff = 0;
 
       for (const item of verified) {
-        db.prepare(`
-          INSERT INTO purchase_return_details (ReturnID, ItemID, SerialID, Quantity, UnitCost, Total, WarehouseID)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+        // `LandedUnitCost` is what left the warehouse; `UnitCost` is what the
+        // supplier credits. They differ by this line's share of the delivery
+        // charge, and the reversal needs the former to put back exactly what
+        // was taken out.
+        const detailId = db.prepare(`
+          INSERT INTO purchase_return_details (ReturnID, ItemID, SerialID, Quantity, UnitCost, Total, WarehouseID, LandedUnitCost)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitCost,
-               money(item.Quantity * item.UnitCost), lineWarehouse(item.ItemID, item.WarehouseID));
+               money(item.Quantity * item.UnitCost), lineWarehouse(item.ItemID, item.WarehouseID),
+               item.EffectiveUnitCost ?? item.UnitCost ?? 0).lastInsertRowid;
 
         // Mark serial as returned
         if (item.SerialID) {
@@ -506,7 +511,19 @@ export function registerPurchasesHandlers() {
           // 75 of stock value while the supplier credits only 50, so 25 simply
           // vanished from the books.
           const landedCost = item.EffectiveUnitCost ?? item.UnitCost ?? 0;
-          deductStockAtCost(db, item.ItemID, wh, item.Quantity, landedCost);
+          // Emptying the pool can leave a valuation residual with no units to
+          // carry it — see `deductStockAtCost`. It is a real change in the
+          // value of what the shop owns, so it is booked with the freight
+          // write-off rather than left to disappear.
+          const { residual } = deductStockAtCost(db, item.ItemID, wh, item.Quantity, landedCost);
+          // Positive = written off, so it adds to the write-off total directly.
+          freightWrittenOff += residual;
+          if (Math.abs(residual) > 1e-9) {
+            // Kept on the line so cancelling the return restores exactly this
+            // amount to exactly this pool.
+            db.prepare('UPDATE purchase_return_details SET ValuationResidual = ? WHERE DetailID = ?')
+              .run(residual, detailId);
+          }
 
           // Shipping and fees attached to the returned units do NOT come back.
           //
@@ -524,25 +541,67 @@ export function registerPurchasesHandlers() {
           // written off, since there is no inventory left to carry it.
           const landed = item.EffectiveUnitCost ?? item.UnitCost ?? 0;
           const freightPerUnit = landed - (item.UnitCost || 0);
-          const strandedFreight = money(freightPerUnit * item.Quantity);
+          // NOT rounded, for the same reason the unit cost above is not.
+          //
+          // This figure is not a payment to anybody — no one hands over these
+          // piastres. It is value already inside the business being moved from
+          // the units that left onto the units that stayed, so the amount taken
+          // out of the pool and the amount put back must be the SAME number to
+          // the last bit.
+          //
+          // Rounding it broke that: 7.00 of freight over 3 units is 2.3333...
+          // per unit, `money()` made it 2.33, and the missing third of a
+          // piastre left the books on every partial return.
+          const strandedFreight = freightPerUnit * item.Quantity;
           if (strandedFreight > 0) {
             const row = db.prepare(
               'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
             ).get(item.ItemID, wh) as any;
             if (row && row.Quantity > 0) {
-              const newCost = money(((row.CostPrice || 0) * row.Quantity + strandedFreight) / row.Quantity);
+              // NOT rounded to two decimals.
+              //
+              // `money()` is right for a TOTAL, because a total is a real sum
+              // of piastres that someone actually pays. It is wrong for a
+              // PER-UNIT cost, because this figure is multiplied back by the
+              // whole holding every time inventory is valued, which magnifies
+              // whatever the rounding discarded by the size of the pool.
+              //
+              // Spreading 5.00 of freight over 96 units gives 10.052083...
+              // Rounding that to 10.05 and re-multiplying values the stock at
+              // 964.80 instead of 965.00, so 0.20 left the books with no entry
+              // anywhere. The loss scales with the holding — up to 0.005 x N,
+              // which is 5.00 on a pool of a thousand units — and it was
+              // repeatable on demand, not floating-point noise.
+              //
+              // The full-precision quotient is kept instead, so
+              // Quantity x CostPrice still equals the value that went in.
+              // Rounding happens only where money is displayed or paid.
+              const newCost = ((row.CostPrice || 0) * row.Quantity + strandedFreight) / row.Quantity;
               db.prepare('UPDATE stock_quantities SET CostPrice = ? WHERE ID = ?').run(newCost, row.ID);
+              // Remember that it was absorbed rather than written off, so the
+              // reversal takes it back off the survivors instead of guessing.
+              db.prepare('UPDATE purchase_return_details SET FreightAbsorbed = ? WHERE DetailID = ?')
+                .run(strandedFreight, detailId);
             } else {
               // No units left to carry it: the freight is spent and gone.
               // Recorded so it can be reported as a cost and reconciled later,
               // instead of disappearing silently from the books.
-              freightWrittenOff = money(freightWrittenOff + strandedFreight);
+              //
+              // Kept at full precision so it equals exactly the value that left
+              // the warehouse. Rounding here would make the write-off disagree
+              // with the stock movement it is meant to explain, which is the
+              // same leak by another route. It is rounded for DISPLAY only.
+              freightWrittenOff = freightWrittenOff + strandedFreight;
             }
           }
         }
       }
 
-      if (freightWrittenOff > 0) {
+      // Written whenever it is non-zero, in EITHER direction. A valuation
+      // residual can be negative — the emptied pool was carrying less than the
+      // units were removed at — and that is a gain, not something to discard.
+      // Testing `> 0` would have dropped exactly half the cases.
+      if (Math.abs(freightWrittenOff) > 1e-9) {
         db.prepare('UPDATE purchase_returns SET FreightWrittenOff = ? WHERE ReturnID = ?')
           .run(freightWrittenOff, returnId);
       }
@@ -571,11 +630,17 @@ export function registerPurchasesHandlers() {
       if (invoiceOffset > 0) {
         db.prepare(`
           UPDATE purchases
-          SET RemainingAmount = MAX(0, RemainingAmount - ?),
-              Status = CASE WHEN MAX(0, RemainingAmount - ?) <= 0 THEN 'completed' ELSE Status END
+          SET RemainingAmount = ROUND(MAX(0, RemainingAmount - ?), 2),
+              Status = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) <= 0 THEN 'completed' ELSE Status END
           WHERE PurchaseID = ?
         `).run(invoiceOffset, invoiceOffset, data.PurchaseID);
       }
+      // Stored so cancelling this return restores exactly this much and no
+      // more. The reversal used to add back the full credit, which inflated an
+      // invoice that owed 4 into one owing 636 and left the supplier account
+      // showing money they never received.
+      db.prepare('UPDATE purchase_returns SET InvoiceOffset = ? WHERE ReturnID = ?')
+        .run(invoiceOffset, returnId);
     });
 
     tx();
@@ -681,9 +746,56 @@ export function registerPurchasesHandlers() {
           if (line.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(line.SerialID);
           } else if (line.ItemID && line.WarehouseID) {
-            // Back in at the cost the goods left at, so inventory value and the
-            // purchase-returns figure in the P&L stay in step.
-            restoreStockAtCost(db, line.ItemID, line.WarehouseID, line.Quantity, line.UnitCost || 0);
+            // Back in at the LANDED cost — the value that actually left the
+            // warehouse — not the supplier's price.
+            //
+            // The two differ by this line's share of the delivery charge.
+            // Restoring at the supplier price put back less than the return
+            // removed, so cancelling a return quietly destroyed the freight:
+            // net worth fell and stayed fallen, with no entry to explain it.
+            //
+            // `LandedUnitCost` is null on rows written before it existed, and
+            // for those the supplier price is the best figure available.
+            const landed = line.LandedUnitCost ?? line.UnitCost ?? 0;
+            restoreStockAtCost(db, line.ItemID, line.WarehouseID, line.Quantity, landed);
+
+            // Put back the valuation the emptied pool could not carry.
+            //
+            // The return booked it as an adjustment because there were no units
+            // left to hold it; now that the goods are back there are, so it
+            // belongs to inventory again. Skipping this made cancelling a
+            // return leave the shop permanently poorer by the residual.
+            // `ValuationResidual` is positive when value was WRITTEN OFF, so
+            // undoing it puts that value back onto the restored units.
+            const residual = line.ValuationResidual || 0;
+            if (Math.abs(residual) > 1e-9) {
+              const row = db.prepare(
+                'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+              ).get(line.ItemID, line.WarehouseID) as any;
+              if (row && row.Quantity > 0) {
+                // ADDED back, because a positive residual is value that was
+                // written off. Subtracting it removed the value a second time
+                // and left the shop poorer by twice the original amount.
+                const newCost = ((row.CostPrice || 0) * row.Quantity + residual) / row.Quantity;
+                db.prepare('UPDATE stock_quantities SET CostPrice = ? WHERE ID = ?').run(newCost, row.ID);
+              }
+            }
+
+            // Undo whatever the return did with the unrecoverable freight.
+            // If it was loaded onto the units left behind, take it back off
+            // them; if the pool was empty it was written off, and putting the
+            // goods back at their landed cost has already restored it.
+            const absorbed = line.FreightAbsorbed || 0;
+            if (absorbed > 0) {
+              const row = db.prepare(
+                'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+              ).get(line.ItemID, line.WarehouseID) as any;
+              if (row && row.Quantity > 0) {
+                // Full precision, for the same reason as on the way in.
+                const newCost = ((row.CostPrice || 0) * row.Quantity - absorbed) / row.Quantity;
+                db.prepare('UPDATE stock_quantities SET CostPrice = ? WHERE ID = ?').run(newCost, row.ID);
+              }
+            }
           }
         }
 
@@ -706,14 +818,31 @@ export function registerPurchasesHandlers() {
         if (purchase?.SupplierID && debtRelief > 0) {
           db.prepare('UPDATE suppliers SET Balance = Balance + ? WHERE SupplierID = ?')
             .run(debtRelief, purchase.SupplierID);
-          db.prepare(`
-            UPDATE purchases
-            SET RemainingAmount = RemainingAmount + ?,
-                Status = CASE WHEN RemainingAmount + ? > 0
-                              THEN (CASE WHEN PaidAmount > 0 THEN 'partial' ELSE 'unpaid' END)
-                              ELSE 'completed' END
-            WHERE PurchaseID = ?
-          `).run(debtRelief, debtRelief, ret.PurchaseID);
+
+          // Restore only what was actually taken off this invoice.
+          //
+          // The credit given to the supplier and the amount deducted from the
+          // invoice are NOT the same number: the invoice can only absorb what
+          // it still owed, and any excess stays as a credit on the account.
+          // Adding the whole credit back here turned an invoice that owed 4
+          // into one owing 636.
+          //
+          // `InvoiceOffset` is null on returns written before it was recorded;
+          // for those, re-derive the same clamp the create used.
+          const offset = ret.InvoiceOffset != null
+            ? ret.InvoiceOffset
+            : money(Math.min(debtRelief, Math.max(0,
+                (purchase.TotalAmount || 0) - (purchase.PaidAmount || 0) - (purchase.RemainingAmount || 0))));
+          if (offset > 0) {
+            db.prepare(`
+              UPDATE purchases
+              SET RemainingAmount = ROUND(RemainingAmount + ?, 2),
+                  Status = CASE WHEN ROUND(RemainingAmount + ?, 2) > 0
+                                THEN (CASE WHEN PaidAmount > 0 THEN 'partial' ELSE 'unpaid' END)
+                                ELSE 'completed' END
+              WHERE PurchaseID = ?
+            `).run(offset, offset, ret.PurchaseID);
+          }
         }
 
         db.prepare('DELETE FROM purchase_return_details WHERE ReturnID = ?').run(returnId);

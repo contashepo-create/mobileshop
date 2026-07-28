@@ -81,6 +81,62 @@ register('data:text/javascript,' + encodeURIComponent(LOADER_SOURCE), import.met
 
 // ---------------------------------------------------------------- database
 /** Builds a fresh database by running the project's own migration file. */
+/**
+ * Splits a SQL script into statements, ignoring semicolons that are inside
+ * comments or string literals.
+ *
+ * A plain `split(';')` was wrong in a way that silently WEAKENED the tests: a
+ * `--` comment line above a CREATE TABLE was glued to the previous fragment, so
+ * the statement that followed it never ran. The table was simply missing from
+ * the test database, and any handler touching it failed with "no such table"
+ * inside a try/catch that reported a generic error — the schema and the tests
+ * had quietly diverged.
+ *
+ * Comments are stripped and quotes are tracked so the split matches what SQLite
+ * itself would do.
+ */
+function splitStatements(sql) {
+  const out = [];
+  let buf = '';
+  let quote = null;             // ' or " when inside a literal/identifier
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i];
+    const next = sql[i + 1];
+
+    if (lineComment) {
+      if (c === '\n') { lineComment = false; buf += c; }
+      continue;
+    }
+    if (blockComment) {
+      if (c === '*' && next === '/') { blockComment = false; i++; }
+      continue;
+    }
+    if (!quote && c === '-' && next === '-') { lineComment = true; i++; continue; }
+    if (!quote && c === '/' && next === '*') { blockComment = true; i++; continue; }
+
+    if (quote) {
+      buf += c;
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; buf += c; continue; }
+
+    if (c === ';') {
+      const s = buf.trim();
+      if (s) out.push(s);
+      buf = '';
+      continue;
+    }
+    buf += c;
+  }
+  const last = buf.trim();
+  if (last) out.push(last);
+  return out;
+}
+
 export function buildDatabase() {
   // Same wrapper the handlers get in production, so `transaction`,
   // `prepare` and `pragma` behave identically.
@@ -91,10 +147,8 @@ export function buildDatabase() {
   for (const m of ts.matchAll(/db\.exec\(`([\s\S]*?)`\)/g)) {
     const sql = m[1];
     if (sql.includes('${')) continue;           // dynamic, skipped by design
-    for (const stmt of sql.split(';')) {
-      const s = stmt.trim();
-      if (!s) continue;
-      try { db.exec(s); } catch { /* ALTER on an existing column, etc. */ }
+    for (const stmt of splitStatements(sql)) {
+      try { db.exec(stmt); } catch { /* ALTER on an existing column, etc. */ }
     }
   }
   activeDb = db;
@@ -123,6 +177,10 @@ export async function loadHandlers() {
     'src/main/ipc/sales.handlers.ts',
     'src/main/ipc/purchases.handlers.ts',
     'src/main/ipc/delete.handlers.ts',
+    // Loaded so the profit report can be exercised against the SAME books the
+    // trading handlers just wrote, rather than reasoned about separately. The
+    // P&L is where a valuation error becomes a wrong number on screen.
+    'src/main/ipc/reports.handlers.ts',
   ];
   const loaded = [];
   for (const rel of mods) {

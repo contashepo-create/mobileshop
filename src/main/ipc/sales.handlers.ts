@@ -1,9 +1,31 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { resolveSourceWarehouse, deductStock, deductStockAtCost, restoreStock, restoreStockAtCost, totalStock } from '../database/stock';
+import { resolveSourceWarehouse, deductStock, deductStockAtCost, restoreStock, restoreStockAtCost, totalStock, planStockAllocation, recordValuationResidual } from '../database/stock';
+import type { StockShortage } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
+
+/**
+ * Turns a shortage into a message that says what to DO about it.
+ *
+ * "not enough stock" and "enough stock, but spread across branches" look
+ * identical in the numbers yet need opposite actions from the user, so they are
+ * worded differently. Without this the split case reported the nonsense
+ * "available 5 - requested 5".
+ */
+function describeShortage(db: ReturnType<typeof getDb>, s: StockShortage): string {
+  const name = (db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(s.itemId) as any)?.ItemName || '';
+  if (s.split) {
+    const wh = s.warehouseId
+      ? (db.prepare('SELECT WarehouseName FROM warehouses WHERE WarehouseID = ?').get(s.warehouseId) as any)?.WarehouseName
+      : null;
+    return `الكمية المطلوبة من "${name}" (${s.requested}) غير متوفرة في مخزن واحد — `
+      + `المتاح في "${wh || s.warehouseId}" هو ${s.warehouseAvailable} فقط، والإجمالي ${s.available} موزّع على أكثر من مخزن. `
+      + `انقل الكمية إلى مخزن واحد أو قسّم السطر على المخازن.`;
+  }
+  return `الرصيد غير كافي للصنف "${name}" - المتاح: ${s.available} - المطلوب: ${s.requested}`;
+}
 
 export function registerSalesHandlers() {
   // ===== SALES =====
@@ -180,15 +202,22 @@ export function registerSalesHandlers() {
             if (!serial || serial.Status !== 'available') {
               return { success: false, message: `الجهاز برقم IMEI غير متاح للبيع` };
             }
-          } else if (item.ItemID) {
-            // Check stock quantity
-            const availableQty = totalStock(db, item.ItemID);
-            if (item.Quantity > availableQty) {
-              // Get item name for better message
-              const itemInfo = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(item.ItemID) as any;
-              return { success: false, message: `الرصيد غير كافي للصنف "${itemInfo?.ItemName || ''}" - المتاح: ${availableQty} - المطلوب: ${item.Quantity}` };
-            }
           }
+        }
+
+        // Availability is checked against the warehouse each line will actually
+        // be taken FROM, and with earlier lines of this same invoice already
+        // counted.
+        //
+        // The old check summed the item across every warehouse and looked at
+        // each line in isolation, while the deduction below hits one warehouse.
+        // Both gaps produced negative stock with negative stock switched off:
+        // 3 in the main store + 2 in the branch satisfied a request for 5 and
+        // left the main store at -2, and an invoice carrying the same item on
+        // two lines of 3 against a holding of 5 was accepted and ended at -1.
+        const { shortages } = planStockAllocation(db, data.items);
+        if (shortages.length) {
+          return { success: false, message: describeShortage(db, shortages[0]) };
         }
       }
 
@@ -664,11 +693,17 @@ export function registerSalesHandlers() {
         if (invoiceOffset > 0) {
           db.prepare(`
             UPDATE sales
-            SET RemainingAmount = MAX(0, RemainingAmount - ?),
-                Status = CASE WHEN MAX(0, RemainingAmount - ?) <= 0 THEN 'completed' ELSE Status END
+            SET RemainingAmount = ROUND(MAX(0, RemainingAmount - ?), 2),
+                Status = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) <= 0 THEN 'completed' ELSE Status END
             WHERE SaleID = ?
           `).run(invoiceOffset, invoiceOffset, data.SaleID);
         }
+        // Recorded so cancelling this return puts back exactly this figure.
+        // The reversal used to recompute it from the invoice as it stands
+        // *now*, which is a different number once anything else has touched the
+        // invoice in between.
+        db.prepare('UPDATE sale_returns SET InvoiceOffset = ? WHERE ReturnID = ?')
+          .run(invoiceOffset, returnId);
       });
 
       tx();
@@ -781,6 +816,10 @@ export function registerSalesHandlers() {
       const feeBearer = data.TransferCostBearer === 'customer' ? 'customer' : 'shop';
       const shopBorneFee = feeBearer === 'shop' ? transferCost : 0;
 
+      const allowNegativeStockOnUpdate = (db.prepare(
+        "SELECT Value FROM settings WHERE Key = 'allow_negative_stock'",
+      ).get() as any)?.Value === '1';
+
       const subtotal = rawSubtotal;
       const totalAmount = subtotal - discountIn + taxIn;
       const remaining = totalAmount - paidIn;
@@ -861,6 +900,26 @@ export function registerSalesHandlers() {
           transferCost, feeBearer, data.SaleID,
         );
 
+        // Availability for the NEW version, checked here rather than before the
+        // transaction because the old lines have just been put back and form
+        // part of what is now available.
+        //
+        // `sales:update` previously performed NO stock check whatsoever, so an
+        // edit could raise the quantity far beyond anything held and drive the
+        // warehouse negative in one step. Throwing rolls the whole transaction
+        // back, leaving the original invoice exactly as it was.
+        if (!allowNegativeStockOnUpdate) {
+          const { shortages } = planStockAllocation(db, data.items);
+          if (shortages.length) {
+            // Tagged so the catch below can tell a deliberate refusal from a
+            // genuine crash and report it plainly, without a stack trace in the
+            // log for what is simply the user asking for too much stock.
+            const refusal = new Error(describeShortage(db, shortages[0]));
+            (refusal as any).userRefusal = true;
+            throw refusal;
+          }
+        }
+
         for (const item of data.items) {
           const lineWarehouse = item.isService || !item.ItemID
             ? null
@@ -913,6 +972,11 @@ export function registerSalesHandlers() {
         message: `تم تعديل الفاتورة ${original.SaleNumber}`,
       };
     } catch (err: any) {
+      // A refusal is a normal outcome, not a fault: the transaction rolled back
+      // and the invoice is untouched. Only real faults are logged as errors.
+      if (err?.userRefusal) {
+        return { success: false, message: err.message };
+      }
       console.error('[Sales] Error updating sale:', err);
       return { success: false, message: `خطأ في تعديل الفاتورة: ${err.message || err}` };
     }
@@ -1007,6 +1071,37 @@ export function registerSalesHandlers() {
         // Cash comes back into the drawer — always safe.
       }
 
+      // The goods the customer brought back must still BE here to hand over
+      // again. Cancelling the return takes them out of stock, and if they were
+      // re-sold in the meantime that subtraction drives the warehouse negative,
+      // inventing negative inventory and the negative value that goes with it.
+      //
+      // Same failure as deleting a purchase whose goods have gone: the reversal
+      // is only valid while the movement it undoes is still undoable.
+      const allowNegStock = db.prepare(
+        "SELECT Value FROM settings WHERE Key = 'allow_negative_stock'",
+      ).get() as any;
+      if (allowNegStock?.Value !== '1') {
+        const missing: string[] = [];
+        for (const line of details) {
+          if (line.SerialID || !line.ItemID || !line.WarehouseID) continue;
+          const held = (db.prepare(
+            'SELECT COALESCE(SUM(Quantity),0) AS qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+          ).get(line.ItemID, line.WarehouseID) as any)?.qty || 0;
+          if (held < line.Quantity - 0.001) {
+            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+            missing.push(`"${info?.ItemName || line.ItemID}" (المطلوب ${line.Quantity}، المتاح ${held})`);
+          }
+        }
+        if (missing.length) {
+          return {
+            success: false,
+            message: `لا يمكن إلغاء المرتجع - الأصناف المرتجعة لم تعد بالمخزن (بيعت أو نُقلت): ${missing.join('، ')}. `
+              + `احذف عمليات البيع التالية أولاً.`,
+          };
+        }
+      }
+
       const tx = db.transaction(() => {
         for (const line of details) {
           // The goods go back OUT of stock — the customer keeps them again.
@@ -1022,7 +1117,20 @@ export function registerSalesHandlers() {
             const origCost = line.UnitCost ?? (db.prepare(
               'SELECT UnitCost FROM sale_details WHERE SaleID = ? AND ItemID IS ? LIMIT 1',
             ).get(ret.SaleID, line.ItemID) as any)?.UnitCost ?? 0;
-            deductStockAtCost(db, line.ItemID, line.WarehouseID, line.Quantity, origCost);
+            // Taking the goods back out can empty the warehouse, leaving the
+            // difference between the pool's average and this line's cost with
+            // nothing to sit on. Booked as an adjustment instead of vanishing.
+            const { residual } = deductStockAtCost(
+              db, line.ItemID, line.WarehouseID, line.Quantity, origCost);
+            recordValuationResidual(db, {
+              date: businessToday(),
+              itemId: line.ItemID,
+              warehouseId: line.WarehouseID,
+              amount: residual,
+              reason: 'إلغاء مرتجع مبيعات أفرغ المخزن',
+              refType: 'sale_return_delete',
+              refId: returnId,
+            });
           }
         }
 
@@ -1049,12 +1157,19 @@ export function registerSalesHandlers() {
             .run(debtRelief, sale.CustomerID);
           // Only the portion that actually reduced THIS invoice is added back,
           // mirroring the `invoiceOffset` applied when the return was created.
-          const restoredOnInvoice = money(Math.min(debtRelief, (sale.TotalAmount || 0) - (sale.PaidAmount || 0)));
+          //
+          // Read from the return, not recomputed: the invoice's outstanding
+          // amount is not what it was when the return was made, so re-deriving
+          // it here restores a different figure than was taken away.
+          // `InvoiceOffset` is null on returns written before it was recorded.
+          const restoredOnInvoice = ret.InvoiceOffset != null
+            ? ret.InvoiceOffset
+            : money(Math.min(debtRelief, (sale.TotalAmount || 0) - (sale.PaidAmount || 0)));
           if (restoredOnInvoice > 0) {
             db.prepare(`
               UPDATE sales
-              SET RemainingAmount = RemainingAmount + ?,
-                  Status = CASE WHEN RemainingAmount + ? > 0
+              SET RemainingAmount = ROUND(RemainingAmount + ?, 2),
+                  Status = CASE WHEN ROUND(RemainingAmount + ?, 2) > 0
                                 THEN (CASE WHEN PaidAmount > 0 THEN 'partial' ELSE 'unpaid' END)
                                 ELSE 'completed' END
               WHERE SaleID = ?

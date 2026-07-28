@@ -461,6 +461,36 @@ export function runMigrations(db: Database.Database) {
       Total    REAL,
       FOREIGN KEY (ReturnID) REFERENCES purchase_returns(ReturnID)
     );
+
+    -- Inventory valuation adjustments.
+    --
+    -- Stock is held at a weighted average, but individual movements are valued
+    -- at the cost of the specific units involved — the serial's own cost, the
+    -- landed cost of a purchase line, the cost recorded on a return. Those two
+    -- figures differ whenever the mix has changed, and the difference normally
+    -- stays with the units left in the warehouse.
+    --
+    -- When a movement empties a warehouse there are no units left to carry it.
+    -- The leftover value used to be dropped silently: the pool's row kept its
+    -- old unit price against a quantity of zero, and the value simply ceased to
+    -- exist. Inventory fell further than cost of sales was relieved and the
+    -- books drifted, with nothing anywhere to explain it.
+    --
+    -- Each such event is recorded here instead, so it is visible, auditable and
+    -- can be charged to the profit and loss account like any other adjustment.
+    -- A positive amount is value written OFF; a negative one is value written
+    -- back on.
+    CREATE TABLE IF NOT EXISTS inventory_adjustments (
+      AdjustmentID INTEGER PRIMARY KEY AUTOINCREMENT,
+      Date         TEXT NOT NULL,
+      ItemID       INTEGER,
+      WarehouseID  INTEGER,
+      Amount       REAL NOT NULL,
+      Reason       TEXT,
+      RefType      TEXT,
+      RefID        INTEGER,
+      CreatedAt    TEXT DEFAULT (datetime('now','localtime'))
+    );
   `);
 
   // =============================================
@@ -1094,6 +1124,75 @@ export function runMigrations(db: Database.Database) {
   // the branch still showed stock it no longer had.
   try {
     db.exec(`ALTER TABLE purchase_return_details ADD COLUMN WarehouseID INTEGER`);
+  } catch {}
+
+  // The LANDED cost of the units sent back to the supplier.
+  //
+  // `UnitCost` on a return line is what the supplier credits — their invoice
+  // price. Stock, however, is carried at the landed cost, which also includes
+  // that line's share of the delivery charge. The two differ whenever a
+  // purchase carried any shipping.
+  //
+  // Undoing a return has to put back exactly what the return took out, and the
+  // return took out the LANDED value. Restoring at the supplier price instead
+  // left the freight destroyed permanently: a return that wrote off 5.00 of
+  // freight, then cancelled, never gave that 5.00 back, so the shop's net worth
+  // fell by 5.00 with no matching entry. Recording the landed figure on the
+  // line makes the reversal exactly symmetric.
+  try {
+    db.exec(`ALTER TABLE purchase_return_details ADD COLUMN LandedUnitCost REAL`);
+  } catch {}
+
+  // How much of that freight was loaded onto the units left in the warehouse.
+  //
+  // When a return leaves stock behind, the unrecoverable freight is pushed onto
+  // the survivors and stays an asset; when the warehouse empties there is
+  // nothing to carry it and it is written off instead. Undoing the return has
+  // to reverse whichever of the two actually happened, so the amount absorbed
+  // is recorded per line rather than re-derived later from a warehouse whose
+  // contents have since moved on.
+  try {
+    db.exec(`ALTER TABLE purchase_return_details ADD COLUMN FreightAbsorbed REAL DEFAULT 0`);
+  } catch {}
+
+  // How much of the credit was actually taken off THIS invoice's balance.
+  //
+  // A return credits the supplier account by the full value of the goods, but
+  // only the part that meets what is still outstanding ON THIS INVOICE may
+  // reduce `RemainingAmount`; the rest is a credit carried on the account.
+  // Creating the return clamped it correctly, while cancelling one added the
+  // WHOLE credit back, so an invoice that owed 4 came back owing 636.
+  //
+  // Recording the clamped figure makes the reversal give back exactly what was
+  // taken, instead of recomputing a number the invoice never had.
+  // Valuation left stranded when a return emptied a warehouse pool.
+  //
+  // Goods leave at the cost they arrived at, while the pool carries a blended
+  // average; the gap normally stays with the units left behind. At zero
+  // quantity there are none, so the gap has to be booked as a valuation
+  // adjustment. Storing it per line lets the reversal put back precisely the
+  // same figure instead of re-deriving one from a pool that has since changed.
+  try {
+    db.exec(`ALTER TABLE purchase_return_details ADD COLUMN ValuationResidual REAL DEFAULT 0`);
+  } catch {}
+
+  try {
+    db.exec(`ALTER TABLE purchase_returns ADD COLUMN InvoiceOffset REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE sale_returns ADD COLUMN InvoiceOffset REAL DEFAULT 0`);
+  } catch {}
+
+  // Valuation stranded when CANCELLING a sale return empties a pool.
+  //
+  // The mirror of `purchase_return_details.ValuationResidual`. Undoing a
+  // customer return takes the goods back out at the cost they were returned at,
+  // while the pool carries a blended average; if that removal empties the
+  // warehouse there are no units left to hold the difference and it has to be
+  // booked. Left unbooked it simply vanished — inventory fell further than cost
+  // of sales was relieved, and the books drifted by the gap.
+  try {
+    db.exec(`ALTER TABLE sale_returns ADD COLUMN ValuationResidual REAL DEFAULT 0`);
   } catch {}
 
   // WHO pays the machine's commission.

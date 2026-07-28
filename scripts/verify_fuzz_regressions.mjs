@@ -78,8 +78,12 @@ await call('purchases:create',{SupplierID:1,items:[{ItemID:1,Quantity:15,UnitCos
   Discount:0,TaxAmount:0,PaidAmount:0,AdditionalCost:25,PaymentCost:0,fiscalYearId:1});
 const p5=q('SELECT PurchaseID FROM purchases ORDER BY PurchaseID DESC LIMIT 1').PurchaseID;
 await call('purchaseReturns:create',{PurchaseID:p5,items:[{ItemID:1,Quantity:15,UnitCost:12}],AccountCredit:180,CashRefund:0});
+// Compared with a tolerance, not for exact equality: the figure is stored at
+// full precision on purpose, so that it equals the value that actually left the
+// warehouse. Rounding it to piastres made the write-off disagree with the stock
+// movement it explains, and leaked the difference on every partial return.
 t('unrecoverable freight is recorded, not silently lost',
-  q('SELECT FreightWrittenOff f FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').f===25,
+  Math.abs(q('SELECT FreightWrittenOff f FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').f - 25) < 0.005,
   'FreightWrittenOff = '+q('SELECT FreightWrittenOff f FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').f);
 
 
@@ -121,5 +125,204 @@ const nwA=NW();
 t('a partial purchase return leaves net worth unchanged',Math.abs(nwA-nwB)<0.001,
   `${r2(nwB)} -> ${r2(nwA)} (freight follows the surviving units)`);
 
+
+// ===================================================================
+// Round 2 — defects found by running the fuzzer across MANY seeds.
+//
+// The previous round ran one seed and called the leftovers "IEEE-754 noise".
+// They were not. Every one of these moved real money.
+// ===================================================================
+
+const netWorth = () => {
+  const g = s => currentDb().prepare(s).get()?.v ?? 0;
+  return g('SELECT COALESCE(SUM(Balance),0) v FROM cash_accounts')
+    + g('SELECT COALESCE(SUM(Balance),0) v FROM payment_methods')
+    + g('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities')
+    + g('SELECT COALESCE(SUM(Balance),0) v FROM customers WHERE Balance>0')
+    + g('SELECT COALESCE(SUM(-Balance),0) v FROM suppliers WHERE Balance<0')
+    - g('SELECT COALESCE(SUM(Balance),0) v FROM suppliers WHERE Balance>0')
+    - g('SELECT COALESCE(SUM(-Balance),0) v FROM customers WHERE Balance<0');
+};
+
+// 11 A per-unit cost must never be rounded to piastres.
+//   Spreading 5.00 of freight over 96 units gives 10.052083...; storing 10.05
+//   and re-multiplying valued the stock 0.20 lower with no entry anywhere.
+//   The loss scales with the holding (0.005 x N).
+seed();
+currentDb().exec('DELETE FROM stock_quantities WHERE ItemID=1');
+currentDb().exec('INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,96,10)');
+await call('purchases:create',{SupplierID:1,items:[{ItemID:1,Quantity:7,UnitCost:9,WarehouseID:1}],
+  Discount:0,TaxAmount:0,PaidAmount:0,AdditionalCost:5,PaymentCost:0,fiscalYearId:1});
+const w11 = netWorth();
+const p11 = q('SELECT PurchaseID FROM purchases ORDER BY PurchaseID DESC LIMIT 1').PurchaseID;
+await call('purchaseReturns:create',{PurchaseID:p11,items:[{ItemID:1,Quantity:7,UnitCost:9}],
+  AccountCredit:63,CashRefund:0});
+t('returning goods whose freight spreads unevenly loses nothing',
+  Math.abs(netWorth()-w11) < 0.0005, `net worth moved ${(netWorth()-w11).toFixed(6)}`);
+
+// 12 Cancelling a purchase return restores the LANDED cost, including the
+//    freight that was written off when the pool emptied.
+seed();
+currentDb().exec('DELETE FROM stock_quantities WHERE ItemID=1');
+await call('purchases:create',{SupplierID:1,items:[{ItemID:1,Quantity:7,UnitCost:9,WarehouseID:1}],
+  Discount:0,TaxAmount:0,PaidAmount:0,AdditionalCost:5,PaymentCost:0,fiscalYearId:1});
+const w12 = netWorth();
+const p12 = q('SELECT PurchaseID FROM purchases ORDER BY PurchaseID DESC LIMIT 1').PurchaseID;
+await call('purchaseReturns:create',{PurchaseID:p12,items:[{ItemID:1,Quantity:7,UnitCost:9}],
+  AccountCredit:63,CashRefund:0});
+const r12 = q('SELECT ReturnID FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').ReturnID;
+await call('delete:purchaseReturn',r12);
+t('cancelling a purchase return restores the written-off freight',
+  Math.abs(netWorth()-w12) < 0.0005, `net worth moved ${(netWorth()-w12).toFixed(6)}`);
+
+// 13 A sale may not be built from stock scattered across warehouses.
+//    Validation summed every warehouse while the deduction hits one, so
+//    3 in the main store + 2 in the branch satisfied a request for 5 and
+//    left the main store at -2.
+seed();
+currentDb().exec('DELETE FROM stock_quantities WHERE ItemID=2');
+currentDb().exec('INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(2,1,3,600),(2,2,2,600)');
+const r13 = await call('sales:create',{CustomerID:1,items:[{ItemID:2,Quantity:5,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'cash',PaidAmount:5000,CashAccountID:1,fiscalYearId:1});
+t('a sale spanning two warehouses is refused, not silently split',
+  r13.success===false, r13.message);
+t('no warehouse was driven negative',
+  (q('SELECT MIN(Quantity) v FROM stock_quantities WHERE ItemID=2').v) >= 0,
+  'min qty '+q('SELECT MIN(Quantity) v FROM stock_quantities WHERE ItemID=2').v);
+
+// 14 The same item twice on one invoice is checked against the running total.
+seed();
+currentDb().exec('DELETE FROM stock_quantities WHERE ItemID=2');
+currentDb().exec('INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(2,1,5,600)');
+const r14 = await call('sales:create',{CustomerID:1,
+  items:[{ItemID:2,Quantity:3,UnitPrice:1000},{ItemID:2,Quantity:3,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'cash',PaidAmount:6000,CashAccountID:1,fiscalYearId:1});
+t('two lines of one item cannot together exceed the holding',
+  r14.success===false, r14.message);
+t('stock untouched by the refused invoice',
+  q('SELECT Quantity v FROM stock_quantities WHERE ItemID=2 AND WarehouseID=1').v===5);
+
+// 15 sales:update had NO stock check at all.
+seed();
+await call('sales:create',{CustomerID:1,items:[{ItemID:2,Quantity:1,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'cash',PaidAmount:1000,CashAccountID:1,fiscalYearId:1});
+const s15 = q('SELECT SaleID FROM sales ORDER BY SaleID DESC LIMIT 1').SaleID;
+const r15 = await call('sales:update',{SaleID:s15,CustomerID:1,
+  items:[{ItemID:2,Quantity:500,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'credit',PaidAmount:0});
+t('editing an invoice beyond available stock is refused',
+  r15.success===false, r15.message);
+t('the original invoice is left intact',
+  q('SELECT Quantity v FROM sale_details WHERE SaleID=?',s15).v===1,
+  'qty '+q('SELECT Quantity v FROM sale_details WHERE SaleID=?',s15).v);
+
+// 16 Cancelling a sale return whose goods were re-sold is refused.
+seed();
+await call('sales:create',{CustomerID:1,items:[{ItemID:2,Quantity:2,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'cash',PaidAmount:2000,CashAccountID:1,fiscalYearId:1});
+const s16 = q('SELECT SaleID FROM sales ORDER BY SaleID DESC LIMIT 1').SaleID;
+await call('saleReturns:create',{SaleID:s16,items:[{ItemID:2,Quantity:2,UnitPrice:1000}],
+  AccountCredit:0,CashRefund:2000,CashAccountID:1});
+const ret16 = q('SELECT ReturnID FROM sale_returns ORDER BY ReturnID DESC LIMIT 1').ReturnID;
+currentDb().exec('UPDATE stock_quantities SET Quantity=0 WHERE ItemID=2 AND WarehouseID=1');
+const r16 = await call('delete:saleReturn',ret16);
+t('cancelling a return whose goods are gone is refused',
+  r16.success===false, r16.message);
+t('no negative stock from the refused reversal',
+  q('SELECT Quantity v FROM stock_quantities WHERE ItemID=2 AND WarehouseID=1').v >= 0);
+
+// 17 A purchase return may not credit the supplier more than the invoice owed
+//    without that credit being tracked separately from the invoice balance.
+seed();
+await call('purchases:create',{SupplierID:1,items:[{ItemID:2,Quantity:5,UnitCost:636,WarehouseID:1}],
+  Discount:0,TaxAmount:0,PaidAmount:3180,PaymentSourceType:'cash_account',PaymentSourceID:1,
+  AdditionalCost:4,PaymentCost:0,fiscalYearId:1});
+const p17 = q('SELECT PurchaseID FROM purchases ORDER BY PurchaseID DESC LIMIT 1').PurchaseID;
+await call('purchaseReturns:create',{PurchaseID:p17,items:[{ItemID:2,Quantity:1,UnitCost:636}],
+  AccountCredit:636,CashRefund:0});
+const r17id = q('SELECT ReturnID FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').ReturnID;
+await call('delete:purchaseReturn',r17id);
+const h17 = q('SELECT TotalAmount,PaidAmount,RemainingAmount FROM purchases WHERE PurchaseID=?',p17);
+t('cancelling a return restores only what the invoice actually owed',
+  Math.abs(h17.RemainingAmount - (h17.TotalAmount - h17.PaidAmount)) < 0.005,
+  `remaining ${h17.RemainingAmount}, owed ${h17.TotalAmount - h17.PaidAmount}`);
+
+// 18 A settled invoice must not stay "partial" because of floating-point dust.
+seed();
+await call('sales:create',{CustomerID:1,items:[{ItemID:2,Quantity:3,UnitPrice:1000/3}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'credit',PaidAmount:0,fiscalYearId:1});
+const s18 = q('SELECT SaleID FROM sales ORDER BY SaleID DESC LIMIT 1').SaleID;
+const tot18 = q('SELECT TotalAmount v FROM sales WHERE SaleID=?',s18).v;
+await call('saleReturns:create',{SaleID:s18,items:[{ItemID:2,Quantity:3,UnitPrice:1000/3}],
+  AccountCredit:tot18,CashRefund:0});
+const h18 = q('SELECT RemainingAmount,Status FROM sales WHERE SaleID=?',s18);
+t('a fully settled invoice is marked completed, not left "partial" by dust',
+  !(h18.RemainingAmount <= 0.011 && (h18.Status==='partial'||h18.Status==='unpaid')),
+  `remaining ${h18.RemainingAmount} status ${h18.Status}`);
+
+// 19 Emptying a pool must book the leftover valuation, not discard it.
+seed();
+currentDb().exec('DELETE FROM stock_quantities WHERE ItemID=2');
+await call('purchases:create',{SupplierID:1,items:[{ItemID:2,Quantity:2,UnitCost:600,WarehouseID:1}],
+  Discount:0,TaxAmount:0,PaidAmount:0,AdditionalCost:0,PaymentCost:0,fiscalYearId:1});
+await call('sales:create',{CustomerID:1,items:[{ItemID:2,Quantity:2,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'cash',PaidAmount:2000,CashAccountID:1,fiscalYearId:1});
+const s19 = q('SELECT SaleID FROM sales ORDER BY SaleID DESC LIMIT 1').SaleID;
+await call('purchases:create',{SupplierID:1,items:[{ItemID:2,Quantity:1,UnitCost:552,WarehouseID:1}],
+  Discount:0,TaxAmount:0,PaidAmount:0,AdditionalCost:0,PaymentCost:0,fiscalYearId:1});
+await call('saleReturns:create',{SaleID:s19,items:[{ItemID:2,Quantity:1,UnitPrice:1000}],
+  AccountCredit:0,CashRefund:1000,CashAccountID:1});
+await call('sales:create',{CustomerID:1,items:[{ItemID:2,Quantity:1,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'cash',PaidAmount:1000,CashAccountID:1,fiscalYearId:1});
+const ret19 = q('SELECT ReturnID FROM sale_returns ORDER BY ReturnID DESC LIMIT 1').ReturnID;
+await call('delete:saleReturn',ret19);
+const adj19 = q('SELECT COALESCE(SUM(Amount),0) v FROM inventory_adjustments').v;
+t('value stranded by an emptied pool is recorded, not lost',
+  Math.abs(adj19) > 0.005,
+  `inventory_adjustments total ${adj19}`);
+t('the recorded adjustment has the right sign (negative = a gain)',
+  adj19 < 0, `amount ${adj19}`);
+
+// 20 The profit report must reconcile to the books it is derived from.
+//
+// Every earlier fix was verified against balances measured directly from the
+// tables. That is the right test, but it is not what the owner sees: he sees
+// the profit report. If a valuation adjustment is booked into inventory and
+// NOT charged in the P&L, the two disagree and the report overstates profit
+// by exactly the amount that was written off.
+seed();
+currentDb().exec('DELETE FROM stock_quantities WHERE ItemID=2');
+await call('purchases:create',{SupplierID:1,items:[{ItemID:2,Quantity:2,UnitCost:600,WarehouseID:1}],
+  Discount:0,TaxAmount:0,PaidAmount:0,AdditionalCost:0,PaymentCost:0,fiscalYearId:1});
+await call('sales:create',{CustomerID:1,items:[{ItemID:2,Quantity:2,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'cash',PaidAmount:2000,CashAccountID:1,fiscalYearId:1});
+const s20 = q('SELECT SaleID FROM sales ORDER BY SaleID DESC LIMIT 1').SaleID;
+await call('purchases:create',{SupplierID:1,items:[{ItemID:2,Quantity:1,UnitCost:552,WarehouseID:1}],
+  Discount:0,TaxAmount:0,PaidAmount:0,AdditionalCost:0,PaymentCost:0,fiscalYearId:1});
+await call('saleReturns:create',{SaleID:s20,items:[{ItemID:2,Quantity:1,UnitPrice:1000}],
+  AccountCredit:0,CashRefund:1000,CashAccountID:1});
+await call('sales:create',{CustomerID:1,items:[{ItemID:2,Quantity:1,UnitPrice:1000}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'cash',PaidAmount:1000,CashAccountID:1,fiscalYearId:1});
+const ret20 = q('SELECT ReturnID FROM sale_returns ORDER BY ReturnID DESC LIMIT 1').ReturnID;
+await call('delete:saleReturn',ret20);
+
+// The opening position of seed(): cash 100000 plus the stock it creates.
+// ItemID 2 was cleared above, so only the cables remain: 10 @ 10.
+const OPENING = 100000 + 10 * 10;
+const pl = await call('reports:profitLoss', {});
+const gg = s => currentDb().prepare(s).get()?.v ?? 0;
+const measured = gg('SELECT COALESCE(SUM(Balance),0) v FROM cash_accounts')
+  + gg('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities')
+  + gg('SELECT COALESCE(SUM(Balance),0) v FROM customers WHERE Balance>0')
+  - gg('SELECT COALESCE(SUM(Balance),0) v FROM suppliers WHERE Balance>0')
+  - gg('SELECT COALESCE(SUM(-Balance),0) v FROM customers WHERE Balance<0')
+  + gg('SELECT COALESCE(SUM(-Balance),0) v FROM suppliers WHERE Balance<0');
+t('the stranded valuation is charged in the profit report',
+  Math.abs((pl?.costs?.valuationAdjustments ?? 0)) > 0.005,
+  `costs.valuationAdjustments = ${pl?.costs?.valuationAdjustments}`);
+t('gross profit reconciles to the balances it came from',
+  Math.abs(measured - (OPENING + pl.grossProfit)) < 0.005,
+  `measured ${r2(measured)} vs opening+profit ${r2(OPENING + pl.grossProfit)}`);
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
-process.exit(fail?1:0);
+process.exit(fail ? 1 : 0);

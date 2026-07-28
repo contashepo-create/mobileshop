@@ -47,6 +47,114 @@ export function resolveSourceWarehouse(
   return any?.WarehouseID ?? defaultWarehouseId(db);
 }
 
+/**
+ * Works out where each sold line will actually be taken from, and reports any
+ * line the warehouses cannot cover.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The sale handlers validated availability with `totalStock`, which sums an
+ * item across EVERY warehouse, but deducted from a SINGLE warehouse chosen by
+ * `resolveSourceWarehouse`. The two disagreed in two ordinary situations:
+ *
+ *   1. Stock split across branches. Three phones in the main store and two in
+ *      the branch pass a check for five, then all five are deducted from one
+ *      warehouse, leaving it at -2 — negative stock, and negative value with
+ *      it, even though negative stock was switched off.
+ *
+ *   2. The same item on two lines of one invoice. Each line is checked against
+ *      the full holding, which no earlier line has reduced yet, so an invoice
+ *      for 3 + 3 against a holding of 5 is accepted and ends at -1.
+ *
+ * Planning the allocation once and reusing it removes the disagreement by
+ * construction: the quantities returned here are exactly the quantities the
+ * caller then deducts, and running totals make each line see what the previous
+ * lines already took.
+ */
+export type StockAllocation = { itemId: number; warehouseId: number; quantity: number };
+
+/**
+ * A line the warehouses cannot cover.
+ *
+ * `split` distinguishes the two very different reasons a line can fail, because
+ * they need different actions from the user: either there genuinely is not
+ * enough stock anywhere, or there is enough in total but no single warehouse
+ * holds it, which calls for a transfer or for splitting the line.
+ */
+export type StockShortage = {
+  itemId: number;
+  requested: number;
+  available: number;
+  warehouseId: number | null;
+  warehouseAvailable: number;
+  split: boolean;
+};
+
+export function planStockAllocation(
+  db: Database.Database,
+  lines: Array<{ ItemID?: number; SerialID?: number; Quantity: number; WarehouseID?: number | null; isService?: boolean }>,
+): { allocations: StockAllocation[]; shortages: StockShortage[] } {
+  const allocations: StockAllocation[] = [];
+  const shortages: StockShortage[] = [];
+  // How much of each (item, warehouse) pair earlier lines of THIS document have
+  // already claimed but not yet written.
+  const claimed = new Map<string, number>();
+  const claimedByItem = new Map<number, number>();
+
+  for (const line of lines) {
+    if (line.isService || line.SerialID || !line.ItemID) continue;
+    const qty = Number(line.Quantity) || 0;
+    if (qty <= 0) continue;
+
+    const itemId = line.ItemID;
+    const already = claimedByItem.get(itemId) || 0;
+
+    // Pick the warehouse the way the handler will, but against the balance that
+    // remains after earlier lines of this same document.
+    let warehouseId = line.WarehouseID ?? null;
+    if (!warehouseId) {
+      const rows = db.prepare(`
+        SELECT WarehouseID, Quantity FROM stock_quantities
+        WHERE ItemID = ? ORDER BY Quantity DESC
+      `).all(itemId) as any[];
+      const usable = rows.find(r => (r.Quantity - (claimed.get(`${itemId}:${r.WarehouseID}`) || 0)) >= qty);
+      warehouseId = usable?.WarehouseID ?? rows[0]?.WarehouseID ?? defaultWarehouseId(db);
+    }
+    if (!warehouseId) {
+      shortages.push({
+        itemId, requested: qty, available: 0,
+        warehouseId: null, warehouseAvailable: 0, split: false,
+      });
+      continue;
+    }
+
+    const key = `${itemId}:${warehouseId}`;
+    const held = warehouseStock(db, itemId, warehouseId);
+    const free = held - (claimed.get(key) || 0);
+    if (free < qty - 0.001) {
+      // Report against the whole item so the message matches what the user sees
+      // on screen, but the shortfall itself is a per-warehouse fact.
+      const totalFree = Math.max(0, totalStock(db, itemId) - already);
+      shortages.push({
+        itemId,
+        requested: qty + already,
+        available: totalFree,
+        warehouseId,
+        warehouseAvailable: Math.max(0, free),
+        // Enough in total, but scattered across warehouses.
+        split: totalFree >= qty - 0.001,
+      });
+      continue;
+    }
+
+    claimed.set(key, (claimed.get(key) || 0) + qty);
+    claimedByItem.set(itemId, already + qty);
+    allocations.push({ itemId, warehouseId, quantity: qty });
+  }
+
+  return { allocations, shortages };
+}
+
 /** Total quantity of an item across all warehouses. */
 export function totalStock(db: Database.Database, itemId: number): number {
   const row = db.prepare('SELECT COALESCE(SUM(Quantity),0) as qty FROM stock_quantities WHERE ItemID = ?').get(itemId) as any;
@@ -92,7 +200,7 @@ export function deductStockAtCost(
   warehouseId: number,
   qty: number,
   unitCost: number,
-) {
+): { residual: number } {
   const row = db.prepare(
     'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
   ).get(itemId, warehouseId) as any;
@@ -101,16 +209,43 @@ export function deductStockAtCost(
     db.prepare(
       'INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)',
     ).run(itemId, warehouseId, -qty, unitCost);
-    return;
+    return { residual: 0 };
   }
 
   const newQty = (row.Quantity || 0) - qty;
   const remainingValue = ((row.CostPrice || 0) * (row.Quantity || 0)) - (unitCost * qty);
-  // Only meaningful while a positive holding remains; otherwise the pool is
-  // empty and the last known unit cost is kept for reference.
+
+  // When the pool EMPTIES, whatever value is left over has nowhere to live.
+  //
+  // Units are removed at the cost THEY came in at, while the pool carries a
+  // blended average of everything in it. Those two differ whenever the mix has
+  // changed since, and the difference normally stays behind on the surviving
+  // units — perfectly correct, because it is still inventory.
+  //
+  // But at zero quantity there are no surviving units to carry it, and the row
+  // simply kept its old unit price against a quantity of nothing. The leftover
+  // value silently ceased to exist: a pool worth 2,167.89 was emptied by a
+  // return credited at 1,884.00 and 283.89 vanished with no entry anywhere.
+  //
+  // It is returned to the caller instead, so the document that caused it can
+  // record it as the inventory valuation adjustment it really is.
+  //
+  // SIGN: positive means value was written OFF — the shop is worse off than the
+  // documents say.
+  //
+  //   inventory falls by      Quantity x CostPrice   (the pool goes to zero)
+  //   the document relieves   qty x unitCost
+  //   net effect            = qty*unitCost - Quantity*CostPrice = -remainingValue
+  //
+  // so the loss is +remainingValue, and a pool worth LESS than the cost being
+  // removed gives a negative figure, which is a genuine gain. Getting this
+  // backwards doubles the error instead of cancelling it, so it is derived here
+  // once rather than re-reasoned at each caller.
+  const residual = newQty > 0 ? 0 : remainingValue;
   const newCost = newQty > 0 ? remainingValue / newQty : (row.CostPrice || 0);
   db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?')
     .run(newQty, newCost, row.ID);
+  return { residual };
 }
 
 /**
@@ -155,6 +290,37 @@ export function restoreStockAtCost(
     : unitCost;
   db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?')
     .run(newQty, newCost, row.ID);
+}
+
+/**
+ * Records value that a stock movement could not leave anywhere.
+ *
+ * See `inventory_adjustments` in the migrations for the full reasoning. In
+ * short: movements are valued at the cost of the specific units involved, the
+ * pool is valued at a weighted average, and when a movement empties a warehouse
+ * the difference has no units left to sit on. It is a real change in what the
+ * shop owns, so it is written down rather than discarded.
+ *
+ * A positive amount is value written OFF, matching the sign convention used by
+ * the profit report.
+ */
+export function recordValuationResidual(
+  db: Database.Database,
+  opts: {
+    date: string;
+    itemId: number | null;
+    warehouseId: number | null;
+    amount: number;
+    reason: string;
+    refType: string;
+    refId: number | null;
+  },
+) {
+  if (!Number.isFinite(opts.amount) || Math.abs(opts.amount) < 1e-9) return;
+  db.prepare(`
+    INSERT INTO inventory_adjustments (Date, ItemID, WarehouseID, Amount, Reason, RefType, RefID)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(opts.date, opts.itemId, opts.warehouseId, opts.amount, opts.reason, opts.refType, opts.refId);
 }
 
 /** Adds `qty` back to a specific warehouse, creating the row if needed. */

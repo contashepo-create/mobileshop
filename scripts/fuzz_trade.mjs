@@ -43,6 +43,14 @@ function netWorth(db) {
     - g('SELECT COALESCE(SUM(-Balance),0) v FROM customers WHERE Balance<0');
 }
 
+/**
+ * Freight the handlers have RECORDED as unrecoverable, read straight from the
+ * documents. Not recomputed — see the conservation check below.
+ */
+function totalFreightWrittenOff(db) {
+  return db.prepare('SELECT COALESCE(SUM(COALESCE(FreightWrittenOff,0)),0) v FROM purchase_returns').get()?.v ?? 0;
+}
+
 const ITERATIONS = Number(process.argv[2]) || 400;
 const SEED = Number(process.argv[3]) || 20260728;
 
@@ -91,6 +99,24 @@ function seed() {
 
 const q1 = (sql, ...a) => currentDb().prepare(sql).get(...a);
 const qa = (sql, ...a) => currentDb().prepare(sql).all(...a);
+
+/**
+ * Picks one row at random, DETERMINISTICALLY.
+ *
+ * The operations below used `ORDER BY RANDOM() LIMIT 1`, which is SQLite's own
+ * generator and is not seeded by anything here. That silently made the whole
+ * run irreproducible: the script printed "replay with seed N", but replaying
+ * with that seed produced a different sequence of documents and usually did not
+ * reproduce the failure at all. A fuzzer whose failures cannot be replayed
+ * cannot be used to confirm a fix, so the choice is made here instead — ordered
+ * by primary key for stability, indexed by the seeded PRNG.
+ */
+function pickRow(sql, ...args) {
+  const rows = qa(sql, ...args);
+  if (!rows.length) return null;
+  return rows[Math.floor(rnd() * rows.length)];
+}
+
 
 // ---------------------------------------------------------------- operations
 //
@@ -158,8 +184,8 @@ async function opPurchase() {
 }
 
 async function opSaleReturn() {
-  const sale = q1(`SELECT SaleID, CustomerID, PaidAmount FROM sales
-                   WHERE IsVoided=0 ORDER BY RANDOM() LIMIT 1`);
+  const sale = pickRow(`SELECT SaleID, CustomerID, PaidAmount FROM sales
+                   WHERE IsVoided=0 ORDER BY SaleID`);
   if (!sale) return 'saleReturn [none]';
   const lines = await call('saleReturns:returnable', sale.SaleID);
   const open = (lines || []).filter(l => l.Returnable > 0);
@@ -200,7 +226,7 @@ async function opSaleReturn() {
 }
 
 async function opPurchaseReturn() {
-  const pur = q1('SELECT PurchaseID, PaidAmount FROM purchases ORDER BY RANDOM() LIMIT 1');
+  const pur = pickRow('SELECT PurchaseID, PaidAmount FROM purchases ORDER BY PurchaseID');
   if (!pur) return 'purchaseReturn [none]';
   const lines = await call('purchaseReturns:returnable', pur.PurchaseID);
   const open = (lines || []).filter(l => l.Returnable > 0);
@@ -225,35 +251,35 @@ async function opPurchaseReturn() {
 }
 
 async function opDeleteSaleReturn() {
-  const ret = q1('SELECT ReturnID FROM sale_returns ORDER BY RANDOM() LIMIT 1');
+  const ret = pickRow('SELECT ReturnID FROM sale_returns ORDER BY ReturnID');
   if (!ret) return 'deleteSaleReturn [none]';
   const res = await call('delete:saleReturn', ret.ReturnID);
   return 'deleteSaleReturn' + (res?.success ? '' : ' [refused]');
 }
 
 async function opDeletePurchaseReturn() {
-  const ret = q1('SELECT ReturnID FROM purchase_returns ORDER BY RANDOM() LIMIT 1');
+  const ret = pickRow('SELECT ReturnID FROM purchase_returns ORDER BY ReturnID');
   if (!ret) return 'deletePurchaseReturn [none]';
   const res = await call('delete:purchaseReturn', ret.ReturnID);
   return 'deletePurchaseReturn' + (res?.success ? '' : ' [refused]');
 }
 
 async function opDeleteSale() {
-  const sale = q1('SELECT SaleID FROM sales ORDER BY RANDOM() LIMIT 1');
+  const sale = pickRow('SELECT SaleID FROM sales ORDER BY SaleID');
   if (!sale) return 'deleteSale [none]';
   const res = await call('delete:sale', sale.SaleID);
   return 'deleteSale' + (res?.success ? '' : ' [refused]');
 }
 
 async function opDeletePurchase() {
-  const pur = q1('SELECT PurchaseID FROM purchases ORDER BY RANDOM() LIMIT 1');
+  const pur = pickRow('SELECT PurchaseID FROM purchases ORDER BY PurchaseID');
   if (!pur) return 'deletePurchase [none]';
   const res = await call('delete:purchase', pur.PurchaseID);
   return 'deletePurchase' + (res?.success ? '' : ' [refused]');
 }
 
 async function opEditSale() {
-  const sale = q1('SELECT SaleID, CustomerID FROM sales WHERE IsVoided=0 ORDER BY RANDOM() LIMIT 1');
+  const sale = pickRow('SELECT SaleID, CustomerID FROM sales WHERE IsVoided=0 ORDER BY SaleID');
   if (!sale) return 'editSale [none]';
   const itemId = pick([1, 2]);
   const qty = between(1, 4);
@@ -309,6 +335,7 @@ const history = [];
 const breachesFound = [];
 let performed = 0;
 let worthBefore = netWorth(currentDb());
+let writeOffsBefore = totalFreightWrittenOff(currentDb());
 
 for (let i = 1; i <= ITERATIONS; i++) {
   const op = chooseOperation();
@@ -336,13 +363,37 @@ for (let i = 1; i <= ITERATIONS; i++) {
   // by the accounting identity instead.
   //
   // Measured straight from the balances, so no profit formula can hide a leak.
+  //
+  // ONE legitimate exception: unrecoverable freight. When goods go back to a
+  // supplier, the delivery charge the shop already paid to bring them in is
+  // gone for good. Normally it is re-absorbed by the units left in the
+  // warehouse and stays an asset, but when the warehouse empties there is
+  // nothing to carry it and it becomes a genuine expense — real value really
+  // does leave the business.
+  //
+  // The amount is READ from the document the handler wrote, never recomputed
+  // here. Re-deriving it would turn this into a second implementation of the
+  // handler's own arithmetic, which is exactly the trap that made the earlier
+  // audits worthless: the check would then agree with the code by construction
+  // instead of testing it.
   const worthAfter = netWorth(currentDb());
-  const worthDelta = worthAfter - worthBefore;
+  const writeOffsAfter = totalFreightWrittenOff(currentDb());
+  const expectedLoss = writeOffsAfter - writeOffsBefore;
+  const worthDelta = (worthAfter - worthBefore) + expectedLoss;
   //
   // The threshold is a tenth of a piastre. Weighted-average costs are held as
   // IEEE-754 doubles and re-averaged on every movement, so a few ten-thousandths
   // accumulate over a long run; a genuine leak is orders of magnitude larger
   // (the real defects this found moved 6.00, 25.00, 1200.00).
+  // `deleteSaleReturn` DOES move the margin, so it belongs here.
+  //
+  // Cancelling a sale return re-instates the original sale: the goods go back
+  // out at cost and the customer owes the selling price again, so the shop's
+  // net worth legitimately rises by the profit on those units. Testing it for
+  // strict conservation reported a 590.00 "leak" that was simply the margin
+  // being correctly restored — the reversal itself was verified, separately and
+  // in isolation, to be an exact inverse of the return in every settlement
+  // shape. It is covered by the accounting identity instead.
   const movesMargin = /^(sale\(|editSale|saleReturn|deleteSale)/.test(label);
   if (!movesMargin && Math.abs(worthDelta) > 0.001) {
     breachesFound.push({
@@ -351,6 +402,7 @@ for (let i = 1; i <= ITERATIONS; i++) {
         name: 'value conservation',
         msg: `a non-sale operation changed net worth by ${worthDelta.toFixed(4)}\n`
           + `  ${r2(worthBefore)} -> ${r2(worthAfter)}\n`
+          + `  freight written off this step: ${r2(expectedLoss)} (already allowed for)\n`
           + `  only a sale may create value; everything else must be neutral`,
       }],
       history: history.slice(-6),
@@ -358,6 +410,7 @@ for (let i = 1; i <= ITERATIONS; i++) {
     break;
   }
   worthBefore = worthAfter;
+  writeOffsBefore = writeOffsAfter;
 
   const breaches = checkAll(currentDb(), OPENING_NET_WORTH);
   if (breaches.length) {

@@ -91,13 +91,20 @@ export function identity(db, opening) {
   const freightLost = g(`SELECT COALESCE(SUM(COALESCE(FreightWrittenOff,0)),0) v
                          FROM purchase_returns`);
 
+  // Inventory value that had no units left to sit on when a movement emptied a
+  // warehouse. Positive = written off. Read from the ledger the handlers write,
+  // never recomputed here, so this stays a check rather than a second copy of
+  // the same arithmetic.
+  const valuationAdjustments = g(`SELECT COALESCE(SUM(COALESCE(Amount,0)),0) v
+                                  FROM inventory_adjustments`);
+
   // Provider fees paid to refund a customer by wallet/machine. Real money out.
   const refundFees = g(`SELECT COALESCE(SUM(COALESCE(r.TransferCost,0)),0) v
                         FROM sale_returns r
                         WHERE COALESCE(r.TransferCostBearer,'shop') = 'shop'`);
 
   const profit = (revenue - salesReturned) - (cogs - cogsReturned)
-    - absorbedFees - freightLost - refundFees;
+    - absorbedFees - freightLost - refundFees - valuationAdjustments;
   const expected = opening + profit;
 
   return near(netWorth, expected)

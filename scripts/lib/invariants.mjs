@@ -1,0 +1,375 @@
+/**
+ * Universal truths about the books, checked after EVERY operation.
+ *
+ * WHY THIS FILE EXISTS
+ * --------------------
+ * The previous suite ran the real handlers — an improvement — but I still chose
+ * the 14 scenarios by hand, so the tests could only ever cover situations I
+ * personally imagined. Every review found a new bug because every review
+ * imagined something different.
+ *
+ * An invariant inverts that. Instead of asking "does THIS case work?", it
+ * states something that must hold after ANY sequence of operations whatsoever,
+ * and a fuzzer then throws thousands of random sequences at it. A violation is
+ * a bug regardless of whether anyone thought of that combination.
+ *
+ * Each function returns null when satisfied, or a description of the breach.
+ */
+
+const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+const near = (a, b, tol = 0.011) => Math.abs(r2(a) - r2(b)) <= tol;
+
+/**
+ * The accounting identity.
+ *
+ *   Assets - Liabilities = Capital + Profit
+ *
+ * Expressed for this app as: everything the shop holds (cash, wallets, stock,
+ * money owed to it) minus everything it owes must equal the profit it has
+ * earned, given it started with a known opening position. If any handler
+ * invents or destroys value, this is where it shows up.
+ */
+export function identity(db, opening) {
+  const g = sql => db.prepare(sql).get()?.v ?? 0;
+
+  const cash = g('SELECT COALESCE(SUM(Balance),0) v FROM cash_accounts');
+  const wallets = g('SELECT COALESCE(SUM(Balance),0) v FROM payment_methods');
+  const stockValue = g('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities');
+  const receivable = g('SELECT COALESCE(SUM(Balance),0) v FROM customers WHERE Balance > 0');
+  const customerCredit = g('SELECT COALESCE(SUM(-Balance),0) v FROM customers WHERE Balance < 0');
+  const payable = g('SELECT COALESCE(SUM(Balance),0) v FROM suppliers WHERE Balance > 0');
+  const supplierCredit = g('SELECT COALESCE(SUM(-Balance),0) v FROM suppliers WHERE Balance < 0');
+
+  const assets = cash + wallets + stockValue + receivable + supplierCredit;
+  const liabilities = payable + customerCredit;
+  const netWorth = assets - liabilities;
+
+  // Profit realised so far: revenue less cost of what was sold, net of returns,
+  // less any commission the shop absorbed.
+  const revenue = g(`SELECT COALESCE(SUM(TotalAmount),0) v FROM sales
+                     WHERE IsVoided=0 AND IsWarranty=0 AND COALESCE(Source,'direct')<>'maintenance'`);
+  const salesReturned = g(`SELECT COALESCE(SUM(r.TotalAmount),0) v FROM sale_returns r
+                           JOIN sales s ON r.SaleID=s.SaleID WHERE s.IsVoided=0`);
+  const cogs = g(`SELECT COALESCE(SUM(COALESCE(sd.UnitCost,0)*sd.Quantity),0) v
+                  FROM sale_details sd JOIN sales s ON sd.SaleID=s.SaleID
+                  WHERE s.IsVoided=0 AND s.IsWarranty=0 AND COALESCE(s.Source,'direct')<>'maintenance'`);
+  // The cost credited back when goods return.
+  //
+  // `LIMIT 1` picks one matching sale line, which is wrong when an invoice
+  // carries the same item on several lines at different costs: the whole return
+  // was then valued at the first line's cost. Averaging across the item's lines
+  // matches how the handler restores the stock and how the returned quantity is
+  // recorded — per item, not per row.
+  const cogsReturned = g(`SELECT COALESCE(SUM(
+                            COALESCE((SELECT SUM(sd.UnitCost * sd.Quantity) / NULLIF(SUM(sd.Quantity),0)
+                                        FROM sale_details sd
+                                       WHERE sd.SaleID = sr.SaleID AND sd.ItemID IS srd.ItemID),0)
+                            * srd.Quantity),0) v
+                          FROM sale_return_details srd
+                          JOIN sale_returns sr ON srd.ReturnID=sr.ReturnID`);
+  const absorbedFees = g(`SELECT COALESCE(SUM(COALESCE(TransferCost,0)),0) v FROM sales
+                          WHERE IsVoided=0 AND IsWarranty=0
+                            AND COALESCE(Source,'direct')<>'maintenance'
+                            AND COALESCE(TransferCostBearer,'shop')='shop'`);
+
+  // Freight write-offs are NOT modelled here.
+  //
+  // Stock is carried at the landed cost (supplier price plus that line's share
+  // of shipping), but a supplier only credits what they charged. The handler
+  // keeps the difference with the inventory by pushing it onto the surviving
+  // units of the same line, so in the normal case it stays an asset and the
+  // identity balances on its own. Only when a warehouse empties completely is
+  // there nothing left to carry it, and it is written off.
+  //
+  // Reconstructing WHICH of those two happened, after an arbitrary sequence of
+  // later purchases, sales and reversals, means re-deriving the handler's own
+  // arithmetic — precisely the reimplementation trap that made the earlier
+  // audits worthless. So the identity is measured against the value actually
+  // capitalised, and freight is left out of the profit term entirely.
+  const strandedFreight = 0;
+
+  // Freight the shop could not recover, as RECORDED by the handler when a
+  // purchase return emptied the pool. Read from the document rather than
+  // recomputed, so this stays an independent check rather than a copy of the
+  // handler's arithmetic.
+  const freightLost = g(`SELECT COALESCE(SUM(COALESCE(FreightWrittenOff,0)),0) v
+                         FROM purchase_returns`);
+
+  // Provider fees paid to refund a customer by wallet/machine. Real money out.
+  const refundFees = g(`SELECT COALESCE(SUM(COALESCE(r.TransferCost,0)),0) v
+                        FROM sale_returns r
+                        WHERE COALESCE(r.TransferCostBearer,'shop') = 'shop'`);
+
+  const profit = (revenue - salesReturned) - (cogs - cogsReturned)
+    - absorbedFees - freightLost - refundFees;
+  const expected = opening + profit;
+
+  return near(netWorth, expected)
+    ? null
+    : `accounting identity broken\n`
+      + `  assets ${r2(assets)} - liabilities ${r2(liabilities)} = ${r2(netWorth)}\n`
+      + `  opening ${r2(opening)} + profit ${r2(profit)} = ${r2(expected)}\n`
+      + `  drift ${r2(netWorth - expected)}\n`
+      + `  [cash ${r2(cash)} wallets ${r2(wallets)} stock ${r2(stockValue)} `
+      + `recv ${r2(receivable)} pay ${r2(payable)} credit ${r2(customerCredit)}]`;
+}
+
+/** An invoice header must equal the sum of its own lines. */
+export function invoiceLinesMatchHeader(db) {
+  const bad = db.prepare(`
+    SELECT s.SaleID, s.SaleNumber, s.Subtotal,
+           COALESCE((SELECT SUM(Total) FROM sale_details WHERE SaleID=s.SaleID),0) AS LineSum
+    FROM sales s
+  `).all().filter(r => Math.abs(r.Subtotal - r.LineSum) > 0.011);
+  return bad.length
+    ? `invoice header disagrees with its lines: ` +
+      bad.map(b => `${b.SaleNumber} header ${r2(b.Subtotal)} vs lines ${r2(b.LineSum)}`).join('; ')
+    : null;
+}
+
+/** Total = Subtotal - Discount + Tax, always. */
+export function invoiceArithmetic(db) {
+  const bad = db.prepare(`
+    SELECT SaleNumber, Subtotal, Discount, TaxAmount, TotalAmount FROM sales
+  `).all().filter(r =>
+    Math.abs((r.Subtotal - r.Discount + r.TaxAmount) - r.TotalAmount) > 0.011);
+  return bad.length
+    ? `invoice total does not equal subtotal - discount + tax: ` +
+      bad.map(b => b.SaleNumber).join(', ')
+    : null;
+}
+
+/** Nothing may be returned beyond what the document contained. */
+export function returnsWithinDocument(db) {
+  const overSale = db.prepare(`
+    SELECT s.SaleNumber, s.TotalAmount,
+           COALESCE((SELECT SUM(TotalAmount) FROM sale_returns WHERE SaleID=s.SaleID),0) AS Returned
+    FROM sales s
+  `).all().filter(r => r.Returned > r.TotalAmount + 0.011);
+  if (overSale.length) {
+    return `returned more than the invoice: ` +
+      overSale.map(r => `${r.SaleNumber} ${r2(r.Returned)}>${r2(r.TotalAmount)}`).join('; ');
+  }
+  const overPur = db.prepare(`
+    SELECT p.PurchaseNumber, p.TotalAmount,
+           COALESCE((SELECT SUM(TotalAmount) FROM purchase_returns WHERE PurchaseID=p.PurchaseID),0) AS Returned
+    FROM purchases p
+  `).all().filter(r => r.Returned > r.TotalAmount + 0.011);
+  return overPur.length
+    ? `returned more than the purchase: ` +
+      overPur.map(r => `${r.PurchaseNumber} ${r2(r.Returned)}>${r2(r.TotalAmount)}`).join('; ')
+    : null;
+}
+
+/**
+ * Per ITEM on an invoice, never more units back than went out.
+ *
+ * Compared per item rather than per row: one invoice may legitimately carry the
+ * same item on several lines (two prices, or simply scanned twice), while the
+ * returned quantity is recorded against the item. Comparing a summed return
+ * against a single row's quantity reports a false breach whenever that happens.
+ */
+export function returnsWithinLine(db) {
+  const bad = db.prepare(`
+    SELECT s.SaleNumber, sd.ItemID, SUM(sd.Quantity) AS Sold,
+           COALESCE((SELECT SUM(rd.Quantity) FROM sale_return_details rd
+                     JOIN sale_returns r ON rd.ReturnID=r.ReturnID
+                     WHERE r.SaleID=sd.SaleID AND rd.ItemID IS sd.ItemID),0) AS Back
+    FROM sale_details sd JOIN sales s ON sd.SaleID=s.SaleID
+    GROUP BY sd.SaleID, sd.ItemID
+  `).all().filter(r => r.Back > r.Sold + 0.011);
+  return bad.length
+    ? `more units returned than sold on an item: ` +
+      bad.map(b => `${b.SaleNumber} item ${b.ItemID} ${r2(b.Back)}>${r2(b.Sold)}`).join('; ')
+    : null;
+}
+
+/**
+ * Cash handed back on an invoice can never exceed cash taken in on it.
+ * This is the rule whose absence let a credit sale be refunded in cash.
+ */
+export function refundNeverExceedsReceipt(db) {
+  const bad = db.prepare(`
+    SELECT s.SaleNumber, s.PaidAmount,
+           COALESCE((SELECT SUM(COALESCE(CashRefund,0)+COALESCE(TransferRefund,0))
+                     FROM sale_returns WHERE SaleID=s.SaleID),0) AS PaidOut
+    FROM sales s
+  `).all().filter(r => r.PaidOut > (r.PaidAmount || 0) + 0.011);
+  if (bad.length) {
+    return `refunded more cash than was received: ` +
+      bad.map(b => `${b.SaleNumber} out ${r2(b.PaidOut)} > in ${r2(b.PaidAmount)}`).join('; ');
+  }
+  const badP = db.prepare(`
+    SELECT p.PurchaseNumber, p.PaidAmount,
+           COALESCE((SELECT SUM(COALESCE(CashRefund,0)+COALESCE(TransferRefund,0))
+                     FROM purchase_returns WHERE PurchaseID=p.PurchaseID),0) AS TakenBack
+    FROM purchases p
+  `).all().filter(r => r.TakenBack > (r.PaidAmount || 0) + 0.011);
+  return badP.length
+    ? `took back more cash than was paid to the supplier: ` +
+      badP.map(b => `${b.PurchaseNumber} back ${r2(b.TakenBack)} > paid ${r2(b.PaidAmount)}`).join('; ')
+    : null;
+}
+
+/** A return's three settlement parts must add up to its value. */
+export function settlementBalances(db) {
+  for (const [table, key] of [['sale_returns', 'ReturnNumber'], ['purchase_returns', 'ReturnNumber']]) {
+    const bad = db.prepare(`
+      SELECT ${key} AS Ref, TotalAmount,
+             COALESCE(DebtRelief,0)+COALESCE(CashRefund,0)+COALESCE(TransferRefund,0) AS Settled
+      FROM ${table}
+    `).all().filter(r => Math.abs(r.TotalAmount - r.Settled) > 0.011);
+    if (bad.length) {
+      return `${table}: settlement does not add up: ` +
+        bad.map(b => `${b.Ref} value ${r2(b.TotalAmount)} settled ${r2(b.Settled)}`).join('; ');
+    }
+  }
+  return null;
+}
+
+/** An invoice with no customer cannot carry a balance nobody owes. */
+export function walkInHasNoDebt(db) {
+  const bad = db.prepare(`
+    SELECT SaleNumber, RemainingAmount FROM sales
+    WHERE CustomerID IS NULL AND IsVoided = 0 AND ABS(COALESCE(RemainingAmount,0)) > 0.011
+  `).all();
+  return bad.length
+    ? `walk-in invoice carries a balance nobody owes: ` +
+      bad.map(b => `${b.SaleNumber} ${r2(b.RemainingAmount)}`).join(', ')
+    : null;
+}
+
+/** Stock must never be valued at a nonsensical figure. */
+export function stockValuationSane(db) {
+  const rows = db.prepare('SELECT ItemID, WarehouseID, Quantity, CostPrice FROM stock_quantities').all();
+  for (const r of rows) {
+    if (!Number.isFinite(r.CostPrice)) return `item ${r.ItemID}: CostPrice is ${r.CostPrice}`;
+    if (!Number.isFinite(r.Quantity)) return `item ${r.ItemID}: Quantity is ${r.Quantity}`;
+    if (r.CostPrice < 0) return `item ${r.ItemID}: negative unit cost ${r.CostPrice}`;
+    if (r.Quantity > 0 && r.CostPrice === 0) {
+      return `item ${r.ItemID} wh ${r.WarehouseID}: ${r.Quantity} units valued at zero`;
+    }
+  }
+  return null;
+}
+
+/** Stock may not go negative unless the shop explicitly allowed it. */
+export function noNegativeStock(db) {
+  const allowed = db.prepare("SELECT Value v FROM settings WHERE Key='allow_negative_stock'").get()?.v === '1';
+  if (allowed) return null;
+  const bad = db.prepare('SELECT ItemID, WarehouseID, Quantity FROM stock_quantities WHERE Quantity < -0.001').all();
+  return bad.length
+    ? `negative stock without permission: ` +
+      bad.map(b => `item ${b.ItemID} wh ${b.WarehouseID} = ${b.Quantity}`).join(', ')
+    : null;
+}
+
+/** Deleting a document must not orphan its children. */
+export function noOrphans(db) {
+  const checks = [
+    ['sale_details', 'SaleID', 'sales', 'SaleID'],
+    ['sale_returns', 'SaleID', 'sales', 'SaleID'],
+    ['sale_return_details', 'ReturnID', 'sale_returns', 'ReturnID'],
+    ['purchase_details', 'PurchaseID', 'purchases', 'PurchaseID'],
+    ['purchase_returns', 'PurchaseID', 'purchases', 'PurchaseID'],
+    ['purchase_return_details', 'ReturnID', 'purchase_returns', 'ReturnID'],
+  ];
+  for (const [child, fk, parent, pk] of checks) {
+    const n = db.prepare(
+      `SELECT COUNT(*) v FROM ${child} c
+        WHERE c.${fk} IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM ${parent} p WHERE p.${pk} = c.${fk})`,
+    ).get()?.v ?? 0;
+    if (n > 0) return `${n} orphan row(s) in ${child} pointing at a missing ${parent}`;
+  }
+  return null;
+}
+
+/** Document numbers must stay unique. */
+export function documentNumbersUnique(db) {
+  for (const [table, col] of [
+    ['sales', 'SaleNumber'], ['purchases', 'PurchaseNumber'],
+    ['sale_returns', 'ReturnNumber'], ['purchase_returns', 'ReturnNumber'],
+  ]) {
+    const dup = db.prepare(
+      `SELECT ${col} v, COUNT(*) n FROM ${table} GROUP BY ${col} HAVING n > 1`,
+    ).all();
+    if (dup.length) return `duplicate ${col} in ${table}: ${dup.map(d => d.v).join(', ')}`;
+  }
+  return null;
+}
+
+/** Every money column must hold a real number. */
+export function noNaNOrInfinity(db) {
+  const cols = {
+    sales: ['Subtotal', 'Discount', 'TaxAmount', 'TotalAmount', 'PaidAmount', 'RemainingAmount', 'TransferCost'],
+    purchases: ['Subtotal', 'Discount', 'TaxAmount', 'TotalAmount', 'PaidAmount', 'RemainingAmount'],
+    sale_returns: ['TotalAmount', 'DebtRelief', 'CashRefund', 'TransferRefund'],
+    purchase_returns: ['TotalAmount', 'DebtRelief', 'CashRefund', 'TransferRefund'],
+    cash_accounts: ['Balance'],
+    payment_methods: ['Balance'],
+    customers: ['Balance'],
+    suppliers: ['Balance'],
+    stock_quantities: ['Quantity', 'CostPrice'],
+  };
+  for (const [table, list] of Object.entries(cols)) {
+    for (const col of list) {
+      let rows;
+      try { rows = db.prepare(`SELECT ${col} v FROM ${table}`).all(); } catch { continue; }
+      for (const r of rows) {
+        if (r.v !== null && !Number.isFinite(r.v)) {
+          return `${table}.${col} holds a non-finite value: ${r.v}`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Invoice status must agree with the amount outstanding. */
+export function statusMatchesBalance(db) {
+  const bad = db.prepare(`
+    SELECT SaleNumber, PaidAmount, RemainingAmount, Status FROM sales WHERE IsVoided = 0
+  `).all().filter(r => {
+    const rem = r.RemainingAmount || 0;
+    if (rem > 0.011 && r.Status === 'completed') return true;
+    if (rem <= 0.011 && (r.Status === 'unpaid' || r.Status === 'partial')) return true;
+    return false;
+  });
+  return bad.length
+    ? `status contradicts the outstanding amount: ` +
+      bad.map(b => `${b.SaleNumber} remaining ${r2(b.RemainingAmount)} but "${b.Status}"`).join('; ')
+    : null;
+}
+
+export const ALL = {
+  identity,
+  invoiceLinesMatchHeader,
+  invoiceArithmetic,
+  returnsWithinDocument,
+  returnsWithinLine,
+  refundNeverExceedsReceipt,
+  settlementBalances,
+  walkInHasNoDebt,
+  stockValuationSane,
+  noNegativeStock,
+  noOrphans,
+  documentNumbersUnique,
+  noNaNOrInfinity,
+  statusMatchesBalance,
+};
+
+/** Runs every invariant; returns a list of breach descriptions. */
+export function checkAll(db, opening) {
+  const breaches = [];
+  for (const [name, fn] of Object.entries(ALL)) {
+    let msg;
+    try {
+      msg = name === 'identity' ? fn(db, opening) : fn(db);
+    } catch (err) {
+      msg = `invariant threw: ${err.message}`;
+    }
+    if (msg) breaches.push({ name, msg });
+  }
+  return breaches;
+}

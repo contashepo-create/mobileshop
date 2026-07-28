@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { resolveSourceWarehouse, deductStock, restoreStock, restoreStockAtCost, totalStock } from '../database/stock';
+import { resolveSourceWarehouse, deductStock, deductStockAtCost, restoreStock, restoreStockAtCost, totalStock } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
 
@@ -398,14 +398,30 @@ export function registerSalesHandlers() {
       return { success: false, message: 'حدد الأصناف المرتجعة' };
     }
 
+    // Aggregated PER ITEM, not per row.
+    //
+    // One invoice may legitimately carry the same item on two lines (two
+    // different prices, or simply added twice at the till). The returned
+    // quantity is recorded against the item, so comparing that running total
+    // against a single row's quantity is wrong in both directions: with two
+    // lines of 1 the cap stayed at 1 and blocked a legitimate second return,
+    // and with the rows ordered the other way it allowed more back than went
+    // out. Summing the sold side the same way the returned side is summed
+    // makes the two comparable.
     const soldLines = db.prepare(`
-      SELECT sd.ItemID, sd.SerialID, sd.Quantity, sd.UnitPrice, sd.UnitCost, sd.WarehouseID,
+      SELECT sd.ItemID,
+             MIN(sd.SerialID) AS SerialID,
+             SUM(sd.Quantity) AS Quantity,
+             MAX(sd.UnitPrice) AS UnitPrice,
+             MAX(sd.UnitCost) AS UnitCost,
+             MAX(sd.WarehouseID) AS WarehouseID,
              COALESCE((
                SELECT SUM(rd.Quantity) FROM sale_return_details rd
                JOIN sale_returns r ON rd.ReturnID = r.ReturnID
                WHERE r.SaleID = sd.SaleID AND rd.ItemID IS sd.ItemID
              ), 0) AS AlreadyReturned
       FROM sale_details sd WHERE sd.SaleID = ?
+      GROUP BY sd.ItemID, sd.SerialID
     `).all(data.SaleID) as any[];
 
     const verified: Array<{
@@ -800,7 +816,10 @@ export function registerSalesHandlers() {
             db.prepare("UPDATE item_serials SET Status = 'available' WHERE SerialID = ?").run(line.SerialID);
           } else if (line.ItemID) {
             const wh = line.WarehouseID ?? resolveSourceWarehouse(db, line.ItemID, 0, null);
-            if (wh) restoreStock(db, line.ItemID, wh, line.Quantity, line.UnitCost || 0);
+            // Un-sell at the cost the goods left at, so the value returned
+            // equals the value removed. `restoreStock` keeps the pool's current
+            // average when a row exists, which silently re-values the units.
+            if (wh) restoreStockAtCost(db, line.ItemID, wh, line.Quantity, line.UnitCost || 0);
           }
         }
         if (original.CustomerID && original.RemainingAmount > 0) {
@@ -980,7 +999,14 @@ export function registerSalesHandlers() {
           if (line.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(line.SerialID);
           } else if (line.ItemID && line.WarehouseID) {
-            deductStock(db, line.ItemID, line.WarehouseID, line.Quantity);
+            // Remove exactly the value the return added. The goods came back at
+            // the sale line's cost, so they must leave at that same cost —
+            // subtracting at the pool's blended average would take out more (or
+            // less) value than was ever put in.
+            const origCost = (db.prepare(
+              'SELECT UnitCost FROM sale_details WHERE SaleID = ? AND ItemID IS ? LIMIT 1',
+            ).get(ret.SaleID, line.ItemID) as any)?.UnitCost ?? 0;
+            deductStockAtCost(db, line.ItemID, line.WarehouseID, line.Quantity, origCost);
           }
         }
 

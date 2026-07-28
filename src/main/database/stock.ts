@@ -71,6 +71,49 @@ export function deductStock(db: Database.Database, itemId: number, warehouseId: 
 }
 
 /**
+ * Removes goods that entered at a KNOWN unit cost, un-averaging correctly.
+ *
+ * The mirror of `restoreStockAtCost`, and needed whenever a movement that added
+ * stock at a specific cost is being undone — cancelling a customer return, for
+ * instance.
+ *
+ * `deductStock` only subtracts the quantity and leaves the blended average in
+ * place, which is right for a SALE (the goods leave at whatever the pool is
+ * worth) but wrong for a REVERSAL. Undoing a return of 5 units that came back
+ * at 10 each, from a pool then averaging 16.67, removed 83.33 of value instead
+ * of 50 and left the books short by the difference.
+ *
+ * Removing the exact value that was added restores the pool to precisely what
+ * it held before.
+ */
+export function deductStockAtCost(
+  db: Database.Database,
+  itemId: number,
+  warehouseId: number,
+  qty: number,
+  unitCost: number,
+) {
+  const row = db.prepare(
+    'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+  ).get(itemId, warehouseId) as any;
+
+  if (!row) {
+    db.prepare(
+      'INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)',
+    ).run(itemId, warehouseId, -qty, unitCost);
+    return;
+  }
+
+  const newQty = (row.Quantity || 0) - qty;
+  const remainingValue = ((row.CostPrice || 0) * (row.Quantity || 0)) - (unitCost * qty);
+  // Only meaningful while a positive holding remains; otherwise the pool is
+  // empty and the last known unit cost is kept for reference.
+  const newCost = newQty > 0 ? remainingValue / newQty : (row.CostPrice || 0);
+  db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?')
+    .run(newQty, newCost, row.ID);
+}
+
+/**
  * Returns goods to stock at a KNOWN unit cost, re-averaging correctly.
  *
  * Used when the cost of the returning goods is known independently of whatever

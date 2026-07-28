@@ -92,8 +92,10 @@ report('ALTER TABLE purchase_return_details ADD COLUMN WarehouseID INTEGER' in M
        'the return line records which warehouse the goods left')
 report('const lineWarehouse = (itemId: number, preferred?: number | null)' in PUR,
        'the warehouse is resolved from the original purchase line')
-report('if (wh) deductStock(db, item.ItemID, wh, item.Quantity);' in PUR,
-       'stock is deducted from that warehouse specifically')
+report('deductStockAtCost(db, item.ItemID, wh, item.Quantity, landedCost)' in PUR,
+       'stock leaves that warehouse at the cost those units came in at',
+       'removing them at the pool average destroyed value the supplier never\n'
+       'credited back — see verify_fuzz_regressions.mjs')
 report('WHERE ItemID = ?\').get(item.ItemID) as any;\n        if (stock) {' not in PUR,
        'the old warehouse-blind query is gone')
 

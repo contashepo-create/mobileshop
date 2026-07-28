@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { resolveSourceWarehouse, warehouseStock, deductStock, restoreStockAtCost } from '../database/stock';
+import { resolveSourceWarehouse, warehouseStock, deductStock, deductStockAtCost, restoreStockAtCost } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
 
@@ -304,19 +304,26 @@ export function registerPurchasesHandlers() {
       return { success: false, message: 'حدد الأصناف المرتجعة' };
     }
 
+    // Aggregated per item for the same reason as the sale side: an invoice may
+    // carry one item on several lines, while returns are recorded per item.
     const boughtLines = db.prepare(`
-      SELECT pd.ItemID, pd.Quantity, pd.UnitCost, pd.EffectiveUnitCost, pd.WarehouseID,
+      SELECT pd.ItemID,
+             SUM(pd.Quantity) AS Quantity,
+             MAX(pd.UnitCost) AS UnitCost,
+             MAX(pd.EffectiveUnitCost) AS EffectiveUnitCost,
+             MAX(pd.WarehouseID) AS WarehouseID,
              COALESCE((
                SELECT SUM(rd.Quantity) FROM purchase_return_details rd
                JOIN purchase_returns r ON rd.ReturnID = r.ReturnID
                WHERE r.PurchaseID = pd.PurchaseID AND rd.ItemID = pd.ItemID
              ), 0) AS AlreadyReturned
       FROM purchase_details pd WHERE pd.PurchaseID = ?
+      GROUP BY pd.ItemID
     `).all(data.PurchaseID) as any[];
 
     const verified: Array<{
       ItemID: number; SerialID: number | null; Quantity: number;
-      UnitCost: number; WarehouseID: number | null;
+      UnitCost: number; EffectiveUnitCost: number; WarehouseID: number | null;
     }> = [];
 
     // Guards against the same line appearing twice in one payload: each entry
@@ -348,6 +355,8 @@ export function registerPurchasesHandlers() {
         ItemID: line.ItemID,
         SerialID: req.SerialID ?? null,
         Quantity: qty,
+        // Carried so the reversal knows the freight embedded in these units.
+        EffectiveUnitCost: line.EffectiveUnitCost ?? line.UnitCost ?? 0,
         // The supplier credits what they charged, so the return is valued at the
         // invoice price — not the landed cost, which includes our own shipping.
         UnitCost: line.UnitCost || 0,
@@ -468,6 +477,7 @@ export function registerPurchasesHandlers() {
              settlement.transferCost, settlement.transferCostBearer);
 
       const returnId = result.lastInsertRowid;
+      let freightWrittenOff = 0;
 
       for (const item of verified) {
         db.prepare(`
@@ -485,7 +495,52 @@ export function registerPurchasesHandlers() {
         // query had no WarehouseID and silently picked whichever row came
         // first, so returning branch stock drove the main store negative.
         const wh = lineWarehouse(item.ItemID, item.WarehouseID);
-        if (wh) deductStock(db, item.ItemID, wh, item.Quantity);
+        if (wh) {
+          // Remove the value these particular units brought in, not the pool's
+          // blended average. Buying 10 at 5 into a pool of 10 at 10 gives an
+          // average of 7.50; sending those same 10 back at the average destroys
+          // 75 of stock value while the supplier credits only 50, so 25 simply
+          // vanished from the books.
+          const landedCost = item.EffectiveUnitCost ?? item.UnitCost ?? 0;
+          deductStockAtCost(db, item.ItemID, wh, item.Quantity, landedCost);
+
+          // Shipping and fees attached to the returned units do NOT come back.
+          //
+          // Stock is carried at the LANDED cost (supplier price plus this
+          // line's share of shipping), but the supplier only credits what they
+          // charged. Removing goods worth 13.50 each while cancelling 12.00 of
+          // debt left the difference belonging to nothing: assets fell further
+          // than liabilities, and the books drifted by exactly the freight on
+          // the returned units.
+          //
+          // That freight is a genuine, unrecoverable cost — the shop paid to
+          // bring in goods it then sent back. It is charged to the remaining
+          // stock of the same line, which is where the surviving units' own
+          // share of the same delivery already sits. When nothing remains it is
+          // written off, since there is no inventory left to carry it.
+          const landed = item.EffectiveUnitCost ?? item.UnitCost ?? 0;
+          const freightPerUnit = landed - (item.UnitCost || 0);
+          const strandedFreight = money(freightPerUnit * item.Quantity);
+          if (strandedFreight > 0) {
+            const row = db.prepare(
+              'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+            ).get(item.ItemID, wh) as any;
+            if (row && row.Quantity > 0) {
+              const newCost = money(((row.CostPrice || 0) * row.Quantity + strandedFreight) / row.Quantity);
+              db.prepare('UPDATE stock_quantities SET CostPrice = ? WHERE ID = ?').run(newCost, row.ID);
+            } else {
+              // No units left to carry it: the freight is spent and gone.
+              // Recorded so it can be reported as a cost and reconciled later,
+              // instead of disappearing silently from the books.
+              freightWrittenOff = money(freightWrittenOff + strandedFreight);
+            }
+          }
+        }
+      }
+
+      if (freightWrittenOff > 0) {
+        db.prepare('UPDATE purchase_returns SET FreightWrittenOff = ? WHERE ReturnID = ?')
+          .run(freightWrittenOff, returnId);
       }
 
       // Cancel only the part we still owe the supplier

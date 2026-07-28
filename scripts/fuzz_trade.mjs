@@ -1,0 +1,361 @@
+#!/usr/bin/env node
+/**
+ * Randomised end-to-end testing of sales, returns, purchases and purchase
+ * returns, with the books checked after EVERY operation.
+ *
+ * WHY, AFTER ALL THE PREVIOUS AUDITS
+ * ----------------------------------
+ * The last suite ran the real handlers, which was the right fix for the wrong
+ * problem. It still only tested the fourteen scenarios I thought of by hand, so
+ * it could only ever find bugs I had already imagined. That is why every review
+ * turned up something new: each one imagined something different.
+ *
+ * This inverts the approach. It performs thousands of RANDOM operations in
+ * random order with random amounts, and after each one asserts a set of things
+ * that must be true of any set of books whatsoever — the accounting identity,
+ * no money refunded that was never received, no stock created from nothing,
+ * no orphan rows, no duplicate document numbers, and so on.
+ *
+ * A breach is a real defect even if nobody ever wrote a test for that exact
+ * sequence. The seed is printed so any failure can be replayed exactly.
+ *
+ * Run with:
+ *   node --experimental-strip-types scripts/fuzz_trade.mjs [iterations] [seed]
+ */
+import { buildDatabase, loadHandlers, call, currentDb } from './lib/handlerHarness.mjs';
+import { checkAll } from './lib/invariants.mjs';
+
+const ITERATIONS = Number(process.argv[2]) || 400;
+const SEED = Number(process.argv[3]) || 20260728;
+
+/** Deterministic PRNG, so a failing run can be reproduced from its seed. */
+function makeRandom(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s ^= s << 13; s >>>= 0;
+    s ^= s >> 17;
+    s ^= s << 5; s >>>= 0;
+    return s / 4294967296;
+  };
+}
+
+const rnd = makeRandom(SEED);
+const pick = arr => arr[Math.floor(rnd() * arr.length)];
+const between = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
+const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+
+const OPENING_CASH = 100000;
+const OPENING_WALLET = 50000;
+const OPENING_STOCK = 100 * 10 + 20 * 600;   // cables + phones
+const OPENING_NET_WORTH = OPENING_CASH + OPENING_WALLET + OPENING_STOCK;
+
+function seed() {
+  const db = buildDatabase();
+  db.exec(`INSERT INTO roles(RoleID,RoleName,IsSystem) VALUES(1,'admin',1)`);
+  db.exec(`INSERT INTO users(UserID,Username,PasswordHash,RoleID,IsActive) VALUES(1,'admin','x',1,1)`);
+  db.exec(`INSERT INTO fiscal_years(FiscalYearID,YearName,StartDate,EndDate,Status)
+           VALUES(1,'2026','2026-01-01','2026-12-31','open')`);
+  db.exec(`INSERT INTO warehouses(WarehouseID,WarehouseName) VALUES(1,'Main'),(2,'Branch')`);
+  db.exec(`INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive)
+           VALUES(1,'Safe','safe',${OPENING_CASH},1)`);
+  db.exec(`INSERT INTO payment_methods(PaymentMethodID,MethodName,MethodType,Balance,IsActive)
+           VALUES(1,'Wallet','wallet',${OPENING_WALLET},1)`);
+  db.exec(`INSERT INTO customers(CustomerID,Name,Balance,Status)
+           VALUES(1,'Ahmed',0,'active'),(2,'Sara',0,'active')`);
+  db.exec(`INSERT INTO suppliers(SupplierID,Name,Balance,Status)
+           VALUES(1,'SuppA',0,'active'),(2,'SuppB',0,'active')`);
+  db.exec(`INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive)
+           VALUES(1,'Cable','part',0,10,20,1),(2,'Phone','device',0,600,1000,1)`);
+  db.exec(`INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice)
+           VALUES(1,1,100,10),(2,1,20,600)`);
+  return db;
+}
+
+const q1 = (sql, ...a) => currentDb().prepare(sql).get(...a);
+const qa = (sql, ...a) => currentDb().prepare(sql).all(...a);
+
+// ---------------------------------------------------------------- operations
+//
+// Each returns a short label. Handlers are allowed to REFUSE — a rejection is a
+// perfectly good outcome, and the invariants must hold either way.
+
+async function opSale() {
+  const registered = rnd() < 0.7;
+  const customerId = registered ? pick([1, 2]) : undefined;
+  const items = [];
+  const n = between(1, 2);
+  for (let i = 0; i < n; i++) {
+    const itemId = pick([1, 2]);
+    items.push({
+      ItemID: itemId,
+      Quantity: between(1, 5),
+      UnitPrice: itemId === 1 ? between(15, 30) : between(900, 1200),
+    });
+  }
+  const subtotal = items.reduce((s, i) => s + i.Quantity * i.UnitPrice, 0);
+  const discount = rnd() < 0.3 ? between(0, Math.floor(subtotal * 0.1)) : 0;
+  const total = subtotal - discount;
+  // A walk-in must pay in full; a registered customer may pay any part.
+  const paid = registered ? r2(total * pick([0, 0.25, 0.5, 1, 1])) : total;
+  const useWallet = rnd() < 0.3;
+
+  const res = await call('sales:create', {
+    CustomerID: customerId,
+    items,
+    Discount: discount, TaxRate: 0, TaxAmount: 0,
+    PaymentMethod: paid > 0 ? (useWallet ? 'card' : 'cash') : 'credit',
+    PaidAmount: paid,
+    CashAccountID: paid > 0 && !useWallet ? 1 : undefined,
+    PaymentMethodID: paid > 0 && useWallet ? 1 : undefined,
+    TransferCost: paid > 0 && useWallet && rnd() < 0.5 ? between(1, 10) : 0,
+    TransferCostBearer: pick(['shop', 'customer']),
+    fiscalYearId: 1,
+  });
+  return `sale(${registered ? 'cust' + customerId : 'walkin'}, paid ${paid})` +
+    (res?.success ? '' : ' [refused]');
+}
+
+async function opPurchase() {
+  const items = [{
+    ItemID: pick([1, 2]),
+    Quantity: between(1, 20),
+    UnitCost: 0,
+    WarehouseID: pick([1, 2]),
+  }];
+  items[0].UnitCost = items[0].ItemID === 1 ? between(8, 14) : between(550, 650);
+  const total = items[0].Quantity * items[0].UnitCost;
+  const paid = r2(total * pick([0, 0.5, 1]));
+  const res = await call('purchases:create', {
+    SupplierID: pick([1, 2]),
+    items,
+    Discount: 0, TaxAmount: 0,
+    PaidAmount: paid,
+    AdditionalCost: rnd() < 0.3 ? between(0, 50) : 0,
+    PaymentCost: 0,
+    PaymentSourceType: paid > 0 ? 'cash_account' : undefined,
+    PaymentSourceID: paid > 0 ? 1 : undefined,
+    fiscalYearId: 1,
+  });
+  return `purchase(paid ${paid})` + (res?.success ? '' : ' [refused]');
+}
+
+async function opSaleReturn() {
+  const sale = q1(`SELECT SaleID, CustomerID, PaidAmount FROM sales
+                   WHERE IsVoided=0 ORDER BY RANDOM() LIMIT 1`);
+  if (!sale) return 'saleReturn [none]';
+  const lines = await call('saleReturns:returnable', sale.SaleID);
+  const open = (lines || []).filter(l => l.Returnable > 0);
+  if (!open.length) return 'saleReturn [nothing returnable]';
+
+  const line = pick(open);
+  const qty = between(1, Math.max(1, Math.floor(line.Returnable)));
+  const value = r2(qty * line.UnitPrice);
+
+  // Split the value randomly across the three settlement buckets.
+  const hasAccount = !!sale.CustomerID;
+  let account = 0, cash = 0, transfer = 0;
+  if (!hasAccount) {
+    if (rnd() < 0.5) { cash = value; } else { cash = r2(value / 2); transfer = r2(value - cash); }
+  } else {
+    const mode = pick(['account', 'cash', 'split', 'threeway']);
+    if (mode === 'account') account = value;
+    else if (mode === 'cash') cash = value;
+    else if (mode === 'split') { account = r2(value / 2); cash = r2(value - account); }
+    else {
+      account = r2(value / 3);
+      cash = r2(value / 3);
+      transfer = r2(value - account - cash);
+    }
+  }
+
+  const res = await call('saleReturns:create', {
+    SaleID: sale.SaleID,
+    items: [{ ItemID: line.ItemID, SerialID: line.SerialID || undefined, Quantity: qty, UnitPrice: line.UnitPrice }],
+    AccountCredit: account, CashRefund: cash, TransferRefund: transfer,
+    CashAccountID: cash > 0 ? 1 : undefined,
+    PaymentMethodID: transfer > 0 ? 1 : undefined,
+    TransferCost: transfer > 0 && rnd() < 0.4 ? between(1, 5) : 0,
+    TransferCostBearer: pick(['shop', 'party']),
+  });
+  return `saleReturn(${qty} @${line.UnitPrice} a=${account} c=${cash} t=${transfer})` +
+    (res?.success ? '' : ' [refused]');
+}
+
+async function opPurchaseReturn() {
+  const pur = q1('SELECT PurchaseID, PaidAmount FROM purchases ORDER BY RANDOM() LIMIT 1');
+  if (!pur) return 'purchaseReturn [none]';
+  const lines = await call('purchaseReturns:returnable', pur.PurchaseID);
+  const open = (lines || []).filter(l => l.Returnable > 0);
+  if (!open.length) return 'purchaseReturn [nothing returnable]';
+
+  const line = pick(open);
+  const qty = between(1, Math.max(1, Math.floor(line.Returnable)));
+  const value = r2(qty * line.UnitCost);
+  const mode = pick(['account', 'cash', 'split']);
+  let account = 0, cash = 0;
+  if (mode === 'account') account = value;
+  else if (mode === 'cash') cash = value;
+  else { account = r2(value / 2); cash = r2(value - account); }
+
+  const res = await call('purchaseReturns:create', {
+    PurchaseID: pur.PurchaseID,
+    items: [{ ItemID: line.ItemID, Quantity: qty, UnitCost: line.UnitCost }],
+    AccountCredit: account, CashRefund: cash,
+    CashAccountID: cash > 0 ? 1 : undefined,
+  });
+  return `purchaseReturn(${qty} a=${account} c=${cash})` + (res?.success ? '' : ' [refused]');
+}
+
+async function opDeleteSaleReturn() {
+  const ret = q1('SELECT ReturnID FROM sale_returns ORDER BY RANDOM() LIMIT 1');
+  if (!ret) return 'deleteSaleReturn [none]';
+  const res = await call('delete:saleReturn', ret.ReturnID);
+  return 'deleteSaleReturn' + (res?.success ? '' : ' [refused]');
+}
+
+async function opDeletePurchaseReturn() {
+  const ret = q1('SELECT ReturnID FROM purchase_returns ORDER BY RANDOM() LIMIT 1');
+  if (!ret) return 'deletePurchaseReturn [none]';
+  const res = await call('delete:purchaseReturn', ret.ReturnID);
+  return 'deletePurchaseReturn' + (res?.success ? '' : ' [refused]');
+}
+
+async function opDeleteSale() {
+  const sale = q1('SELECT SaleID FROM sales ORDER BY RANDOM() LIMIT 1');
+  if (!sale) return 'deleteSale [none]';
+  const res = await call('delete:sale', sale.SaleID);
+  return 'deleteSale' + (res?.success ? '' : ' [refused]');
+}
+
+async function opDeletePurchase() {
+  const pur = q1('SELECT PurchaseID FROM purchases ORDER BY RANDOM() LIMIT 1');
+  if (!pur) return 'deletePurchase [none]';
+  const res = await call('delete:purchase', pur.PurchaseID);
+  return 'deletePurchase' + (res?.success ? '' : ' [refused]');
+}
+
+async function opEditSale() {
+  const sale = q1('SELECT SaleID, CustomerID FROM sales WHERE IsVoided=0 ORDER BY RANDOM() LIMIT 1');
+  if (!sale) return 'editSale [none]';
+  const itemId = pick([1, 2]);
+  const qty = between(1, 4);
+  const price = itemId === 1 ? between(15, 30) : between(900, 1200);
+  const total = qty * price;
+  const paid = sale.CustomerID ? r2(total * pick([0, 0.5, 1])) : total;
+  const res = await call('sales:update', {
+    SaleID: sale.SaleID,
+    CustomerID: sale.CustomerID ?? undefined,
+    items: [{ ItemID: itemId, Quantity: qty, UnitPrice: price }],
+    Discount: 0, TaxRate: 0, TaxAmount: 0,
+    PaymentMethod: paid > 0 ? 'cash' : 'credit',
+    PaidAmount: paid,
+    CashAccountID: paid > 0 ? 1 : undefined,
+  });
+  return `editSale(${qty} @${price} paid ${paid})` + (res?.success ? '' : ' [refused]');
+}
+
+const OPERATIONS = [
+  [opSale, 26],
+  [opPurchase, 20],
+  [opSaleReturn, 18],
+  [opPurchaseReturn, 12],
+  [opEditSale, 8],
+  [opDeleteSaleReturn, 6],
+  [opDeletePurchaseReturn, 4],
+  [opDeleteSale, 4],
+  [opDeletePurchase, 2],
+];
+const WEIGHT_TOTAL = OPERATIONS.reduce((s, [, w]) => s + w, 0);
+
+function chooseOperation() {
+  let t = rnd() * WEIGHT_TOTAL;
+  for (const [fn, w] of OPERATIONS) {
+    t -= w;
+    if (t <= 0) return fn;
+  }
+  return OPERATIONS[0][0];
+}
+
+// ---------------------------------------------------------------- run
+await loadHandlers();
+
+console.log('='.repeat(74));
+console.log(`RANDOMISED TRADE FUZZING — ${ITERATIONS} operations, seed ${SEED}`);
+console.log('='.repeat(74));
+console.log('Invariants are checked after EVERY operation, so a breach is caught');
+console.log('at the exact step that caused it, not at the end of the run.\n');
+
+seed();
+
+const history = [];
+const breachesFound = [];
+let performed = 0;
+
+for (let i = 1; i <= ITERATIONS; i++) {
+  const op = chooseOperation();
+  let label;
+  try {
+    label = await op();
+  } catch (err) {
+    label = `${op.name} THREW`;
+    breachesFound.push({
+      step: i, label,
+      breaches: [{ name: 'unhandled exception', msg: err.message }],
+      history: history.slice(-6),
+    });
+    break;
+  }
+  history.push(`${i}. ${label}`);
+  performed++;
+
+  const breaches = checkAll(currentDb(), OPENING_NET_WORTH);
+  if (breaches.length) {
+    breachesFound.push({ step: i, label, breaches, history: history.slice(-6) });
+    break;   // stop at the first breach; the state is already corrupt
+  }
+}
+
+console.log(`operations performed: ${performed}`);
+const refusals = history.filter(h => h.includes('[refused]')).length;
+const noops = history.filter(h => h.includes('[none]') || h.includes('[nothing')).length;
+console.log(`accepted: ${performed - refusals - noops}, refused: ${refusals}, no-op: ${noops}`);
+
+const counts = {};
+for (const h of history) {
+  const name = h.split('. ')[1].split('(')[0].split(' ')[0];
+  counts[name] = (counts[name] || 0) + 1;
+}
+console.log('mix:', Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' '));
+
+if (breachesFound.length === 0) {
+  const db = currentDb();
+  const g = sql => db.prepare(sql).get()?.v ?? 0;
+  console.log('\nfinal position:');
+  console.log(`  cash      ${r2(g('SELECT SUM(Balance) v FROM cash_accounts'))}`);
+  console.log(`  wallets   ${r2(g('SELECT SUM(Balance) v FROM payment_methods'))}`);
+  console.log(`  stock     ${r2(g('SELECT SUM(Quantity*CostPrice) v FROM stock_quantities'))}`);
+  console.log(`  customers ${r2(g('SELECT SUM(Balance) v FROM customers'))}`);
+  console.log(`  suppliers ${r2(g('SELECT SUM(Balance) v FROM suppliers'))}`);
+  console.log(`  invoices  ${g('SELECT COUNT(*) v FROM sales')} sales, ` +
+              `${g('SELECT COUNT(*) v FROM sale_returns')} returns, ` +
+              `${g('SELECT COUNT(*) v FROM purchases')} purchases, ` +
+              `${g('SELECT COUNT(*) v FROM purchase_returns')} purchase returns`);
+  console.log('\n' + '='.repeat(74));
+  console.log(`RESULT: ${performed} operations, all 14 invariants held throughout`);
+  console.log('='.repeat(74));
+  process.exit(0);
+}
+
+const f = breachesFound[0];
+console.log('\n' + '!'.repeat(74));
+console.log(`INVARIANT BREACH at step ${f.step}: ${f.label}`);
+console.log('!'.repeat(74));
+console.log('\nleading operations:');
+f.history.forEach(h => console.log('  ' + h));
+console.log('\nbreaches:');
+for (const b of f.breaches) {
+  console.log(`  [${b.name}]`);
+  String(b.msg).split('\n').forEach(l => console.log('    ' + l));
+}
+console.log(`\nreplay with:  node --experimental-strip-types scripts/fuzz_trade.mjs ${ITERATIONS} ${SEED}`);
+process.exit(1);

@@ -1168,6 +1168,18 @@ export function runMigrations(db: Database.Database) {
   // PaymentMethodID     — which wallet or machine.
   // TransferCost        — fee the provider charged on that transfer.
   // TransferCostBearer  — 'shop' absorbs it, or 'party' receives less.
+  // Shipping/fees on returned goods that could NOT be recovered.
+  //
+  // Stock is carried at the landed cost but a supplier credits only what they
+  // charged. The handler keeps that difference with the inventory by loading it
+  // onto the surviving units; when none survive there is nothing to carry it
+  // and it becomes a real expense. Recording the amount makes the write-off
+  // auditable and lets the profit report charge it — previously it simply
+  // vanished from the books with no trace.
+  try {
+    db.exec(`ALTER TABLE purchase_returns ADD COLUMN FreightWrittenOff REAL DEFAULT 0`);
+  } catch {}
+
   try {
     db.exec(`ALTER TABLE sale_returns ADD COLUMN TransferRefund REAL DEFAULT 0`);
   } catch {}

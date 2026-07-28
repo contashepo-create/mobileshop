@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
-import { restoreStock, resolveSourceWarehouse } from '../database/stock';
+import { restoreStock, resolveSourceWarehouse, restoreStockAtCost, deductStockAtCost } from '../database/stock';
 
 /**
  * Refuses a delete when other documents still reference the record.
@@ -52,7 +52,11 @@ export function registerDeleteHandlers() {
           }
           if (item.ItemID && !item.SerialID) {
             const wh = item.WarehouseID ?? resolveSourceWarehouse(db, item.ItemID, 0, null);
-            if (wh) restoreStock(db, item.ItemID, wh, item.Quantity, item.UnitCost || 0);
+            // Put the value back, not just the count. `restoreStock` leaves the
+            // existing CostPrice untouched when a row already exists, so goods
+            // sold at 10 and un-sold into a pool now averaging 20 re-entered
+            // valued at 20 — inventing value on every deletion.
+            if (wh) restoreStockAtCost(db, item.ItemID, wh, item.Quantity, item.UnitCost || 0);
           }
         }
 
@@ -104,6 +108,40 @@ export function registerDeleteHandlers() {
       ]);
       if (blockedPur) {
         return { success: false, message: `لا يمكن حذف فاتورة الشراء - توجد ${blockedPur}. احذفها أولاً.` };
+      }
+
+      // The goods must still be on the shelf to be un-received.
+      //
+      // Deleting a purchase subtracts the quantity it brought in. If those
+      // units have since been sold or moved, they are not there to remove and
+      // the subtraction drives the warehouse negative — inventing negative
+      // inventory, and with it negative value that breaks the accounting
+      // identity. Buying 2 phones into the branch, selling them, then deleting
+      // the purchase left the branch at -2 and the books out by 1,200.
+      //
+      // Availability is checked per WAREHOUSE, because that is where the
+      // reversal actually applies; stock of the same item in another branch
+      // cannot be un-received on this invoice's behalf.
+      const shortages: string[] = [];
+      const lines = db.prepare(
+        'SELECT ItemID, Quantity, WarehouseID FROM purchase_details WHERE PurchaseID = ?',
+      ).all(purchaseId) as any[];
+      for (const line of lines) {
+        if (!line.ItemID || !line.WarehouseID) continue;
+        const held = (db.prepare(
+          'SELECT COALESCE(SUM(Quantity),0) AS qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+        ).get(line.ItemID, line.WarehouseID) as any)?.qty || 0;
+        if (held < line.Quantity - 0.001) {
+          const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+          shortages.push(`"${info?.ItemName || line.ItemID}" (المطلوب ${line.Quantity}، المتاح ${held})`);
+        }
+      }
+      if (shortages.length) {
+        return {
+          success: false,
+          message: `لا يمكن حذف فاتورة الشراء - تم بيع أو نقل بعض الأصناف ولم تعد بالمخزن: ${shortages.join('، ')}. `
+            + `احذف عمليات البيع أولاً أو استخدم مرتجع مشتريات.`,
+        };
       }
 
       const tx = db.transaction(() => {
@@ -340,7 +378,9 @@ export function registerDeleteHandlers() {
               // again from the generated sale_details would double-credit stock,
               // so only genuinely sale-sourced lines are reversed here.
               if (sd.ItemID && !sd.SerialID && sd.WarehouseID) {
-                restoreStock(db, sd.ItemID, sd.WarehouseID, sd.Quantity, sd.UnitCost || 0);
+                // At the cost the goods left at, so the value restored matches
+                // the value removed rather than the pool's current average.
+                restoreStockAtCost(db, sd.ItemID, sd.WarehouseID, sd.Quantity, sd.UnitCost || 0);
               }
             }
             if (sale.CustomerID && sale.RemainingAmount > 0) {

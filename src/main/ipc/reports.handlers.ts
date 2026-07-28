@@ -432,6 +432,21 @@ export function registerReportsHandlers() {
         AND COALESCE(TransferCostBearer,'shop') = 'shop' ${dateFilter}
     `).get(...params) as any;
 
+    // 4c. Provider fees paid to REFUND a customer by wallet or card machine,
+    // and freight that a purchase return could not recover. Both are real money
+    // the shop spent and neither was reported anywhere: a refund fee left the
+    // wallet with no matching expense, so profit was overstated by every one.
+    const refundTransferCost = db.prepare(`
+      SELECT COALESCE(SUM(COALESCE(r.TransferCost,0)),0) as total
+      FROM sale_returns r JOIN sales s ON r.SaleID = s.SaleID
+      WHERE s.IsVoided = 0 AND COALESCE(r.TransferCostBearer,'shop') = 'shop' ${joinFilterReturn}
+    `).get(...params) as any;
+
+    const freightWrittenOff = db.prepare(`
+      SELECT COALESCE(SUM(COALESCE(FreightWrittenOff,0)),0) as total
+      FROM purchase_returns WHERE 1=1 ${dateFilter}
+    `).get(...params) as any;
+
     // 5. Purchase Returns value (items returned to supplier - reduces our stock cost basis)
     const purchaseReturnsCost = db.prepare(`
       SELECT COALESCE(SUM(r.TotalAmount),0) as total
@@ -441,7 +456,7 @@ export function registerReportsHandlers() {
     `).get(...params) as any;
 
     const totalDirectCosts = cogs.total - cogsReturns.total + partsCost.total + serviceCost.total
-      + saleTransferCost.total;
+      + saleTransferCost.total + refundTransferCost.total + freightWrittenOff.total;
 
     // Gross Profit = Revenue - Direct Costs
     const grossProfit = totalRevenue - totalDirectCosts;
@@ -508,6 +523,8 @@ export function registerReportsHandlers() {
         parts: partsCost.total,
         serviceCosts: serviceCost.total,
         saleTransferCosts: saleTransferCost.total,
+        refundTransferCosts: refundTransferCost.total,
+        freightWrittenOff: freightWrittenOff.total,
         // NOTE: warranty parts are an operating EXPENSE (see `expenses` below),
         // they are intentionally NOT part of `total` here. Exposed for display.
         warrantyParts: warrantyPartsCost.total,

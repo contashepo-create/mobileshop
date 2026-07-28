@@ -309,8 +309,12 @@ export function registerPurchasesHandlers() {
     const boughtLines = db.prepare(`
       SELECT pd.ItemID,
              SUM(pd.Quantity) AS Quantity,
-             MAX(pd.UnitCost) AS UnitCost,
-             MAX(pd.EffectiveUnitCost) AS EffectiveUnitCost,
+             -- Weighted average, not MAX: an invoice may carry the same item on
+             -- several lines at different prices, and MAX would value every
+             -- returned unit at the dearest of them.
+             SUM(pd.UnitCost * pd.Quantity) / NULLIF(SUM(pd.Quantity),0) AS UnitCost,
+             SUM(COALESCE(pd.EffectiveUnitCost, pd.UnitCost) * pd.Quantity)
+               / NULLIF(SUM(pd.Quantity),0) AS EffectiveUnitCost,
              MAX(pd.WarehouseID) AS WarehouseID,
              COALESCE((
                SELECT SUM(rd.Quantity) FROM purchase_return_details rd

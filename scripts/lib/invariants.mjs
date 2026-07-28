@@ -55,18 +55,14 @@ export function identity(db, opening) {
                   WHERE s.IsVoided=0 AND s.IsWarranty=0 AND COALESCE(s.Source,'direct')<>'maintenance'`);
   // The cost credited back when goods return.
   //
-  // `LIMIT 1` picks one matching sale line, which is wrong when an invoice
-  // carries the same item on several lines at different costs: the whole return
-  // was then valued at the first line's cost. Averaging across the item's lines
-  // matches how the handler restores the stock and how the returned quantity is
-  // recorded — per item, not per row.
-  const cogsReturned = g(`SELECT COALESCE(SUM(
-                            COALESCE((SELECT SUM(sd.UnitCost * sd.Quantity) / NULLIF(SUM(sd.Quantity),0)
-                                        FROM sale_details sd
-                                       WHERE sd.SaleID = sr.SaleID AND sd.ItemID IS srd.ItemID),0)
-                            * srd.Quantity),0) v
-                          FROM sale_return_details srd
-                          JOIN sale_returns sr ON srd.ReturnID=sr.ReturnID`);
+  // Read from the return line, which now records exactly what the reversal put
+  // back into stock. The earlier version re-derived it from the sale lines and
+  // therefore disagreed with the handler whenever an invoice carried the same
+  // item more than once — reporting a drift that was an artefact of the check,
+  // not a fault in the books.
+  const cogsReturned = g(`SELECT COALESCE(SUM(COALESCE(srd.UnitCost,0) * srd.Quantity),0) v
+                          FROM sale_return_details srd`);
+
   const absorbedFees = g(`SELECT COALESCE(SUM(COALESCE(TransferCost,0)),0) v FROM sales
                           WHERE IsVoided=0 AND IsWarranty=0
                             AND COALESCE(Source,'direct')<>'maintenance'

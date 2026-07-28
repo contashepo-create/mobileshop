@@ -1168,6 +1168,19 @@ export function runMigrations(db: Database.Database) {
   // PaymentMethodID     — which wallet or machine.
   // TransferCost        — fee the provider charged on that transfer.
   // TransferCostBearer  — 'shop' absorbs it, or 'party' receives less.
+  // The unit COST credited back when goods return.
+  //
+  // The return line recorded the selling price but never the cost, so the value
+  // put back into stock existed only as a side effect of the handler's
+  // arithmetic. Nothing could verify it afterwards, and the profit report had
+  // to guess the figure by re-deriving it from the sale lines — which is wrong
+  // whenever an invoice carries the same item on several lines at different
+  // costs. Recording it makes the reversal auditable and lets cost of sales be
+  // credited with exactly what was restored.
+  try {
+    db.exec(`ALTER TABLE sale_return_details ADD COLUMN UnitCost REAL`);
+  } catch {}
+
   // Shipping/fees on returned goods that could NOT be recovered.
   //
   // Stock is carried at the landed cost but a supplier credits only what they

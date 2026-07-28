@@ -377,6 +377,10 @@ export function registerReportsHandlers() {
     const cogsReturns = db.prepare(`
       SELECT COALESCE(SUM(
                COALESCE(
+                 -- What the reversal actually put back into stock, recorded on
+                 -- the line itself. Falls back to the old derivation only for
+                 -- rows written before the column existed.
+                 srd.UnitCost,
                  (SELECT sd.UnitCost
                     FROM sale_details sd
                    WHERE sd.SaleID = sr.SaleID

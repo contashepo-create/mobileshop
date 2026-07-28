@@ -82,5 +82,44 @@ t('unrecoverable freight is recorded, not silently lost',
   q('SELECT FreightWrittenOff f FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').f===25,
   'FreightWrittenOff = '+q('SELECT FreightWrittenOff f FROM purchase_returns ORDER BY ReturnID DESC LIMIT 1').f);
 
+
+// 6 the cost credited back is RECORDED, not re-derived
+seed();
+await call('sales:create',{CustomerID:1,items:[{ItemID:1,Quantity:2,UnitPrice:20}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'credit',PaidAmount:0,fiscalYearId:1});
+const s6=q('SELECT SaleID FROM sales ORDER BY SaleID DESC LIMIT 1').SaleID;
+await call('saleReturns:create',{SaleID:s6,items:[{ItemID:1,Quantity:2,UnitPrice:20}],AccountCredit:40,CashRefund:0});
+const rl=q('SELECT UnitCost c FROM sale_return_details ORDER BY DetailID DESC LIMIT 1');
+t('the cost restored to stock is recorded on the return line',rl.c===10,'UnitCost = '+rl.c);
+
+// 7 an invoice with one item on two lines at different prices returns at the
+//   weighted average, not the dearest
+seed();
+await call('sales:create',{CustomerID:1,
+  items:[{ItemID:1,Quantity:2,UnitPrice:10},{ItemID:1,Quantity:2,UnitPrice:30}],
+  Discount:0,TaxRate:0,TaxAmount:0,PaymentMethod:'credit',PaidAmount:0,fiscalYearId:1});
+const s7=q('SELECT SaleID FROM sales ORDER BY SaleID DESC LIMIT 1').SaleID;
+const avail=await call('saleReturns:returnable',s7);
+const line7=avail.find(l=>l.ItemID===1);
+t('a duplicated item line is offered at its weighted average price',
+  Math.abs(line7.UnitPrice-20)<0.01,'UnitPrice = '+line7.UnitPrice+' (10 and 30 -> 20)');
+
+// 8 value conservation: a purchase return never changes net worth
+seed();
+currentDb().exec('DELETE FROM stock_quantities WHERE ItemID=1');
+await call('purchases:create',{SupplierID:1,items:[{ItemID:1,Quantity:12,UnitCost:8,WarehouseID:1}],
+  Discount:0,TaxAmount:0,PaidAmount:0,AdditionalCost:50,PaymentCost:0,fiscalYearId:1});
+const p8=q('SELECT PurchaseID FROM purchases ORDER BY PurchaseID DESC LIMIT 1').PurchaseID;
+const NW=()=>{const d=currentDb();const g=x=>d.prepare(x).get()?.v??0;
+  return g('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities')
+    +g('SELECT COALESCE(SUM(Balance),0) v FROM cash_accounts')
+    -g('SELECT COALESCE(SUM(Balance),0) v FROM suppliers WHERE Balance>0');};
+const nwB=NW();
+await call('purchaseReturns:create',{PurchaseID:p8,items:[{ItemID:1,Quantity:4,UnitCost:8}],
+  AccountCredit:32,CashRefund:0});
+const nwA=NW();
+t('a partial purchase return leaves net worth unchanged',Math.abs(nwA-nwB)<0.001,
+  `${r2(nwB)} -> ${r2(nwA)} (freight follows the surviving units)`);
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

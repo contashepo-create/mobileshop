@@ -412,8 +412,11 @@ export function registerSalesHandlers() {
       SELECT sd.ItemID,
              MIN(sd.SerialID) AS SerialID,
              SUM(sd.Quantity) AS Quantity,
-             MAX(sd.UnitPrice) AS UnitPrice,
-             MAX(sd.UnitCost) AS UnitCost,
+             -- Weighted averages rather than MAX: the same item may appear on
+             -- several lines at different prices, and MAX would refund every
+             -- unit at the dearest one and credit cost at the highest cost.
+             SUM(sd.UnitPrice * sd.Quantity) / NULLIF(SUM(sd.Quantity),0) AS UnitPrice,
+             SUM(COALESCE(sd.UnitCost,0) * sd.Quantity) / NULLIF(SUM(sd.Quantity),0) AS UnitCost,
              MAX(sd.WarehouseID) AS WarehouseID,
              COALESCE((
                SELECT SUM(rd.Quantity) FROM sale_return_details rd
@@ -604,10 +607,10 @@ export function registerSalesHandlers() {
           const returnedUnitCost = item.UnitCost;
 
           db.prepare(`
-            INSERT INTO sale_return_details (ReturnID, ItemID, SerialID, Quantity, UnitPrice, Total, WarehouseID)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sale_return_details (ReturnID, ItemID, SerialID, Quantity, UnitPrice, Total, WarehouseID, UnitCost)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           `).run(returnId, item.ItemID, item.SerialID ?? null, item.Quantity, item.UnitPrice,
-                 money(item.Quantity * item.UnitPrice), returnWarehouse);
+                 money(item.Quantity * item.UnitPrice), returnWarehouse, returnedUnitCost);
 
           // Restore serial status
           if (item.SerialID) {
@@ -938,12 +941,22 @@ export function registerSalesHandlers() {
   /** How much of an invoice may still be returned, per line. */
   ipcMain.handle('saleReturns:returnable', async (_event, saleId: number) => {
     const db = getDb();
-    // Sold quantity per item, minus everything already returned for the same
-    // invoice. Without this the UI could offer to return more than was bought,
-    // and the goods would be restocked out of thin air.
+    // Grouped exactly as `saleReturns:create` groups it — per item — so the
+    // screen offers precisely what the server will accept.
+    //
+    // Listing each row separately showed two entries for an item sold on two
+    // lines, each with its own cap, while the server checks the item's TOTAL.
+    // The cashier could then fill both boxes and be refused, or return at the
+    // dearer line's price. Quantities are summed and the price and cost are
+    // weighted averages, matching the validator.
     const lines = db.prepare(`
-      SELECT sd.ItemID, sd.SerialID, sd.IMEI, sd.Quantity, sd.UnitPrice, sd.WarehouseID,
-             i.ItemName,
+      SELECT sd.ItemID,
+             MIN(sd.SerialID) AS SerialID,
+             MIN(sd.IMEI) AS IMEI,
+             SUM(sd.Quantity) AS Quantity,
+             SUM(sd.UnitPrice * sd.Quantity) / NULLIF(SUM(sd.Quantity),0) AS UnitPrice,
+             MAX(sd.WarehouseID) AS WarehouseID,
+             MAX(i.ItemName) AS ItemName,
              COALESCE((
                SELECT SUM(rd.Quantity) FROM sale_return_details rd
                JOIN sale_returns r ON rd.ReturnID = r.ReturnID
@@ -952,6 +965,7 @@ export function registerSalesHandlers() {
       FROM sale_details sd
       LEFT JOIN items i ON sd.ItemID = i.ItemID
       WHERE sd.SaleID = ?
+      GROUP BY sd.ItemID, sd.SerialID
     `).all(saleId) as any[];
 
     return lines.map(l => ({
@@ -999,11 +1013,13 @@ export function registerSalesHandlers() {
           if (line.SerialID) {
             db.prepare("UPDATE item_serials SET Status = 'sold' WHERE SerialID = ?").run(line.SerialID);
           } else if (line.ItemID && line.WarehouseID) {
-            // Remove exactly the value the return added. The goods came back at
-            // the sale line's cost, so they must leave at that same cost —
-            // subtracting at the pool's blended average would take out more (or
-            // less) value than was ever put in.
-            const origCost = (db.prepare(
+            // Remove exactly the value the return added, read from the return
+            // line itself. Re-deriving it from `sale_details` with LIMIT 1
+            // picked an arbitrary row when the invoice carried the same item
+            // more than once, so the undo could remove a different amount of
+            // value than the return put in. The fallback covers rows written
+            // before UnitCost was recorded on the return.
+            const origCost = line.UnitCost ?? (db.prepare(
               'SELECT UnitCost FROM sale_details WHERE SaleID = ? AND ItemID IS ? LIMIT 1',
             ).get(ret.SaleID, line.ItemID) as any)?.UnitCost ?? 0;
             deductStockAtCost(db, line.ItemID, line.WarehouseID, line.Quantity, origCost);

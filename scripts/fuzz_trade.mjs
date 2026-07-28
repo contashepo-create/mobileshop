@@ -25,6 +25,24 @@
 import { buildDatabase, loadHandlers, call, currentDb } from './lib/handlerHarness.mjs';
 import { checkAll } from './lib/invariants.mjs';
 
+/**
+ * Net worth measured directly from the balances, with no assumptions.
+ *
+ * Used for the conservation check below, which asks a question no profit model
+ * can distort: did THIS operation change the shop's net worth by exactly the
+ * margin it should have?
+ */
+function netWorth(db) {
+  const g = q => db.prepare(q).get()?.v ?? 0;
+  return g('SELECT COALESCE(SUM(Balance),0) v FROM cash_accounts')
+    + g('SELECT COALESCE(SUM(Balance),0) v FROM payment_methods')
+    + g('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities')
+    + g('SELECT COALESCE(SUM(Balance),0) v FROM customers WHERE Balance>0')
+    + g('SELECT COALESCE(SUM(-Balance),0) v FROM suppliers WHERE Balance<0')
+    - g('SELECT COALESCE(SUM(Balance),0) v FROM suppliers WHERE Balance>0')
+    - g('SELECT COALESCE(SUM(-Balance),0) v FROM customers WHERE Balance<0');
+}
+
 const ITERATIONS = Number(process.argv[2]) || 400;
 const SEED = Number(process.argv[3]) || 20260728;
 
@@ -290,6 +308,7 @@ seed();
 const history = [];
 const breachesFound = [];
 let performed = 0;
+let worthBefore = netWorth(currentDb());
 
 for (let i = 1; i <= ITERATIONS; i++) {
   const op = chooseOperation();
@@ -307,6 +326,38 @@ for (let i = 1; i <= ITERATIONS; i++) {
   }
   history.push(`${i}. ${label}`);
   performed++;
+
+  // CONSERVATION: only trading at a margin may change the shop's net worth.
+  //
+  // A purchase is an exchange of cash for goods of equal value; a purchase
+  // return reverses it; deleting a document undoes whatever it did. None of
+  // those may move net worth at all. Selling DOES (the margin), and a sale
+  // return reverses that same margin — so both are excluded here and covered
+  // by the accounting identity instead.
+  //
+  // Measured straight from the balances, so no profit formula can hide a leak.
+  const worthAfter = netWorth(currentDb());
+  const worthDelta = worthAfter - worthBefore;
+  //
+  // The threshold is a tenth of a piastre. Weighted-average costs are held as
+  // IEEE-754 doubles and re-averaged on every movement, so a few ten-thousandths
+  // accumulate over a long run; a genuine leak is orders of magnitude larger
+  // (the real defects this found moved 6.00, 25.00, 1200.00).
+  const movesMargin = /^(sale\(|editSale|saleReturn|deleteSale)/.test(label);
+  if (!movesMargin && Math.abs(worthDelta) > 0.001) {
+    breachesFound.push({
+      step: i, label,
+      breaches: [{
+        name: 'value conservation',
+        msg: `a non-sale operation changed net worth by ${worthDelta.toFixed(4)}\n`
+          + `  ${r2(worthBefore)} -> ${r2(worthAfter)}\n`
+          + `  only a sale may create value; everything else must be neutral`,
+      }],
+      history: history.slice(-6),
+    });
+    break;
+  }
+  worthBefore = worthAfter;
 
   const breaches = checkAll(currentDb(), OPENING_NET_WORTH);
   if (breaches.length) {

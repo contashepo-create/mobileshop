@@ -301,5 +301,38 @@ console.log('\n[11] A service line can actually be stored');
     'service lines ' + q('SELECT COUNT(*) v FROM sale_details WHERE ItemID IS NULL').v);
 }
 
+// ---------------------------------------------------------------- 12
+console.log('\n[12] A discounted repair produces a self-consistent invoice');
+{
+  const db = seed();
+  await receive();
+  await issue({ TicketID: 1, ItemID: 1, Quantity: 2, SalePrice: 250 });
+  await deliver({ TicketID: 1, LaborCost: 100, Discount: 100, PaidAmount: 500, CashAccountID: 1 });
+  const inv = q('SELECT Subtotal, Discount, TotalAmount FROM sales');
+  t('Subtotal minus Discount equals the invoice total',
+    Math.abs((inv.Subtotal - inv.Discount) - inv.TotalAmount) < 0.011,
+    `${inv.Subtotal} - ${inv.Discount} != ${inv.TotalAmount}`);
+  const lines = q('SELECT ROUND(COALESCE(SUM(Total),0),2) v FROM sale_details').v;
+  t('the printed lines add up to the Subtotal',
+    Math.abs(lines - inv.Subtotal) < 0.011, `lines ${lines} vs subtotal ${inv.Subtotal}`);
+}
+
+// ---------------------------------------------------------------- 13
+console.log('\n[13] Negative money is refused on delivery');
+{
+  seed();
+  await receive();
+  const neg = await deliver({ TicketID: 1, LaborCost: -500, PaidAmount: 0 });
+  t('negative labour is refused', neg?.success === false, neg?.message);
+  const negPaid = await deliver({ TicketID: 1, LaborCost: 0, PaidAmount: -100 });
+  t('a negative payment is refused', negPaid?.success === false, negPaid?.message);
+  const negAdd = await deliver({ TicketID: 1, LaborCost: 0, PaidAmount: 0,
+    AdditionalCosts: [{ Description: 'x', Amount: -50 }] });
+  t('a negative additional cost is refused', negAdd?.success === false, negAdd?.message);
+  t('the ticket was not charged anything',
+    Math.abs(q('SELECT TotalCost v FROM maintenance_tickets').v) < 0.011,
+    'TotalCost ' + q('SELECT TotalCost v FROM maintenance_tickets').v);
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -395,6 +395,36 @@ export function registerMaintenanceHandlers() {
       return { success: false, message: 'التذكرة مرتجعة - لا يمكن تسليمها مرة أخرى' };
     }
 
+    // Money may not be negative.
+    //
+    // Nothing validated these, so labour of -500 produced a bill of -500: the
+    // shop "owed" the customer money for a repair it had just carried out, and
+    // the negative flowed into the invoice, the customer balance and the profit
+    // report. A discount is the supported way to reduce a bill.
+    const num = (v: unknown) => (typeof v === 'number' ? v : Number(v));
+    for (const [label, value] of [
+      ['أجرة الصيانة', data.LaborCost],
+      ['المدفوع', data.PaidAmount],
+      ['الخصم', data.Discount ?? 0],
+    ] as const) {
+      const v = num(value ?? 0);
+      if (!Number.isFinite(v) || v < 0) {
+        return { success: false, message: `${label} يجب أن يكون رقماً غير سالب` };
+      }
+    }
+    for (const ac of data.AdditionalCosts || []) {
+      const v = num(ac?.Amount ?? 0);
+      if (!Number.isFinite(v) || v < 0) {
+        return { success: false, message: 'المصاريف الإضافية يجب أن تكون أرقاماً غير سالبة' };
+      }
+    }
+    if (data.FinalPrice != null) {
+      const fp = num(data.FinalPrice);
+      if (!Number.isFinite(fp) || fp < 0) {
+        return { success: false, message: 'السعر النهائي يجب أن يكون رقماً غير سالب' };
+      }
+    }
+
     const partsCost = ticket.PartsCost || 0;
     const additionalTotal = data.AdditionalCosts.reduce((sum, a) => sum + a.Amount, 0);
 
@@ -468,7 +498,19 @@ export function registerMaintenanceHandlers() {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, 'maintenance', ?, ?)
       `).run(
         saleNumber, data.fiscalYearId, dateStr, effectiveCustomerId, customerName, customerPhone,
-        totalCost, discount, totalCost, paidAmount, remaining,
+        // Subtotal is the GROSS, before the discount.
+        //
+        // It was passed `totalCost`, the figure AFTER the discount, so the
+        // invoice contradicted itself: Subtotal - Discount no longer equalled
+        // TotalAmount, and the printed lines (which are gross) added up to more
+        // than the Subtotal they were supposed to sum to. Any report checking
+        // an invoice against its own lines saw every discounted repair as
+        // corrupt.
+        //
+        // When the user overrides with `FinalPrice` the discount is whatever
+        // that override took off, so the identity still holds.
+        isWarranty ? 0 : grossTotal, isWarranty ? 0 : (grossTotal - totalCost),
+        totalCost, paidAmount, remaining,
         isWarranty ? 'warranty' : data.PaymentMethod, null, null, data.userId,
         saleNotes, deliveryId, isWarranty ? 1 : 0
       );

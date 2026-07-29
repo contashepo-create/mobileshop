@@ -132,6 +132,20 @@ const MUTANTS = [
     why: 'the ticket is charged one figure while stock loses another',
   },
   {
+    name: 'a discounted repair invoice contradicts itself',
+    file: MAINT,
+    find: 'isWarranty ? 0 : grossTotal, isWarranty ? 0 : (grossTotal - totalCost),',
+    replace: 'totalCost, discount,',
+    why: 'Subtotal - Discount no longer equals the total, and the lines do not sum to it',
+  },
+  {
+    name: 'negative money is accepted on a repair',
+    file: MAINT,
+    find: "      if (!Number.isFinite(v) || v < 0) {\n        return { success: false, message: `${label} يجب أن يكون رقماً غير سالب` };",
+    replace: '      if (false) {\n        return { success: false, message: `${label}` };',
+    why: 'a bill of -500 flows into the customer balance and the profit report',
+  },
+  {
     name: 'the cash refund cap is removed',
     file: SALES,
     find: 'paidSoFar: refundableCash,',

@@ -334,5 +334,52 @@ console.log('\n[13] Negative money is refused on delivery');
     'TotalCost ' + q('SELECT TotalCost v FROM maintenance_tickets').v);
 }
 
+// ---------------------------------------------------------------- 14
+console.log('\n[14] The reports agree with each other about a repair');
+for (const [label, warranty] of [['a paid repair', false], ['a warranty repair', true]]) {
+  const db = seed();
+  currentDb().exec("INSERT OR REPLACE INTO settings(Key,Value) VALUES('owner_capital','155000')");
+  await receive(warranty ? { MaintenanceType: 'warranty' } : {});
+  await issue({ TicketID: 1, ItemID: 1, Quantity: 2, SalePrice: 250 });
+  await deliver({ TicketID: 1, LaborCost: 100, PaidAmount: warranty ? 0 : 600, CashAccountID: 1 });
+
+  const pl = await call('reports:profitLoss', {});
+  const fp = await call('reports:financialPosition');
+  // Compared on NET profit, not gross.
+  //
+  // Warranty parts are an operating EXPENSE, not a cost of sales — a warranty
+  // repair earns nothing, so charging its parts against gross margin would
+  // understate the margin on the repairs that did earn something. The balance
+  // sheet's `netProfit` is after expenses, so gross is the wrong figure to
+  // compare and my first version of this check failed for that reason, not
+  // because the reports disagreed.
+  const plNet = pl.netProfit ?? pl.grossProfit;
+  t(`${label}: the profit report and the balance sheet agree`,
+    Math.abs(plNet - fp.capital.netProfit) < 0.011,
+    `P&L net ${plNet} vs balance sheet ${fp.capital.netProfit}`);
+  t(`${label}: the balance sheet balances`,
+    Math.abs(fp.capital.difference) < 0.011, 'difference ' + fp.capital.difference);
+  t(`${label}: the mirror invoice is not counted as a direct sale`,
+    Math.abs(pl.revenue.salesGross) < 0.011,
+    'salesGross ' + pl.revenue.salesGross + ' (repairs belong in revenue.maintenance)');
+}
+
+// ---------------------------------------------------------------- 15
+console.log('\n[15] Warranty parts are an expense, not a cost of sales');
+{
+  const db = seed();
+  await receive({ MaintenanceType: 'warranty' });
+  await issue({ TicketID: 1, ItemID: 1, Quantity: 2, SalePrice: 250 });
+  await deliver({ TicketID: 1, LaborCost: 0, PaidAmount: 0 });
+  const pl = await call('reports:profitLoss', {});
+  // A warranty repair earns nothing, so charging its parts to cost of sales
+  // would understate gross margin on the sales that DID earn something.
+  t('the parts given away are charged as a warranty expense',
+    Math.abs((pl.expenses?.warrantyParts ?? pl.warrantyExpense ?? 0) - 200) < 0.011,
+    'warranty expense ' + (pl.expenses?.warrantyParts ?? pl.warrantyExpense));
+  t('they are NOT also charged to cost of sales',
+    Math.abs(pl.costs.parts) < 0.011, 'costs.parts ' + pl.costs.parts);
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

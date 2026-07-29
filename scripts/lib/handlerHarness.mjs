@@ -184,6 +184,10 @@ export async function loadHandlers() {
     // Statements are a THIRD view of the same documents (after the ledger and
     // the reports). Loading them lets a test demand that all three agree.
     'src/main/ipc/statement.handlers.ts',
+    // Maintenance shares stock and the customer ledger with trading, and it
+    // writes a mirror invoice into `sales`, so it must be exercised against the
+    // SAME books as everything else rather than in isolation.
+    'src/main/ipc/maintenance.handlers.ts',
   ];
   const loaded = [];
   for (const rel of mods) {

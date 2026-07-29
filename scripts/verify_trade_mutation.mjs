@@ -37,6 +37,7 @@ const ROOT = join(HERE, '..');
 const SALES = join(ROOT, 'src/main/ipc/sales.handlers.ts');
 const PURCHASES = join(ROOT, 'src/main/ipc/purchases.handlers.ts');
 const STOCK = join(ROOT, 'src/main/database/stock.ts');
+const MAINT = join(ROOT, 'src/main/ipc/maintenance.handlers.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -51,6 +52,7 @@ const SUITES = [
   'scripts/verify_trade_behaviour.mjs',
   'scripts/verify_trade_ledger_model.mjs',
   'scripts/verify_trade_reports_agree.mjs',
+  'scripts/verify_maintenance.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -93,6 +95,41 @@ const MUTANTS = [
     find: '    : unitCost;',
     replace: '    : (row.CostPrice || 0);',
     why: 're-values stock on every return',
+  },
+  {
+    name: 'a repair does not take its parts out of stock',
+    file: MAINT,
+    find: 'deductStock(db, data.ItemID, data.WarehouseID, data.Quantity);',
+    replace: '/* mutant */;',
+    why: 'parts consumed by repairs would stay on the shelf for ever',
+  },
+  {
+    name: 'the same repair can be delivered twice',
+    file: MAINT,
+    find: "if (ticket.Status === 'delivered') {",
+    replace: 'if (false) {',
+    why: 'takes the customer\'s money twice and issues two invoices',
+  },
+  {
+    name: 'returning a repair leaves the debt on the customer',
+    file: MAINT,
+    find: 'const owedOnDelivery = Math.max(0, delivery.RemainingAmount || 0);',
+    replace: 'const owedOnDelivery = 0;',
+    why: 'the customer keeps owing for a repair that was undone',
+  },
+  {
+    name: 'removing a part leaves its price on the ticket',
+    file: MAINT,
+    find: 'const chargedBack = (part.SalePrice ? part.SalePrice * part.Quantity : part.TotalCost) || 0;',
+    replace: 'const chargedBack = part.TotalCost || 0;',
+    why: 'the customer is billed for a part that is no longer fitted',
+  },
+  {
+    name: 'a repair trusts the cost the caller claims',
+    file: MAINT,
+    find: 'const unitCost = (stockCost !== null && stockCost > 0)',
+    replace: 'const unitCost = (false)',
+    why: 'the ticket is charged one figure while stock loses another',
   },
   {
     name: 'the cash refund cap is removed',

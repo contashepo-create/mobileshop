@@ -353,7 +353,18 @@ export function runMigrations(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS sale_details (
       DetailID        INTEGER PRIMARY KEY AUTOINCREMENT,
       SaleID          INTEGER NOT NULL,
-      ItemID          INTEGER NOT NULL,
+      -- NULLable on purpose: a service line has no stock item.
+      --
+      -- Labour, a software charge and any additional cost are all written to
+      -- `sale_details` with ItemID NULL. Declaring it NOT NULL here meant that
+      -- on a FRESH installation the constraint bit immediately: delivering any
+      -- repair that carried labour threw "NOT NULL constraint failed" and the
+      -- whole delivery rolled back. Only databases old enough to be migrated by
+      -- `rebuildSaleDetailsIfNeeded` worked, and that function returns early on
+      -- a new database precisely because it assumes this table is already
+      -- correct — so every new customer had a maintenance screen that could not
+      -- complete a repair.
+      ItemID          INTEGER,
       SerialID        INTEGER,
       IMEI            TEXT,
       Quantity        REAL DEFAULT 1,

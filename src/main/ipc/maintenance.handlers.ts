@@ -232,8 +232,19 @@ export function registerMaintenanceHandlers() {
 
       restoreStock(db, part.ItemID, part.WarehouseID, part.Quantity, part.UnitCost || 0);
 
+      // `TotalCost` is what the CUSTOMER is charged, `PartsCost` is what the
+      // part cost the shop. Issuing a part adds the SALE value to TotalCost and
+      // the COST value to PartsCost, so removing it has to take those same two
+      // figures back out.
+      //
+      // Both were previously reversed with `part.TotalCost`, which is the cost.
+      // A part costing 200 and sold at 500 therefore left 300 behind on the
+      // ticket every time it was removed — money charged to a customer for a
+      // part that is no longer on the repair, and which nothing else ever
+      // cleared.
+      const chargedBack = (part.SalePrice ? part.SalePrice * part.Quantity : part.TotalCost) || 0;
       db.prepare('UPDATE maintenance_tickets SET PartsCost = MAX(0, PartsCost - ?), TotalCost = MAX(0, TotalCost - ?) WHERE TicketID = ?')
-        .run(part.TotalCost, part.TotalCost, ticketId);
+        .run(part.TotalCost, chargedBack, ticketId);
     })();
     return { success: true };
   });
@@ -365,6 +376,25 @@ export function registerMaintenanceHandlers() {
 
     const ticket = db.prepare('SELECT * FROM maintenance_tickets WHERE TicketID = ?').get(data.TicketID) as any;
     if (!ticket) return { success: false, message: 'التذكرة غير موجودة' };
+
+    // A ticket can only be handed over ONCE.
+    //
+    // Nothing checked the status, so calling this twice produced a second
+    // delivery record, a second invoice, a second technician commission — and
+    // banked the customer's payment again. The screen normally moves on after
+    // the first delivery, but a double-click, a retry after a slow save, or any
+    // direct call to the channel took the money twice, and the only trace was
+    // two invoices the customer never received.
+    if (ticket.Status === 'delivered') {
+      return { success: false, message: 'تم تسليم هذه التذكرة بالفعل - لا يمكن تسليمها مرة أخرى' };
+    }
+    if (ticket.Status === 'cancelled') {
+      return { success: false, message: 'التذكرة ملغاة - لا يمكن تسليمها' };
+    }
+    if (ticket.Status === 'returned') {
+      return { success: false, message: 'التذكرة مرتجعة - لا يمكن تسليمها مرة أخرى' };
+    }
+
     const partsCost = ticket.PartsCost || 0;
     const additionalTotal = data.AdditionalCosts.reduce((sum, a) => sum + a.Amount, 0);
 
@@ -649,9 +679,35 @@ export function registerMaintenanceHandlers() {
         db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(data.TotalRefund, delivery.PaymentMethodID);
       }
 
-      // Reverse customer balance
+      // Reverse the customer balance by what the DELIVERY put there, not by the
+      // refund.
+      //
+      // The delivery adds only the UNPAID part of the bill to the customer's
+      // account; the paid part went into the drawer. Subtracting the whole
+      // refund here therefore removed money the customer never owed: a repair
+      // charged 350 and paid in full left the balance at -350, so the shop
+      // appeared to owe the customer 350 while also handing back the cash. The
+      // full round trip cost the shop 350 out of nowhere.
+      //
+      // The two legs are now reversed independently: the drawer gives back what
+      // it received (capped at the refund), and the account gives back only
+      // what it was charged.
+      // The debt the delivery created is cancelled IN FULL, independently of
+      // the cash refund. They are two different legs of the same reversal:
+      //
+      //   the drawer  gives back what the customer actually paid   (TotalRefund)
+      //   the account gives back what the customer was charged     (Remaining)
+      //
+      // Tying the account leg to the refund broke the commonest case of all —
+      // a repair collected later. Nothing was paid, so nothing was refunded, so
+      // nothing was cancelled, and the customer still owed 350 for a repair
+      // that had been undone and whose parts were back on the shelf.
       if (delivery?.CustomerID) {
-        db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(data.TotalRefund, delivery.CustomerID);
+        const owedOnDelivery = Math.max(0, delivery.RemainingAmount || 0);
+        if (owedOnDelivery > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?')
+            .run(owedOnDelivery, delivery.CustomerID);
+        }
       }
 
       db.prepare("UPDATE commissions SET IsPaid = 0, PaidAmount = 0 WHERE ReferenceType = 'maintenance_delivery' AND ReferenceID = ?").run(data.DeliveryID);

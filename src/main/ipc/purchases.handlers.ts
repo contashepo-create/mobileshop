@@ -231,6 +231,17 @@ export function registerPurchasesHandlers() {
         const totalItemCost = data.items.reduce((s, i) => s + (i.Quantity * i.UnitCost), 0);
         const overhead = additionalCost + paymentCost;
 
+        // A discount from the supplier REDUCES what the goods cost.
+        //
+        // The landed cost started from the list price and only ever added
+        // shipping, so an invoice-level discount was ignored: buying 10 cables
+        // at 100 with a 200 discount put 1,000 of stock on the shelf though only
+        // 800 was owed, inventing 200 of inventory value at the moment of
+        // purchase. Spread in proportion to line value, exactly as the invoice
+        // total was formed, and net of tax which is not part of the goods' cost
+        // to the shop when it is recoverable.
+        const discountShare = totalItemCost > 0 ? (data.Discount || 0) / totalItemCost : 0;
+
         for (const item of data.items) {
           const itemBaseCost = item.Quantity * item.UnitCost;
           // Distribute overhead proportionally by item cost
@@ -240,12 +251,14 @@ export function registerPurchasesHandlers() {
           } else if (data.items.length > 0) {
             allocatedOverhead = overhead / data.items.length * (item.Quantity / data.items.reduce((s, i) => s + i.Quantity, 0));
           }
+          // This line's share of the discount, per unit.
+          const discountPerUnit = item.UnitCost * discountShare;
           // Guard the division: a line with Quantity = 0 makes this Infinity in
           // JavaScript (no exception), and Infinity was then written straight
           // into stock_quantities.CostPrice, permanently destroying the
           // inventory valuation and every report derived from it.
           const effectiveUnitCost = item.Quantity > 0
-            ? item.UnitCost + (allocatedOverhead / item.Quantity)
+            ? (item.UnitCost - discountPerUnit) + (allocatedOverhead / item.Quantity)
             : item.UnitCost;
 
           db.prepare(`
@@ -383,6 +396,26 @@ export function registerPurchasesHandlers() {
       return { success: false, message: 'حدد الأصناف المرتجعة' };
     }
 
+    // The EFFECTIVE cost of a line: what the shop really owed per unit after
+    // that line's share of any invoice-level discount or tax.
+    //
+    // `purchase_details.UnitCost` is the price before those. Crediting at it
+    // returned more than was ever owed: 10 cables at 100 with a 200 discount
+    // is an 800 invoice, yet returning 8 units at the line cost credited the
+    // whole 800 and wiped the supplier's balance while 2 cables stayed on the
+    // shelf. The total guard did not catch it, because 800 does not exceed 800.
+    //
+    // Delivery charges (`AdditionalCost`) are deliberately EXCLUDED from the
+    // ratio: the supplier never credits the shop's own shipping, and that cost
+    // is already handled separately as unrecoverable freight.
+    const purHdr = db.prepare(
+      'SELECT Subtotal, TotalAmount, COALESCE(AdditionalCost,0) AS AdditionalCost, COALESCE(PaymentCost,0) AS PaymentCost FROM purchases WHERE PurchaseID = ?',
+    ).get(data.PurchaseID) as any;
+    const grossGoods = Number(purHdr?.Subtotal) || 0;
+    const netGoods = (Number(purHdr?.TotalAmount) || 0)
+      - (Number(purHdr?.AdditionalCost) || 0) - (Number(purHdr?.PaymentCost) || 0);
+    const costRatio = grossGoods > 0 ? netGoods / grossGoods : 1;
+
     // Aggregated per item for the same reason as the sale side: an invoice may
     // carry one item on several lines, while returns are recorded per item.
     const boughtLines = db.prepare(`
@@ -442,7 +475,9 @@ export function registerPurchasesHandlers() {
         EffectiveUnitCost: line.EffectiveUnitCost ?? line.UnitCost ?? 0,
         // The supplier credits what they charged, so the return is valued at the
         // invoice price — not the landed cost, which includes our own shipping.
-        UnitCost: line.UnitCost || 0,
+        // Credited at the EFFECTIVE cost, so the supplier is credited what the
+        // shop actually owed for these units and no more.
+        UnitCost: money((line.UnitCost || 0) * costRatio),
         WarehouseID: line.WarehouseID ?? null,
       });
     }
@@ -876,10 +911,11 @@ export function registerPurchasesHandlers() {
       if (invoiceOffset > 0) {
         db.prepare(`
           UPDATE purchases
-          SET RemainingAmount = ROUND(MAX(0, RemainingAmount - ?), 2),
-              Status = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) <= 0 THEN 'completed' ELSE Status END
+          SET RemainingAmount = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) < 0.01 THEN 0
+                                         ELSE ROUND(MAX(0, RemainingAmount - ?), 2) END,
+              Status = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) < 0.01 THEN 'completed' ELSE Status END
           WHERE PurchaseID = ?
-        `).run(invoiceOffset, invoiceOffset, data.PurchaseID);
+        `).run(invoiceOffset, invoiceOffset, invoiceOffset, data.PurchaseID);
       }
       // Stored so cancelling this return restores exactly this much and no
       // more. The reversal used to add back the full credit, which inflated an
@@ -947,11 +983,23 @@ export function registerPurchasesHandlers() {
       WHERE pd.PurchaseID = ?
     `).all(purchaseId) as any[];
 
+    // Offer the EFFECTIVE cost, the same figure the validator will use, so the
+    // screen never proposes a credit larger than the shop actually owed.
+    const hdr = db.prepare(
+      'SELECT Subtotal, TotalAmount, COALESCE(AdditionalCost,0) AS AdditionalCost, COALESCE(PaymentCost,0) AS PaymentCost FROM purchases WHERE PurchaseID = ?',
+    ).get(purchaseId) as any;
+    const grossGoods = Number(hdr?.Subtotal) || 0;
+    const netGoods = (Number(hdr?.TotalAmount) || 0)
+      - (Number(hdr?.AdditionalCost) || 0) - (Number(hdr?.PaymentCost) || 0);
+    const ratio = grossGoods > 0 ? netGoods / grossGoods : 1;
+
     return lines.map(l => {
       const notYetReturned = Math.max(0, (l.Quantity || 0) - (l.AlreadyReturned || 0));
       const inStock = l.WarehouseID ? warehouseStock(db, l.ItemID, l.WarehouseID) : 0;
       return {
         ...l,
+        UnitCost: money((l.UnitCost || 0) * ratio),
+        GrossUnitCost: l.UnitCost,
         InStock: inStock,
         NotYetReturned: notYetReturned,
         Returnable: Math.min(notYetReturned, Math.max(0, inStock)),

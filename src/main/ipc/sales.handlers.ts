@@ -221,10 +221,19 @@ export function registerSalesHandlers() {
         }
       }
 
-      const subtotal = data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitPrice), 0);
-      const totalAmount = subtotal - data.Discount + data.TaxAmount;
-      const paidAmount = data.PaidAmount || 0;
-      const remaining = totalAmount - paidAmount; // positive = customer owes, negative = customer overpaid (credit)
+      const subtotal = money(data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitPrice), 0));
+      const totalAmount = money(subtotal - data.Discount + data.TaxAmount);
+      const paidAmount = money(data.PaidAmount || 0);
+      // Rounded, and a residue under one piastre is treated as settled.
+      //
+      // Money is kept to two decimals, so a balance of 0.00999999... is not a
+      // debt — nobody can pay it and no report can show it. Left raw it stuck
+      // the invoice on "partial" for ever: the customer appeared to owe a
+      // hundredth of a piastre that could never be cleared. It arises whenever
+      // a total divides unevenly, which a discount spread across lines does
+      // routinely.
+      const rawRemaining = money(totalAmount - paidAmount);
+      const remaining = Math.abs(rawRemaining) < 0.01 ? 0 : rawRemaining;
 
       const dateStr = businessToday();
       const saleNumber = nextDocNumber(db, 'sales', 'SaleNumber', 'SAL', dateStr);
@@ -501,6 +510,27 @@ export function registerSalesHandlers() {
     // and with the rows ordered the other way it allowed more back than went
     // out. Summing the sold side the same way the returned side is summed
     // makes the two comparable.
+    // A line's EFFECTIVE price: what the customer really paid for one unit,
+    // after that line's share of any invoice-level discount and tax.
+    //
+    // `sale_details.UnitPrice` is the price before those. Refunding at it
+    // handed back more than was ever received: an invoice of 10 cables at 100
+    // with a 200 discount is paid at 800, but returning 8 units at the line
+    // price refunded the whole 800 while the customer kept 2 cables. The
+    // total-value guard did not catch it, because 800 does not exceed 800 —
+    // only a FULL return would have tripped it.
+    //
+    // The ratio is TotalAmount / Subtotal, which spreads the discount and the
+    // tax across the lines in proportion to their value, exactly as the invoice
+    // total was formed. Guarded against a zero subtotal (a fully discounted
+    // giveaway), where the ratio is meaningless and nothing is refundable.
+    const inv = db.prepare(
+      'SELECT Subtotal, TotalAmount FROM sales WHERE SaleID = ?',
+    ).get(data.SaleID) as any;
+    const grossSubtotal = Number(inv?.Subtotal) || 0;
+    const netTotal = Number(inv?.TotalAmount) || 0;
+    const priceRatio = grossSubtotal > 0 ? netTotal / grossSubtotal : 1;
+
     const soldLines = db.prepare(`
       SELECT sd.ItemID,
              MIN(sd.SerialID) AS SerialID,
@@ -562,7 +592,9 @@ export function registerSalesHandlers() {
         SerialID: req.SerialID ?? line.SerialID ?? null,
         Quantity: qty,
         // Authoritative price and cost, straight from the invoice.
-        UnitPrice: line.UnitPrice || 0,
+        // Refunded at the EFFECTIVE price, so the customer gets back what they
+        // actually paid for these units and no more.
+        UnitPrice: money((line.UnitPrice || 0) * priceRatio),
         UnitCost: line.UnitCost ?? 0,
         WarehouseID: line.WarehouseID ?? null,
       });
@@ -758,14 +790,36 @@ export function registerSalesHandlers() {
         // outstanding amount reduces it. Credit beyond that is a balance the
         // customer carries forward, not a change to this invoice — writing it
         // here would drive RemainingAmount below zero and misreport the status.
-        const invoiceOffset = money(Math.min(debtRelief, outstanding));
+        // When the LAST outstanding units come back, clear the remainder.
+        //
+        // Rounded per-unit shares of a total do not add back to the total: an
+        // invoice of 55.00 over 3 units is 18.3333 each, stored as 18.33, so
+        // returning all three credits 54.99 and leaves the invoice owing 0.01
+        // for ever — a debt too small to pay and impossible to clear, which
+        // pinned the invoice on "partial" permanently.
+        //
+        // The tail is only absorbed when nothing is left to return, so a
+        // genuine partial return is unaffected.
+        const stillOut = (db.prepare(`
+          SELECT COALESCE(SUM(sd.Quantity),0) - COALESCE((
+                   SELECT SUM(rd.Quantity) FROM sale_return_details rd
+                   JOIN sale_returns r ON rd.ReturnID = r.ReturnID
+                   WHERE r.SaleID = ?
+                 ),0) AS q
+          FROM sale_details sd WHERE sd.SaleID = ?
+        `).get(data.SaleID, data.SaleID) as any)?.q ?? 0;
+        const clearsInvoice = stillOut <= 0.001;
+        const invoiceOffset = clearsInvoice && debtRelief > 0
+          ? money(outstanding)
+          : money(Math.min(debtRelief, outstanding));
         if (invoiceOffset > 0) {
           db.prepare(`
             UPDATE sales
-            SET RemainingAmount = ROUND(MAX(0, RemainingAmount - ?), 2),
-                Status = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) <= 0 THEN 'completed' ELSE Status END
+            SET RemainingAmount = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) < 0.01 THEN 0
+                                           ELSE ROUND(MAX(0, RemainingAmount - ?), 2) END,
+                Status = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) < 0.01 THEN 'completed' ELSE Status END
             WHERE SaleID = ?
-          `).run(invoiceOffset, invoiceOffset, data.SaleID);
+          `).run(invoiceOffset, invoiceOffset, invoiceOffset, data.SaleID);
         }
         // Recorded so cancelling this return puts back exactly this figure.
         // The reversal used to recompute it from the invoice as it stands
@@ -889,9 +943,12 @@ export function registerSalesHandlers() {
         "SELECT Value FROM settings WHERE Key = 'allow_negative_stock'",
       ).get() as any)?.Value === '1';
 
-      const subtotal = rawSubtotal;
-      const totalAmount = subtotal - discountIn + taxIn;
-      const remaining = totalAmount - paidIn;
+      // Same rounding rule as `sales:create`: money is two decimals, and a
+      // residue under one piastre is settled, not owed.
+      const subtotal = money(rawSubtotal);
+      const totalAmount = money(subtotal - discountIn + taxIn);
+      const rawRemaining = money(totalAmount - paidIn);
+      const remaining = Math.abs(rawRemaining) < 0.01 ? 0 : rawRemaining;
       const status = remaining > 0 ? (paidIn > 0 ? 'partial' : 'unpaid') : 'completed';
 
       if (!data.CustomerID && remaining !== 0) {
@@ -1119,8 +1176,19 @@ export function registerSalesHandlers() {
       GROUP BY sd.ItemID, sd.SerialID
     `).all(saleId) as any[];
 
+    // The screen must offer the EFFECTIVE price — the same figure the validator
+    // will use — or the cashier is shown a refund the server then refuses, or
+    // worse, one that is larger than the customer ever paid. Mirrors the ratio
+    // applied in `saleReturns:create`.
+    const hdr = db.prepare('SELECT Subtotal, TotalAmount FROM sales WHERE SaleID = ?').get(saleId) as any;
+    const gross = Number(hdr?.Subtotal) || 0;
+    const ratio = gross > 0 ? (Number(hdr?.TotalAmount) || 0) / gross : 1;
+
     return lines.map(l => ({
       ...l,
+      UnitPrice: money((l.UnitPrice || 0) * ratio),
+      // Kept so the screen can show "was 100, after discount 80" if it wants.
+      GrossUnitPrice: l.UnitPrice,
       // Service lines carry no ItemID and cannot be restocked, but their value
       // is still refundable, so they are returned as-is with a flag.
       IsService: l.ItemID == null,

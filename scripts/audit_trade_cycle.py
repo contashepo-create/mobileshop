@@ -63,10 +63,19 @@ report('claimedInThisPayload' in SR_CREATE and 'claimedInThisPayload' in PR_CREA
 
 # ---------------------------------------------------------------- 2
 print('\n[2] SECURITY — a return cannot invent prices')
-report('UnitPrice: line.UnitPrice || 0' in SR_CREATE,
+# Matched on the SOURCE of the figure, not on one exact expression.
+#
+# Pinning `UnitPrice: line.UnitPrice || 0` broke the moment the price became
+# `line.UnitPrice * priceRatio` — the invoice's discount spread across its
+# lines, which was a genuine fix. What must remain true is that the figure
+# comes from `line` (the stored document) and never from `req` (the caller).
+# `verify_trade_hostile.mjs` proves the behaviour end to end.
+report('UnitPrice: money((line.UnitPrice || 0)' in SR_CREATE
+       and 'UnitPrice: req.UnitPrice' not in SR_CREATE,
        'sale return values goods at the invoice price, not the caller\'s',
        '"return 1 cable @1000" on a cable sold at 20 passed the total guard')
-report('UnitCost: line.UnitCost || 0' in PR_CREATE,
+report('UnitCost: money((line.UnitCost || 0)' in PR_CREATE
+       and 'UnitCost: req.UnitCost' not in PR_CREATE,
        'purchase return values goods at the purchase price',
        'returning 10 cables bought at 10 as "@100" cleared 1000 of supplier\n'
        'debt for 100 of goods')

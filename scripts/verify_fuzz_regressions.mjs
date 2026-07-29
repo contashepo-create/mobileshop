@@ -529,5 +529,110 @@ t('the 50 of lost freight is charged exactly once',
 t('the balance sheet still balances after a freight write-off',
   Math.abs(fp31.capital.difference) < 0.011, 'difference ' + fp31.capital.difference);
 
+// ===================================================================
+// Round 5 — DISCOUNTS. A discounted invoice is paid at less than the sum of
+// its lines, so a return must refund the discounted price, not the list price.
+// ===================================================================
+
+function seedDisc() {
+  const db = buildDatabase();
+  db.exec("INSERT INTO roles(RoleID,RoleName,IsSystem) VALUES(1,'a',1)");
+  db.exec("INSERT INTO users(UserID,Username,PasswordHash,RoleID,IsActive) VALUES(1,'a','x',1,1)");
+  db.exec("INSERT INTO fiscal_years(FiscalYearID,YearName,StartDate,EndDate,Status) VALUES(1,'26','2026-01-01','2026-12-31','open')");
+  db.exec("INSERT INTO warehouses(WarehouseID,WarehouseName) VALUES(1,'Main')");
+  db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'S','safe',100000,1)");
+  db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'A',0,'active')");
+  db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'S',0,'active')");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'Cable','part',0,10,20,1)");
+  db.exec("INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,100,10)");
+  return db;
+}
+
+// 32 A partial return on a discounted invoice refunds the discounted price.
+//    10 cables at 100 with a 200 discount is paid at 800, i.e. 80 a unit.
+//    Returning 8 used to hand back the whole 800 while the customer kept 2.
+seedDisc();
+await call('sales:create', { CustomerID: 1,
+  items: [{ ItemID: 1, Quantity: 10, UnitPrice: 100 }],
+  Discount: 200, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash',
+  PaidAmount: 800, CashAccountID: 1, fiscalYearId: 1 });
+const sidD = q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v;
+const offer = (await call('saleReturns:returnable', sidD))[0];
+t('the screen offers the discounted price, not the list price',
+  Math.abs(offer.UnitPrice - 80) < 0.011, `offered ${offer.UnitPrice}, expected 80`);
+
+const cashBeforeD = q('SELECT Balance v FROM cash_accounts').v;
+let refunded = 0;
+for (let i = 0; i < 8; i++) {
+  const o = (await call('saleReturns:returnable', sidD))[0];
+  const rr = await call('saleReturns:create', { SaleID: sidD,
+    items: [{ ItemID: 1, Quantity: 1, UnitPrice: o.UnitPrice }],
+    AccountCredit: 0, CashRefund: o.UnitPrice, CashAccountID: 1 });
+  if (rr?.success) refunded += o.UnitPrice;
+}
+t('returning 8 of 10 refunds 640, not the whole 800',
+  Math.abs(refunded - 640) < 0.011, `refunded ${refunded}`);
+t('the drawer fell by exactly that',
+  Math.abs((cashBeforeD - q('SELECT Balance v FROM cash_accounts').v) - 640) < 0.011,
+  `drawer moved ${cashBeforeD - q('SELECT Balance v FROM cash_accounts').v}`);
+t('refunding the LIST price is refused',
+  (await call('saleReturns:create', { SaleID: sidD,
+    items: [{ ItemID: 1, Quantity: 1, UnitPrice: 100 }],
+    AccountCredit: 0, CashRefund: 100, CashAccountID: 1 }))?.success === false);
+
+// 33 The same on the purchase side, and the discount must reduce stock value.
+seedDisc();
+currentDb().exec('DELETE FROM stock_quantities');
+await call('purchases:create', { SupplierID: 1,
+  items: [{ ItemID: 1, Quantity: 10, UnitCost: 100, WarehouseID: 1 }],
+  Discount: 200, TaxAmount: 0, PaidAmount: 0,
+  AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
+t('a purchase discount reduces the value put into stock',
+  Math.abs(q('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities').v - 800) < 0.011,
+  `stock valued ${q('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities').v}, invoice was 800`);
+
+const pidD = q('SELECT PurchaseID v FROM purchases ORDER BY PurchaseID DESC LIMIT 1').v;
+const offerP = (await call('purchaseReturns:returnable', pidD))[0];
+t('the debit-note screen offers the discounted cost',
+  Math.abs(offerP.UnitCost - 80) < 0.011, `offered ${offerP.UnitCost}, expected 80`);
+
+let credited = 0;
+for (let i = 0; i < 8; i++) {
+  const o = (await call('purchaseReturns:returnable', pidD))[0];
+  const rr = await call('purchaseReturns:create', { PurchaseID: pidD,
+    items: [{ ItemID: 1, Quantity: 1, UnitCost: o.UnitCost }],
+    AccountCredit: o.UnitCost, CashRefund: 0 });
+  if (rr?.success) credited += o.UnitCost;
+}
+t('returning 8 of 10 credits 640, not the whole 800',
+  Math.abs(credited - 640) < 0.011, `credited ${credited}`);
+t('the supplier is still owed 160 for the two kept',
+  Math.abs(q('SELECT Balance v FROM suppliers').v - 160) < 0.011,
+  `supplier owed ${q('SELECT Balance v FROM suppliers').v}`);
+t('the two units left are worth 160',
+  Math.abs(q('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities').v - 160) < 0.011,
+  `stock worth ${q('SELECT COALESCE(SUM(Quantity*CostPrice),0) v FROM stock_quantities').v}`);
+
+// 34 A total that divides unevenly must not strand a sub-piastre debt.
+//    55.00 over 3 units is 18.3333 each; rounded shares give 54.99 and the
+//    invoice stayed "partial" for ever, owing a hundredth of a piastre.
+seedDisc();
+await call('sales:create', { CustomerID: 1,
+  items: [{ ItemID: 1, Quantity: 1, UnitPrice: 21 }, { ItemID: 1, Quantity: 2, UnitPrice: 17 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'credit',
+  PaidAmount: 0, fiscalYearId: 1 });
+const sidR = q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v;
+for (let i = 0; i < 3; i++) {
+  const o = (await call('saleReturns:returnable', sidR))[0];
+  if (!o || o.Returnable <= 0) break;
+  await call('saleReturns:create', { SaleID: sidR,
+    items: [{ ItemID: 1, Quantity: 1, UnitPrice: o.UnitPrice }],
+    AccountCredit: o.UnitPrice, CashRefund: 0 });
+}
+const hdrR = q('SELECT RemainingAmount rem, Status st FROM sales WHERE SaleID = ?', sidR);
+t('returning every unit leaves no stranded piastre',
+  Math.abs(hdrR.rem) < 0.011 && hdrR.st === 'completed',
+  `remaining ${hdrR.rem}, status ${hdrR.st}`);
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

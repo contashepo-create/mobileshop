@@ -207,8 +207,15 @@ report('settlement.transferOutflow' in sal,
        'the sale refund removes the fee-inclusive amount from the wallet')
 report('settlement.transferReceived' in pur,
        'the purchase refund adds the net amount actually received')
-report('const invoiceOffset = money(Math.min(debtRelief, outstanding));' in sal
-       and 'const invoiceOffset = money(Math.min(debtRelief, outstanding));' in pur,
+# Matched on the CLAMP, not on one exact line.
+#
+# The sale side now also clears a sub-piastre tail when the final outstanding
+# units come back — rounded per-unit shares of a total never add back to the
+# total, and the residue pinned an invoice on "partial" for ever. The rule this
+# guards (credit beyond what THIS invoice owes does not touch it) is unchanged
+# and is what the clamp expresses.
+report('money(Math.min(debtRelief, outstanding))' in sal
+       and 'money(Math.min(debtRelief, outstanding))' in pur,
        'only credit that offsets THIS invoice changes its outstanding amount',
        'credit beyond it is carried on the account, not written to the invoice')
 

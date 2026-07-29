@@ -200,7 +200,15 @@ report(missing == 0,
 
 # ---------------------------------------------------------------- 5
 print('\n[5] ACCOUNTING — returns cannot refund more than was taken')
-report('priorReturns + totalAmount > (originalSale.TotalAmount || 0) + 0.001' in SALES,
+# Matched on the COMPARISON, not on one exact spelling of it.
+#
+# The guard now reads `priorReturns + totalAmount > invoiceTotal + 0.001`,
+# because a rounding remainder on the final return is trimmed just above it
+# rather than refused — otherwise the last unit of a discounted invoice could
+# never be returned. Pinning the old wording failed on a correct refactor.
+# The behaviour itself is covered by verify_fuzz_regressions.mjs
+# ("a genuine over-refund is still refused").
+report('priorReturns + totalAmount > invoiceTotal + 0.001' in SALES,
        'repeated partial returns cannot exceed the invoice total')
 report('suggestSettlement(' in SALES and 'validateSettlement({' in SALES,
        'the refund split is chosen by the user and validated server-side',

@@ -716,5 +716,58 @@ const abuse = await call('saleReturns:create',
     AccountCredit: 0, CashRefund: 50, CashAccountID: 1 });
 t('a zero-value return cannot pay out cash', abuse.success === false, abuse.message);
 
+// ===================================================================
+// Round 7 — the last unit of a discounted invoice could not be returned.
+//
+// The returnable list prices each unit at the line price scaled by the
+// invoice's discount ratio, and that quotient rarely lands on a whole piastre.
+// Three units of 100 on an invoice discounted by 0.01 are 99.996666... each,
+// which rounds to 100.00. Two returns of 100.00 were accepted; the third was
+// refused for exceeding 299.99 by ONE piastre.
+//
+// The customer was left owing 99.99 for goods already back on the shelf, and no
+// document could close the invoice.
+// ===================================================================
+seed();
+currentDb().exec('DELETE FROM stock_quantities');
+currentDb().exec('INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,1000,10)');
+await call('sales:create', { CustomerID: 1, items: [{ ItemID: 1, Quantity: 3, UnitPrice: 100 }],
+  Discount: 0.01, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'credit', PaidAmount: 0, fiscalYearId: 1 });
+const sidRound = q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v;
+let accepted = 0;
+for (let i = 0; i < 3; i++) {
+  const line = (await call('saleReturns:returnable', sidRound)).find(x => x.Returnable > 0);
+  if (!line) break;
+  const amt = Math.round(line.UnitPrice * 100) / 100;
+  const rr = await call('saleReturns:create', { SaleID: sidRound,
+    items: [{ ItemID: 1, Quantity: 1, UnitPrice: line.UnitPrice }],
+    AccountCredit: amt, CashRefund: 0 });
+  if (rr.success) accepted++;
+}
+t('every unit of a discounted invoice can be returned one at a time',
+  accepted === 3, `${accepted} of 3 accepted`);
+const hdrRound = q('SELECT ROUND(RemainingAmount,2) rem, ROUND(TotalAmount,2) tot FROM sales WHERE SaleID=?', sidRound);
+const retRound = q('SELECT ROUND(COALESCE(SUM(TotalAmount),0),2) v FROM sale_returns WHERE SaleID=?', sidRound).v;
+t('the returns sum to exactly the amount charged',
+  Math.abs(retRound - hdrRound.tot) < 0.011, `returned ${retRound} vs charged ${hdrRound.tot}`);
+t('the invoice closes at zero, not at a stray piastre',
+  Math.abs(hdrRound.rem) < 0.011, 'remaining ' + hdrRound.rem);
+t('the customer owes nothing once everything is back',
+  Math.abs(q('SELECT ROUND(Balance,2) v FROM customers WHERE CustomerID=1').v) < 0.011,
+  'balance ' + q('SELECT ROUND(Balance,2) v FROM customers WHERE CustomerID=1').v);
+
+// The trim must not become a way to over-refund.
+seed();
+currentDb().exec('DELETE FROM stock_quantities');
+currentDb().exec('INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,1000,10)');
+await call('sales:create', { CustomerID: 1, items: [{ ItemID: 1, Quantity: 2, UnitPrice: 100 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 200,
+  CashAccountID: 1, fiscalYearId: 1 });
+const bigOver = await call('saleReturns:create',
+  { SaleID: q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v,
+    items: [{ ItemID: 1, Quantity: 2, UnitPrice: 100 }],
+    AccountCredit: 0, CashRefund: 500, CashAccountID: 1 });
+t('a genuine over-refund is still refused', bigOver.success === false, bigOver.message);
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

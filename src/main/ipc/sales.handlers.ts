@@ -600,7 +600,7 @@ export function registerSalesHandlers() {
       });
     }
 
-    const totalAmount = money(verified.reduce((sum, l) => sum + (l.Quantity * l.UnitPrice), 0));
+    let totalAmount = money(verified.reduce((sum, l) => sum + (l.Quantity * l.UnitPrice), 0));
     const returnNumber = nextDocNumber(db, 'sale_returns', 'ReturnNumber', 'SR', dateStr);
 
     const originalSale = db.prepare(
@@ -639,7 +639,30 @@ export function registerSalesHandlers() {
       'SELECT COALESCE(SUM(TotalAmount),0) as total FROM sale_returns WHERE SaleID = ?'
     ).get(data.SaleID) as any)?.total || 0;
 
-    if (priorReturns + totalAmount > (originalSale.TotalAmount || 0) + 0.001) {
+    // A rounding remainder on the LAST return is absorbed, not refused.
+    //
+    // The per-unit price is the line price scaled by the invoice's discount
+    // ratio, and that quotient rarely lands on a whole piastre: 3 units of 100
+    // on an invoice discounted by 0.01 come to 99.996666... each, which rounds
+    // to 100.00. Two returns of 100.00 were accepted and the THIRD was refused
+    // for exceeding 299.99 by a single piastre — so the final unit of a fully
+    // returned invoice could never be sent back, and the customer was left
+    // owing 99.99 for goods sitting on the shelf.
+    //
+    // When the overshoot is smaller than the number of units being returned it
+    // can only be rounding (each unit can contribute at most half a piastre),
+    // so the return is trimmed to exactly what is left on the invoice. A real
+    // over-return — asking for more value than the invoice ever had — is still
+    // refused below.
+    const invoiceTotal = originalSale.TotalAmount || 0;
+    const headroom = money(invoiceTotal - priorReturns);
+    const overshoot = money(priorReturns + totalAmount - invoiceTotal);
+    const unitsReturned = verified.reduce((n, l) => n + (Number(l.Quantity) || 0), 0);
+    if (overshoot > 0.001 && overshoot <= money(0.01 * unitsReturned) && headroom >= 0) {
+      totalAmount = headroom;
+    }
+
+    if (priorReturns + totalAmount > invoiceTotal + 0.001) {
       return {
         success: false,
         message: `قيمة المرتجع تتجاوز قيمة الفاتورة: إجمالي الفاتورة ${(originalSale.TotalAmount || 0).toFixed(2)}، مرتجع سابق ${priorReturns.toFixed(2)}، المطلوب ${totalAmount.toFixed(2)}`,
@@ -659,13 +682,26 @@ export function registerSalesHandlers() {
     // A walk-in customer has no account, so nothing may be left on one.
     const hasAccount = !!originalSale.CustomerID;
     const explicit = data.AccountCredit != null || data.CashRefund != null || data.TransferRefund != null;
-    const proposed = explicit
+    let proposed = explicit
       ? {
           accountCredit: data.AccountCredit ?? 0,
           cashRefund: data.CashRefund ?? 0,
           transferRefund: data.TransferRefund ?? 0,
         }
       : suggestSettlement(totalAmount, Math.max(0, outstanding - priorReturns), hasAccount);
+
+    // If the value was trimmed just above, the caller's split still adds up to
+    // the untrimmed figure and would now be rejected as over-allocated. The
+    // screen was showing the same rounded price the server offered, so the
+    // difference is the shop's own rounding, not a mistake by the cashier.
+    // The largest component absorbs it, which keeps the split's shape.
+    const proposedSum = money((proposed.accountCredit || 0) + (proposed.cashRefund || 0) + (proposed.transferRefund || 0));
+    const trim = money(proposedSum - totalAmount);
+    if (trim > 0 && trim <= money(0.01 * unitsReturned)) {
+      const biggest = (['accountCredit', 'cashRefund', 'transferRefund'] as const)
+        .reduce((a, b) => ((proposed[b] || 0) > (proposed[a] || 0) ? b : a), 'accountCredit' as const);
+      proposed = { ...proposed, [biggest]: money((proposed[biggest] || 0) - trim) };
+    }
 
     const settlement = validateSettlement({
       total: totalAmount,
@@ -815,9 +851,9 @@ export function registerSalesHandlers() {
         if (invoiceOffset > 0) {
           db.prepare(`
             UPDATE sales
-            SET RemainingAmount = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) < 0.01 THEN 0
+            SET RemainingAmount = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) < 0.015 THEN 0
                                            ELSE ROUND(MAX(0, RemainingAmount - ?), 2) END,
-                Status = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) < 0.01 THEN 'completed' ELSE Status END
+                Status = CASE WHEN ROUND(MAX(0, RemainingAmount - ?), 2) < 0.015 THEN 'completed' ELSE Status END
             WHERE SaleID = ?
           `).run(invoiceOffset, invoiceOffset, invoiceOffset, data.SaleID);
         }

@@ -179,23 +179,34 @@ console.log('\n[6] BUG FIX: an expired snooze must actually expire');
 {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE dn (ID INTEGER PRIMARY KEY, NotifKey TEXT UNIQUE, SnoozedUntil TEXT)`);
-  const expired = new Date(Date.now() - 3600_000).toISOString();
-  const future = new Date(Date.now() + 3600_000).toISOString();
+  // Anchored to a FIXED point in the middle of a day, not to "now".
+  //
+  // Using the wall clock made this assertion fragile: within an hour of
+  // midnight UTC, "an hour ago" falls on the previous calendar DATE, and
+  // '2026-07-28T23:00Z' already sorts below '2026-07-29 00:00' whichever
+  // separator is used — so the old bug stopped reproducing and the test failed
+  // for a reason that had nothing to do with the code. The defect it
+  // demonstrates is about 'T' versus ' ' WITHIN one day, so both timestamps are
+  // pinned to the same day here.
+  const anchor = new Date('2026-07-15T12:00:00.000Z').getTime();
+  const expired = new Date(anchor - 3600_000).toISOString();
+  const future = new Date(anchor + 3600_000).toISOString();
   db.prepare('INSERT INTO dn (NotifKey, SnoozedUntil) VALUES (?,?)').run('expired', expired);
   db.prepare('INSERT INTO dn (NotifKey, SnoozedUntil) VALUES (?,?)').run('active', future);
 
   // The old comparison: ISO ('...T...Z') vs datetime('now') ('... ...').
   // 'T' (0x54) > ' ' (0x20), so every snooze looked like it was in the future.
+  const nowSpace = '2026-07-15 12:00:00';        // what datetime('now') looks like
+  const nowIso = '2026-07-15T12:00:00.000Z';     // what the fix compares against
   const oldWay = db.prepare(
-    `SELECT NotifKey FROM dn WHERE SnoozedUntil IS NULL OR SnoozedUntil > datetime('now')`,
-  ).all().map(r => r.NotifKey);
+    'SELECT NotifKey FROM dn WHERE SnoozedUntil IS NULL OR SnoozedUntil > ?',
+  ).all(nowSpace).map(r => r.NotifKey);
   check('the OLD comparison wrongly kept an expired snooze hidden',
     oldWay.includes('expired'), 'bug no longer reproducible');
 
   const newWay = db.prepare(
-    `SELECT NotifKey FROM dn WHERE SnoozedUntil IS NULL
-       OR SnoozedUntil > strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
-  ).all().map(r => r.NotifKey);
+    'SELECT NotifKey FROM dn WHERE SnoozedUntil IS NULL OR SnoozedUntil > ?',
+  ).all(nowIso).map(r => r.NotifKey);
   check('the fixed comparison releases the expired snooze', !newWay.includes('expired'));
   check('the fixed comparison still honours an active snooze', newWay.includes('active'));
 

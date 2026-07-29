@@ -50,7 +50,10 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     out = String(err.stdout || '') + String(err.message || '');
   }
 
-  if (out.includes('all 14 invariants held')) {
+  // Matched WITHOUT the count. Hardcoding "14" meant that adding a fifteenth
+  // invariant made every seed report as failed with no detail — the same
+  // brittleness this suite exists to catch.
+  if (/all \d+ invariants held/.test(out)) {
     passed++;
     continue;
   }

@@ -23,7 +23,11 @@
  *   node --experimental-strip-types scripts/fuzz_trade.mjs [iterations] [seed]
  */
 import { buildDatabase, loadHandlers, call, currentDb } from './lib/handlerHarness.mjs';
-import { checkAll } from './lib/invariants.mjs';
+import { checkAll, balanceSheetBalances, ALL as INVARIANTS } from './lib/invariants.mjs';
+
+// Counted rather than hardcoded: the summary line used to claim "14" no matter
+// how many there really were, so adding one silently produced a false report.
+const INVARIANT_COUNT = Object.keys(INVARIANTS).length + 1;   // +1 = balance sheet
 
 /**
  * Net worth measured directly from the balances, with no assumptions.
@@ -107,6 +111,12 @@ function seed() {
                  (3,'iPhone','device',1,600,1000,1)`);
   db.exec(`INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice)
            VALUES(1,1,100,10),(2,1,20,600)`);
+  // The opening cash, wallet and stock came from somewhere: the owner put them
+  // in. Recording that as capital is what a real shop does, and it is what
+  // makes Assets = Liabilities + Equity true from the very first step. Without
+  // it the balance sheet is short by exactly the opening position.
+  db.exec(`INSERT OR REPLACE INTO settings(Key,Value)
+           VALUES('owner_capital','${OPENING_NET_WORTH}')`);
   return db;
 }
 
@@ -367,8 +377,8 @@ await loadHandlers();
 console.log('='.repeat(74));
 console.log(`RANDOMISED TRADE FUZZING — ${ITERATIONS} operations, seed ${SEED}`);
 console.log('='.repeat(74));
-console.log('Invariants are checked after EVERY operation, so a breach is caught');
-console.log('at the exact step that caused it, not at the end of the run.\n');
+console.log(`${INVARIANT_COUNT} invariants are checked after EVERY operation, so a breach is`);
+console.log('caught at the exact step that caused it, not at the end of the run.\n');
 
 seed();
 
@@ -462,6 +472,11 @@ for (let i = 1; i <= ITERATIONS; i++) {
   writeOffsBefore = writeOffsAfter;
 
   const breaches = checkAll(currentDb(), OPENING_NET_WORTH);
+
+  // The balance sheet is checked through the real report, which is what the
+  // owner actually reads. It is async, so it sits outside `checkAll`.
+  const bsMsg = await balanceSheetBalances(currentDb(), call);
+  if (bsMsg) breaches.push({ name: 'balanceSheetBalances', msg: bsMsg });
   if (process.env.SERTRACE) {
     const d = currentDb();
     const q = d.prepare('SELECT COALESCE(SUM(Quantity),0) v FROM stock_quantities WHERE ItemID=3').get().v;
@@ -550,7 +565,7 @@ if (breachesFound.length === 0) {
               `${g('SELECT COUNT(*) v FROM purchases')} purchases, ` +
               `${g('SELECT COUNT(*) v FROM purchase_returns')} purchase returns`);
   console.log('\n' + '='.repeat(74));
-  console.log(`RESULT: ${performed} operations, all 14 invariants held throughout`);
+  console.log(`RESULT: ${performed} operations, all ${INVARIANT_COUNT} invariants held throughout`);
   console.log('='.repeat(74));
   process.exit(0);
 }

@@ -405,6 +405,41 @@ export function serialsMatchWarehouseStock(db) {
     : null;
 }
 
+/**
+ * The balance sheet must balance: Assets = Liabilities + Equity.
+ *
+ * This is the strongest single statement in accounting, and the report already
+ * computes it — `reports:financialPosition` returns its own `isBalanced` flag.
+ * Nothing was checking that flag, so the report could quietly say "not
+ * balanced" and no test would notice.
+ *
+ * It is deliberately checked through the REPORT rather than recomputed here.
+ * The owner does not read the tables, he reads the report; a figure that is
+ * right in the database and wrong on screen is still wrong. Re-deriving it
+ * would also just be a second copy of the same arithmetic.
+ *
+ * Left null when the handler is not loaded, so the trade fuzzer can use these
+ * invariants without pulling in the reports module.
+ */
+export async function balanceSheetBalances(db, callFn) {
+  if (typeof callFn !== 'function') return null;
+  let r;
+  try {
+    r = await callFn('reports:financialPosition');
+  } catch {
+    return null;
+  }
+  const c = r?.capital;
+  if (!c || typeof c.difference !== 'number') return null;
+  return Math.abs(c.difference) < 0.011
+    ? null
+    : `balance sheet does not balance\n`
+      + `  assets ${r2(r.assets?.totalAssets ?? 0)} `
+      + `- liabilities ${r2(r.liabilities?.totalLiabilities ?? 0)}\n`
+      + `  equity ${r2(c.equity)} (capital ${r2(c.explicitCapital)} + profit ${r2(c.netProfit)})\n`
+      + `  difference ${r2(c.difference)}`;
+}
+
 export const ALL = {
   identity,
   invoiceLinesMatchHeader,

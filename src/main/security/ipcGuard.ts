@@ -313,9 +313,19 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
 };
 
 export class IpcAuthError extends Error {
-  constructor(message: string, public readonly code: 'UNAUTHENTICATED' | 'FORBIDDEN') {
+  // Declared as an ordinary field rather than a constructor parameter property.
+  //
+  // Parameter properties are a TypeScript-only construct that has to be
+  // COMPILED away; Node's type-stripping cannot handle them. That single line
+  // made this file impossible to import in a test, which is why the entire
+  // authorisation layer had never been executed by one. The behaviour is
+  // identical and the file is now runnable directly.
+  readonly code: 'UNAUTHENTICATED' | 'FORBIDDEN';
+
+  constructor(message: string, code: 'UNAUTHENTICATED' | 'FORBIDDEN') {
     super(message);
     this.name = 'IpcAuthError';
+    this.code = code;
   }
 }
 

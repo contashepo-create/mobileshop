@@ -472,8 +472,15 @@ export function registerReportsHandlers() {
       WHERE 1=1 ${joinFilterReturn}
     `).get(...params) as any;
 
+    // `freightWrittenOff` is deliberately NOT added.
+    //
+    // `purchase_returns.FreightWrittenOff` is now a printing copy of the very
+    // figures held in `inventory_adjustments`, kept so the debit note can show
+    // them. Charging both counted every write-off twice and understated profit
+    // by the same amount twice — and it made this report disagree with the
+    // balance sheet, whose own `isBalanced` check then went false.
     const totalDirectCosts = cogs.total - cogsReturns.total + partsCost.total + serviceCost.total
-      + saleTransferCost.total + refundTransferCost.total + freightWrittenOff.total
+      + saleTransferCost.total + refundTransferCost.total
       + valuationAdjustments.total;
 
     // Gross Profit = Revenue - Direct Costs
@@ -576,27 +583,63 @@ export function registerReportsHandlers() {
     const customers = db.prepare('SELECT Name, Balance FROM customers WHERE Balance > 0').all() as any[];
     const totalCustomers = customers.reduce((s, c) => s + c.Balance, 0);
 
+    // Serialised stock is valued at the sum of the individual devices' OWN
+    // costs, never at the item's average.
+    //
+    // `items.CostPrice` is a weighted average across everything ever bought. It
+    // is the wrong number for a handset: buy one at 600 and one at 1,000 and
+    // the average is 800, so after selling the cheap one the balance sheet
+    // valued the remaining 1,000 phone at 800. Assets were understated by 200
+    // and the report's own `isBalanced` check went false — the books genuinely
+    // did not balance.
+    //
+    // `SerialValue` sums what each device actually cost, which is also the
+    // figure `stock_quantities` now carries after the serial fixes, so the two
+    // views of inventory agree.
     const inventory = db.prepare(`
       SELECT i.ItemName, i.IsSerialized,
         (SELECT COALESCE(SUM(Quantity),0) FROM stock_quantities WHERE ItemID = i.ItemID) as Qty,
         (SELECT COUNT(*) FROM item_serials WHERE ItemID = i.ItemID AND Status = 'available') as AvailableSerials,
         (SELECT COALESCE(SUM(CostPrice * Quantity),0) FROM stock_quantities WHERE ItemID = i.ItemID) as StockValue,
+        (SELECT COALESCE(SUM(CostPrice),0) FROM item_serials
+           WHERE ItemID = i.ItemID AND Status = 'available') as SerialValue,
+        (SELECT COUNT(*) FROM purchase_details pd
+           WHERE pd.ItemID = i.ItemID AND (pd.IMEI IS NULL OR pd.IMEI = '')) as UntrackedLines,
         i.CostPrice
       FROM items i WHERE i.IsActive = 1
         AND ((SELECT COALESCE(SUM(Quantity),0) FROM stock_quantities WHERE ItemID = i.ItemID) > 0
              OR (SELECT COUNT(*) FROM item_serials WHERE ItemID = i.ItemID AND Status = 'available') > 0)
     `).all() as any[];
-    const totalInventory = inventory.reduce((s, i) => {
-      if (i.IsSerialized) return s + (i.AvailableSerials * (i.CostPrice || 0));
-      return s + i.StockValue;
-    }, 0);
+
+    // A serialised item received WITHOUT an IMEI has stock that no device
+    // record covers, so counting devices alone would understate it. Those fall
+    // back to the warehouse valuation, which is the only complete figure.
+    const valueOf = (i: any): number =>
+      (i.IsSerialized && !i.UntrackedLines) ? (i.SerialValue || 0) : i.StockValue;
+    const totalInventory = inventory.reduce((s, i) => s + valueOf(i), 0);
 
     // Employee advances (cash advanced to employees = asset)
     const employeeAdvancesBalance = db.prepare(
       `SELECT COALESCE(SUM(Amount),0) as total FROM employee_advances WHERE IsDeducted = 0`
     ).get() as any;
 
-    const totalAssets = totalCash + totalPaymentMethods + totalCustomers + totalInventory + employeeAdvancesBalance.total;
+    // Suppliers who owe US money are an ASSET.
+    //
+    // A supplier balance goes negative when they have credited or refunded more
+    // than the shop still owed — after a return against an invoice that was
+    // already paid, for instance. That is money the shop is owed, exactly like
+    // a customer debt.
+    //
+    // Only `Balance > 0` was read, as a liability. The other direction was
+    // counted nowhere at all, so real value disappeared from the balance sheet
+    // and its own `isBalanced` check went false. The customer side already
+    // handles both directions (credits appear as a liability below); this makes
+    // the supplier side symmetrical.
+    const supplierCredits = db.prepare('SELECT Name, Balance FROM suppliers WHERE Balance < 0').all() as any[];
+    const totalSupplierCredits = supplierCredits.reduce((s, x) => s + Math.abs(x.Balance), 0);
+
+    const totalAssets = totalCash + totalPaymentMethods + totalCustomers + totalInventory
+      + employeeAdvancesBalance.total + totalSupplierCredits;
 
     // === LIABILITIES ===
     const suppliers = db.prepare('SELECT Name, Balance FROM suppliers WHERE Balance > 0').all() as any[];
@@ -643,6 +686,39 @@ export function registerReportsHandlers() {
     // of serviceRevenue above (agent vs principal).
     const serviceCost = db.prepare("SELECT COALESCE(SUM(COALESCE(ServiceCost,0)+COALESCE(TransferCost,0)),0) as total FROM service_sales").get() as any;
 
+    // The cost of goods that came BACK.
+    //
+    // `reports:profitLoss` credits this; `reports:financialPosition` did not.
+    // The two reports therefore disagreed by the cost of every returned item:
+    // the balance sheet kept charging cost for goods sitting back on the shelf,
+    // so its own `isBalanced` check went false and the owner saw a balance
+    // sheet that did not balance. Read from the return line, which records what
+    // the reversal actually put back into stock.
+    const cogsReturnsBS = db.prepare(`
+      SELECT COALESCE(SUM(COALESCE(srd.UnitCost,0) * srd.Quantity),0) as total
+      FROM sale_return_details srd
+      JOIN sale_returns r ON srd.ReturnID = r.ReturnID
+      JOIN sales s ON r.SaleID = s.SaleID
+      WHERE s.IsVoided = 0 AND s.IsWarranty = 0 AND COALESCE(s.Source,'direct') <> 'maintenance'
+    `).get() as any;
+
+    // Costs the shop absorbed that are not cost of goods: machine commission on
+    // a sale or a refund, and inventory value written off. All three are
+    // charged in the P&L, so leaving them out here made the two reports differ.
+    const saleFeesBS = db.prepare(`
+      SELECT COALESCE(SUM(COALESCE(TransferCost,0)),0) as total FROM sales
+      WHERE IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance'
+        AND COALESCE(TransferCostBearer,'shop') = 'shop'
+    `).get() as any;
+    const refundFeesBS = db.prepare(`
+      SELECT COALESCE(SUM(COALESCE(r.TransferCost,0)),0) as total
+      FROM sale_returns r JOIN sales s ON r.SaleID = s.SaleID
+      WHERE s.IsVoided = 0 AND COALESCE(r.TransferCostBearer,'shop') = 'shop'
+    `).get() as any;
+    const valuationAdjBS = db.prepare(
+      'SELECT COALESCE(SUM(COALESCE(Amount,0)),0) as total FROM inventory_adjustments',
+    ).get() as any;
+
     // PartyType='rent' excluded here — rent comes from rent_payments below.
     const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND (PartyType='general' OR PartyType IS NULL)").get() as any;
     // Gross entitlement — see the note in reports:profitLoss.
@@ -651,7 +727,8 @@ export function registerReportsHandlers() {
 
     const netRevenue = salesRevenue.total - salesReturns.total + maintenanceRevenue.total - maintenanceReturns.total
       + serviceRevenue.total + otherIncome.total + rentIncomeAll.total;
-    const totalCosts = cogs.total + partsCost.total + serviceCost.total;
+    const totalCosts = cogs.total - cogsReturnsBS.total + partsCost.total + serviceCost.total
+      + saleFeesBS.total + refundFeesBS.total + valuationAdjBS.total;
     const totalExpenses = generalExpenses.total + salariesExpense.total + rentExpenses.total + warrantyPartsCost.total;
     const netProfit = netRevenue - totalCosts - totalExpenses;
 
@@ -673,11 +750,12 @@ export function registerReportsHandlers() {
         cashAccounts, totalCash,
         paymentMethods, totalPaymentMethods,
         customers, totalCustomers,
+        supplierCredits, totalSupplierCredits,
         employeeAdvances: employeeAdvancesBalance.total,
         inventory: inventory.map(i => ({
           ItemName: i.ItemName,
-          Qty: i.IsSerialized ? i.AvailableSerials : i.Qty,
-          Value: i.IsSerialized ? i.AvailableSerials * (i.CostPrice || 0) : i.StockValue,
+          Qty: (i.IsSerialized && !i.UntrackedLines) ? i.AvailableSerials : i.Qty,
+          Value: valueOf(i),
         })),
         totalInventory,
         totalAssets,

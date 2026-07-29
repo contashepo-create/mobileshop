@@ -434,5 +434,100 @@ await call('purchaseReturns:create', { PurchaseID: pExp,
 const cp = q('SELECT MIN(CostPrice) v FROM stock_quantities WHERE ItemID=2').v;
 t('a unit cost is never driven negative', cp >= 0, 'lowest unit cost ' + cp);
 
+// ===================================================================
+// Round 4 — the BALANCE SHEET, checked through the report the owner reads.
+//
+// Everything until now was verified against balances measured straight from
+// the tables. That is the right test of the engine, but it is not what the
+// owner sees. `reports:financialPosition` computes its own `isBalanced` flag
+// and nothing was reading it, so the report could say "does not balance" and
+// no test would notice.
+// ===================================================================
+
+function seedBS(capital) {
+  const db = buildDatabase();
+  db.exec("INSERT INTO roles(RoleID,RoleName,IsSystem) VALUES(1,'a',1)");
+  db.exec("INSERT INTO users(UserID,Username,PasswordHash,RoleID,IsActive) VALUES(1,'a','x',1,1)");
+  db.exec("INSERT INTO fiscal_years(FiscalYearID,YearName,StartDate,EndDate,Status) VALUES(1,'26','2026-01-01','2026-12-31','open')");
+  db.exec("INSERT INTO warehouses(WarehouseID,WarehouseName) VALUES(1,'Main'),(2,'Branch')");
+  db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'S','safe',100000,1)");
+  db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'A',0,'active')");
+  db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'S',0,'active')");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'iPhone','device',1,600,1000,1),(2,'Cable','part',0,10,20,1)");
+  db.exec(`INSERT INTO settings(Key,Value) VALUES('owner_capital','${capital}')`);
+  return db;
+}
+const bsDiff = async () => (await call('reports:financialPosition'))?.capital?.difference;
+
+// 28 A handset is valued at ITS OWN cost, not the item's average.
+//    Buying at 600 and 1000 averages 800; after selling the cheap one the
+//    balance sheet valued the remaining 1000 phone at 800 and stopped
+//    balancing.
+seedBS(100000);
+await call('purchases:create', { SupplierID: 1,
+  items: [{ ItemID: 1, Quantity: 1, UnitCost: 600, WarehouseID: 1, IMEI: 'X1' }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
+await call('purchases:create', { SupplierID: 1,
+  items: [{ ItemID: 1, Quantity: 1, UnitCost: 1000, WarehouseID: 1, IMEI: 'X2' }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
+await call('sales:create', { CustomerID: 1,
+  items: [{ ItemID: 1, SerialID: q("SELECT SerialID v FROM item_serials WHERE IMEI='X1'").v, Quantity: 1, UnitPrice: 1500 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 1500, CashAccountID: 1, fiscalYearId: 1 });
+const inv28 = (await call('reports:financialPosition')).assets.inventory;
+t('the remaining handset is valued at its own cost, not the average',
+  Math.abs((inv28[0]?.Value ?? 0) - 1000) < 0.011, `balance sheet shows ${inv28[0]?.Value}`);
+t('the balance sheet balances after selling one of two handsets',
+  Math.abs(await bsDiff()) < 0.011, 'difference ' + await bsDiff());
+
+// 29 A supplier who owes US money is an asset.
+//    Over-refunding on a paid invoice drives the balance negative; only
+//    `Balance > 0` was read, so that value appeared nowhere at all.
+seedBS(100000);
+await call('purchases:create', { SupplierID: 1,
+  items: [{ ItemID: 2, Quantity: 10, UnitCost: 10, WarehouseID: 1 }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 100, PaymentSourceType: 'cash_account',
+  PaymentSourceID: 1, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
+currentDb().exec('UPDATE suppliers SET Balance = -250 WHERE SupplierID = 1');
+const fp29 = await call('reports:financialPosition');
+t('a supplier credit is reported as an asset',
+  Math.abs((fp29.assets.totalSupplierCredits ?? 0) - 250) < 0.011,
+  'totalSupplierCredits ' + fp29.assets.totalSupplierCredits);
+
+// 30 The two reports must agree: cost of returned goods is credited in BOTH.
+seedBS(100000);
+await call('purchases:create', { SupplierID: 1,
+  items: [{ ItemID: 2, Quantity: 10, UnitCost: 10, WarehouseID: 1 }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
+await call('sales:create', { CustomerID: 1, items: [{ ItemID: 2, Quantity: 5, UnitPrice: 30 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 150,
+  CashAccountID: 1, fiscalYearId: 1 });
+await call('saleReturns:create', { SaleID: q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v,
+  items: [{ ItemID: 2, Quantity: 5, UnitPrice: 30 }],
+  AccountCredit: 0, CashRefund: 150, CashAccountID: 1 });
+const pl30 = await call('reports:profitLoss', {});
+const fp30 = await call('reports:financialPosition');
+t('the profit report credits the cost of returned goods',
+  Math.abs(pl30.costs.cogsReturns - 50) < 0.011, 'cogsReturns ' + pl30.costs.cogsReturns);
+t('both reports agree on profit after a full return',
+  Math.abs(pl30.grossProfit - fp30.capital.netProfit) < 0.011,
+  `P&L ${pl30.grossProfit} vs balance sheet ${fp30.capital.netProfit}`);
+t('the balance sheet balances after a full sale return',
+  Math.abs(fp30.capital.difference) < 0.011, 'difference ' + fp30.capital.difference);
+
+// 31 A write-off must be charged ONCE, not by two separate columns.
+seedBS(100000);
+await call('purchases:create', { SupplierID: 1,
+  items: [{ ItemID: 2, Quantity: 10, UnitCost: 10, WarehouseID: 1 }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 50, PaymentCost: 0, fiscalYearId: 1 });
+await call('purchaseReturns:create', {
+  PurchaseID: q('SELECT PurchaseID v FROM purchases ORDER BY PurchaseID DESC LIMIT 1').v,
+  items: [{ ItemID: 2, Quantity: 10, UnitCost: 10 }], AccountCredit: 100, CashRefund: 0 });
+const pl31 = await call('reports:profitLoss', {});
+const fp31 = await call('reports:financialPosition');
+t('the 50 of lost freight is charged exactly once',
+  Math.abs(pl31.costs.total - 50) < 0.011, 'total direct costs ' + pl31.costs.total);
+t('the balance sheet still balances after a freight write-off',
+  Math.abs(fp31.capital.difference) < 0.011, 'difference ' + fp31.capital.difference);
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

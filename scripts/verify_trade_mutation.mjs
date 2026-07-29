@@ -39,6 +39,8 @@ const PURCHASES = join(ROOT, 'src/main/ipc/purchases.handlers.ts');
 const STOCK = join(ROOT, 'src/main/database/stock.ts');
 const MAINT = join(ROOT, 'src/main/ipc/maintenance.handlers.ts');
 const INV = join(ROOT, 'src/main/ipc/inventory.handlers.ts');
+const DATATABLE = join(ROOT, 'src/renderer/src/components/shared/DataTable.tsx');
+const REPORTSPAGE = join(ROOT, 'src/renderer/src/pages/reports/ReportsPage.tsx');
 
 /**
  * The suites a mutant is checked against.
@@ -55,6 +57,7 @@ const SUITES = [
   'scripts/verify_trade_reports_agree.mjs',
   'scripts/verify_maintenance.mjs',
   'scripts/verify_transfers.mjs',
+  'scripts/verify_renderer_crash.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -167,6 +170,31 @@ const MUTANTS = [
     find: 'paidSoFar: refundableCash,',
     replace: 'paidSoFar: undefined,',
     why: 'hands back money that was never received',
+  },
+  // ---- the blank-screen class ------------------------------------------
+  // These reinstate the two faults the shop actually reported. They are here
+  // because a crash that unmounts the whole application is a data-loss event,
+  // not a cosmetic one: there is no error boundary to fall back to.
+  {
+    name: 'the table dereferences the raw prop again (the reported crash)',
+    file: DATATABLE,
+    find: 'const rows = asRows<T>(data);',
+    replace: 'const rows = data as T[];',
+    why: 'restores "Cannot read properties of undefined (reading \'length\')" and blanks the app',
+  },
+  {
+    name: 'a report is rendered against another report\'s payload',
+    file: REPORTSPAGE,
+    find: 'data={report && report.type === activeReport ? report.data : null}',
+    replace: 'data={report ? report.data : null}',
+    why: 'the stale-tab render that produced the reported stack trace',
+  },
+  {
+    name: 'a refused report is rendered as if it were data',
+    file: REPORTSPAGE,
+    find: 'if (isFailure(result)) {',
+    replace: 'if (false) {',
+    why: 'a permission refusal is truthy, so it reaches the table as a payload',
   },
 ];
 

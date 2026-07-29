@@ -7,6 +7,7 @@ import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
+import { isFailure, failureMessage, asRows } from '../../lib/ipc';
 
 export function PayrollPage() {
   const { showToast } = useToastStore();
@@ -96,6 +97,14 @@ export function PayrollPage() {
   const openDetailsModal = async (salary: any) => {
     setSelectedSalary(salary);
     const result = await window.api.invoke('salaries:getDetails', salary.SalaryID);
+    // `{ success: false }` (deleted salary, or no `payroll.view` permission) is
+    // truthy, so the modal below would open and immediately read
+    // `.salary.BaseSalary` and `.commissions.length` off an object that has
+    // neither — blanking the entire application instead of the modal.
+    if (isFailure(result)) {
+      showToast('error', failureMessage(result, 'تعذر تحميل تفاصيل الراتب'));
+      return;
+    }
     setSalaryDetails(result);
     setShowDetailsModal(true);
   };
@@ -278,27 +287,27 @@ export function PayrollPage() {
         {salaryDetails && (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">الراتب الأساسي</div><div className="font-bold text-slate-800 dark:text-white">{salaryDetails.salary.BaseSalary?.toFixed(2)}</div></div>
-              <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">البدلات</div><div className="font-bold text-slate-800 dark:text-white">{salaryDetails.salary.Allowances?.toFixed(2)}</div></div>
-              <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">عمولات</div><div className="font-bold text-green-600">{salaryDetails.salary.CommissionsTotal?.toFixed(2)}</div></div>
-              <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">خصومات</div><div className="font-bold text-red-600">{salaryDetails.salary.DeductionsTotal?.toFixed(2)}</div></div>
-              <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">سلف</div><div className="font-bold text-orange-600">{salaryDetails.salary.AdvancesTotal?.toFixed(2)}</div></div>
-              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">الصافي</div><div className="font-bold text-blue-600">{salaryDetails.salary.NetSalary?.toFixed(2)}</div></div>
+              <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">الراتب الأساسي</div><div className="font-bold text-slate-800 dark:text-white">{salaryDetails.salary?.BaseSalary?.toFixed(2)}</div></div>
+              <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">البدلات</div><div className="font-bold text-slate-800 dark:text-white">{salaryDetails.salary?.Allowances?.toFixed(2)}</div></div>
+              <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">عمولات</div><div className="font-bold text-green-600">{salaryDetails.salary?.CommissionsTotal?.toFixed(2)}</div></div>
+              <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">خصومات</div><div className="font-bold text-red-600">{salaryDetails.salary?.DeductionsTotal?.toFixed(2)}</div></div>
+              <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">سلف</div><div className="font-bold text-orange-600">{salaryDetails.salary?.AdvancesTotal?.toFixed(2)}</div></div>
+              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3"><div className="text-xs text-slate-500 dark:text-slate-400">الصافي</div><div className="font-bold text-blue-600">{salaryDetails.salary?.NetSalary?.toFixed(2)}</div></div>
             </div>
 
-            {salaryDetails.commissions.length > 0 && (
+            {asRows(salaryDetails.commissions).length > 0 && (
               <div><h4 className="text-xs font-semibold text-slate-500 dark:text-slate-500 dark:text-slate-400 mb-1">العمولات المضمّنة</h4>
-                {salaryDetails.commissions.map((c: any) => <div key={c.CommissionID} className="flex justify-between text-xs py-1"><span>{c.CommissionType === 'maintenance' ? 'عمولة صيانة' : 'عمولة مبيعات'} {c.RefNumber || ''}</span><span className="text-green-600 font-bold">{c.Amount?.toFixed(2)}</span></div>)}
+                {asRows<any>(salaryDetails.commissions).map((c: any) => <div key={c.CommissionID} className="flex justify-between text-xs py-1"><span>{c.CommissionType === 'maintenance' ? 'عمولة صيانة' : 'عمولة مبيعات'} {c.RefNumber || ''}</span><span className="text-green-600 font-bold">{c.Amount?.toFixed(2)}</span></div>)}
               </div>
             )}
-            {salaryDetails.deductions.length > 0 && (
+            {asRows(salaryDetails.deductions).length > 0 && (
               <div><h4 className="text-xs font-semibold text-slate-500 dark:text-slate-500 dark:text-slate-400 mb-1">الخصومات المضمّنة</h4>
-                {salaryDetails.deductions.map((d: any) => <div key={d.DeductionID} className="flex justify-between text-xs py-1"><span>{d.Reason === 'absence' ? 'غياب' : d.Reason === 'damage' ? `إتلاف ${d.DamagedItemName || ''}` : d.Reason === 'negligence' ? 'تقصير' : 'أخرى'}</span><span className="text-red-600 font-bold">{d.Amount?.toFixed(2)}</span></div>)}
+                {asRows<any>(salaryDetails.deductions).map((d: any) => <div key={d.DeductionID} className="flex justify-between text-xs py-1"><span>{d.Reason === 'absence' ? 'غياب' : d.Reason === 'damage' ? `إتلاف ${d.DamagedItemName || ''}` : d.Reason === 'negligence' ? 'تقصير' : 'أخرى'}</span><span className="text-red-600 font-bold">{d.Amount?.toFixed(2)}</span></div>)}
               </div>
             )}
-            {salaryDetails.advances.length > 0 && (
+            {asRows(salaryDetails.advances).length > 0 && (
               <div><h4 className="text-xs font-semibold text-slate-500 dark:text-slate-500 dark:text-slate-400 mb-1">السلف المضمّنة</h4>
-                {salaryDetails.advances.map((a: any) => <div key={a.AdvanceID} className="flex justify-between text-xs py-1"><span>{a.Reason || 'سلفية'}</span><span className="text-orange-600 font-bold">{a.Amount?.toFixed(2)}</span></div>)}
+                {asRows<any>(salaryDetails.advances).map((a: any) => <div key={a.AdvanceID} className="flex justify-between text-xs py-1"><span>{a.Reason || 'سلفية'}</span><span className="text-orange-600 font-bold">{a.Amount?.toFixed(2)}</span></div>)}
               </div>
             )}
           </div>

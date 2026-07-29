@@ -4,6 +4,7 @@ import {
   CreditCard, Clock, Cloud, CloudOff, ShieldCheck, RefreshCw, ChevronDown, Facebook,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
+import { asRows } from '../../lib/ipc';
 
 /** Egyptian local number (01x…) -> international digits, for wa.me / t.me. */
 function toInternational(local: string): string {
@@ -240,13 +241,13 @@ export function AboutPage() {
               <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3">
                 <div className="font-semibold text-green-800 dark:text-green-300 mb-1.5">يُرسَل فقط:</div>
                 <ul className="space-y-1 text-green-700 dark:text-green-300">
-                  {privacy.sends.map((s: any) => <li key={s.key}>• {s.label}</li>)}
+                  {asRows<any>(privacy.sends).map((s: any) => <li key={s.key}>• {s.label}</li>)}
                 </ul>
               </div>
               <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
                 <div className="font-semibold text-red-800 dark:text-red-300 mb-1.5">لا يُرسَل إطلاقاً:</div>
                 <ul className="space-y-1 text-red-700 dark:text-red-300">
-                  {privacy.neverSends.map((s: string) => <li key={s}>• {s}</li>)}
+                  {asRows<string>(privacy.neverSends).map((s: string) => <li key={s}>• {s}</li>)}
                 </ul>
               </div>
               <p className="text-slate-500 dark:text-slate-400 leading-relaxed">

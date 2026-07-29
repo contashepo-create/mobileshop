@@ -1,4 +1,5 @@
 import { ReactNode } from 'react';
+import { asRows } from '../../lib/ipc';
 
 interface Column<T> {
   key: string;
@@ -10,7 +11,17 @@ interface Column<T> {
 
 interface DataTableProps<T> {
   columns: Column<T>[];
-  data: T[];
+  /**
+   * Declared as an array, but accepted as `unknown` at runtime on purpose.
+   *
+   * Every caller feeds this straight from a `useState` that was filled by an
+   * IPC reply, so it can genuinely be `undefined` (payload of a different
+   * shape, or a `{ success: false }` refusal from the permission guard) no
+   * matter what the type says. This component is rendered on 38 screens; a
+   * throw here unmounts the whole application, because the tree has no error
+   * boundary. Showing the empty row instead is both honest and safe.
+   */
+  data: T[] | null | undefined;
   emptyMessage?: string;
   onRowClick?: (row: T) => void;
   keyField?: string;
@@ -23,6 +34,7 @@ export function DataTable<T extends Record<string, any>>({
   onRowClick,
   keyField = 'id',
 }: DataTableProps<T>) {
+  const rows = asRows<T>(data);
   return (
     <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
       <table className="w-full text-sm">
@@ -40,14 +52,14 @@ export function DataTable<T extends Record<string, any>>({
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 dark:divide-slate-700/50">
-          {data.length === 0 ? (
+          {rows.length === 0 ? (
             <tr>
               <td colSpan={columns.length} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
                 {emptyMessage}
               </td>
             </tr>
           ) : (
-            data.map((row, idx) => (
+            rows.map((row, idx) => (
               <tr
                 key={row[keyField] ?? idx}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}

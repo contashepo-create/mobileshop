@@ -6,6 +6,7 @@ import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { asRows } from '../../lib/ipc';
 
 const fieldLabels: Record<string, Record<string, string>> = {
   sale: {
@@ -294,7 +295,7 @@ export function CustomerStatementPage() {
                 </tr>
               </thead>
               <tbody>
-                {previewData.items.map((item: any, i: number) => (
+                {asRows<any>(previewData.items).map((item: any, i: number) => (
                   <tr key={i} className="border-b border-slate-100 dark:border-slate-700">
                     <td className="p-2 text-slate-800 dark:text-white">{item.ItemName || item.Description || '—'}</td>
                     <td className="p-2 text-slate-600 dark:text-slate-300">{item.Quantity ?? '—'}</td>
@@ -463,7 +464,7 @@ export function CustomerStatementPage() {
           {/* Operations table */}
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">تفاصيل العمليات ({data.operations.length})</h3>
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">تفاصيل العمليات ({asRows(data.operations).length})</h3>
             </div>
             <DataTable
               columns={[
@@ -492,7 +493,7 @@ export function CustomerStatementPage() {
                   </div>
                 )},
               ]}
-              data={data.operations}
+              data={asRows(data.operations)}
               keyField="RefNumber"
               emptyMessage="لا توجد عمليات"
             />

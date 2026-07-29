@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 type Tab = 'cash' | 'paymentMethods' | 'customers' | 'suppliers' | 'employees';
 
@@ -23,6 +24,15 @@ export function OpeningBalancePage() {
   const fetchData = async () => {
     setLoading(true);
     const result = await window.api.invoke('openingBalances:overview');
+    // The `!data` guard further down only protects against null. A refusal is
+    // an object, so it would pass that guard and then be read for
+    // `data.totals.totalCash` — a field it does not have.
+    if (isFailure(result)) {
+      showToast('error', failureMessage(result, 'تعذر تحميل الأرصدة الافتتاحية'));
+      setData(null);
+      setLoading(false);
+      return;
+    }
     setData(result);
     setEdits({});
     const cap = await window.api.invoke('capital:get');

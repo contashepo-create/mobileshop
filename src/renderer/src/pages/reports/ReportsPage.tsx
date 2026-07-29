@@ -5,6 +5,7 @@ import { Input } from '../../components/ui/Input';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 type ReportType = 'sales' | 'purchases' | 'maintenance' | 'customers' | 'suppliers' | 'employees' | 'inventory' | 'profitLoss' | 'financialPosition';
 
@@ -25,23 +26,46 @@ export function ReportsPage() {
   const [activeReport, setActiveReport] = useState<ReportType>('sales');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
-  const [data, setData] = useState<any>(null);
+  /**
+   * The report payload, TOGETHER WITH the report it belongs to.
+   *
+   * Keeping the two in one piece of state is the whole fix for the blank
+   * screen. Clicking a tab re-renders immediately, but the refetch only runs
+   * afterwards in the effect below, so for one render `data` still holds the
+   * PREVIOUS report. The payload shapes are not interchangeable — the P&L
+   * statement has no `rows`, the employees report has no `totals` — so the old
+   * payload rendered against the new tab's JSX read `undefined.length` and
+   * took the entire application down with it (there is no error boundary).
+   * Tagging the payload lets the render below ignore anything stale.
+   */
+  const [report, setReport] = useState<{ type: ReportType; data: any } | null>(null);
   const [loading, setLoading] = useState(false);
 
   const fetchReport = async () => {
+    // Captured now: `activeReport` may change again while this await is in
+    // flight, and a slow reply for the old tab must not overwrite the new one.
+    const requested = activeReport;
     setLoading(true);
     try {
       let result: any;
-      if (activeReport === 'customers' || activeReport === 'suppliers' || activeReport === 'employees' || activeReport === 'inventory' || activeReport === 'financialPosition') {
-        result = await window.api.invoke(`reports:${activeReport}`);
+      if (requested === 'customers' || requested === 'suppliers' || requested === 'employees' || requested === 'inventory' || requested === 'financialPosition') {
+        result = await window.api.invoke(`reports:${requested}`);
       } else {
         const filters = { fromDate: fromDate || undefined, toDate: toDate || undefined };
-        result = await window.api.invoke(`reports:${activeReport}`, filters);
+        result = await window.api.invoke(`reports:${requested}`, filters);
       }
-      setData(result);
+      // A refused channel answers `{ success: false, message }`, which is
+      // truthy and would otherwise be rendered as if it were the report.
+      if (isFailure(result)) {
+        showToast('error', failureMessage(result, 'تعذر تحميل التقرير'));
+        setReport({ type: requested, data: null });
+      } else {
+        setReport({ type: requested, data: result });
+      }
     } catch (err) {
       console.error('Report error:', err);
-      setData(null);
+      showToast('error', 'تعذر تحميل التقرير');
+      setReport({ type: requested, data: null });
     }
     setLoading(false);
   };
@@ -83,7 +107,16 @@ export function ReportsPage() {
       {/* Report content */}
       <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
         {loading ? <p className="text-center text-slate-500 dark:text-slate-400 py-8">جاري التحميل...</p> : (
-          <ReportContent type={activeReport} data={data} />
+          /*
+            `report.type === activeReport` is the guard. Anything else is the
+            previous tab's payload, whose shape does not match this tab's JSX.
+            Passing `null` renders the ordinary "no data" line for the one
+            render before the refetch lands.
+          */
+          <ReportContent
+            type={activeReport}
+            data={report && report.type === activeReport ? report.data : null}
+          />
         )}
       </div>
     </div>

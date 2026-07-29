@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Search, Bell, Moon, Sun, LogOut, AlertTriangle, Package, Users, Truck, Wrench, Wallet, User, X, Clock } from 'lucide-react';
 import { useAuthStore } from '../../stores/auth.store';
 import { useThemeStore } from '../../stores/theme.store';
+import { isFailure, asRows } from '../../lib/ipc';
 
 export function Header() {
   const { user, logout } = useAuthStore();
@@ -33,7 +34,11 @@ export function Header() {
   const fetchNotifications = async () => {
     try {
       const result = await window.api.invoke('notifications:smart');
-      setNotifications(result);
+      // A session that has expired answers `{ success: false, ... }`. That is
+      // truthy, so the `showNotifications && notifications` guard below would
+      // still open the panel and then read `.notifications.length` off an
+      // object that has no such field, taking the whole window down with it.
+      setNotifications(isFailure(result) ? null : result);
       const mins = Number(result?.refreshMinutes);
       if (Number.isFinite(mins) && mins >= 1) {
         const ms = mins * 60000;
@@ -93,7 +98,7 @@ export function Header() {
                 </div>
               </div>
 
-                  {notifications.notifications.length === 0 ? (
+                  {asRows(notifications.notifications).length === 0 ? (
                 <div className="p-8 text-center text-slate-500 dark:text-slate-400 text-sm">
                   {/* An empty bell has three very different meanings. Saying
                       "all good" when alerts are switched off would be a lie. */}
@@ -111,7 +116,7 @@ export function Header() {
                     <button onClick={async () => { await window.api.invoke('notifications:dismissAll', notifications.keys); fetchNotifications(); }} className="text-[10px] px-2 py-1 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-red-100 dark:hover:bg-red-900/30 hover:text-red-600">مسح الكل</button>
                   </div>
                   <div className="divide-y divide-slate-100 dark:divide-slate-700/50">
-                    {notifications.notifications.slice(0, 50).map((n: any, i: number) => {
+                    {asRows<any>(notifications.notifications).slice(0, 50).map((n: any, i: number) => {
                       const Icon = iconMap[n.icon] || AlertTriangle;
                       const key = notifications.keys?.[i] || '';
                       return (

@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage, asRows } from '../../lib/ipc';
 
 export function AssetsPage() {
   const { showToast } = useToastStore();
@@ -147,7 +148,16 @@ export function AssetsPage() {
           { key: 'BankName', title: 'البنك', render: (row) => <span className="text-slate-700 dark:text-slate-200">{row.BankName || '—'}</span> },
           { key: 'AccountNumber', title: 'رقم الحساب', render: (row) => <span className="text-slate-700 dark:text-slate-200">{row.AccountNumber || '—'}</span> },
           { key: 'actions', title: '', render: (row) => <div className="flex gap-2">
-            <button onClick={async () => { setStatementAccount(row); setStatementLoading(true); const r = await window.api.invoke('cashAccount:statement', row.CashAccountID); setStatementData(r); setStatementLoading(false); }} className="text-xs text-blue-600 hover:underline flex items-center gap-1"><FileText size={12} /> كشف حساب</button>
+            <button onClick={async () => {
+              setStatementAccount(row);
+              setStatementLoading(true);
+              const r = await window.api.invoke('cashAccount:statement', row.CashAccountID);
+              // A refusal (`{ success: false }`) is truthy and would be rendered
+              // as an empty statement with `undefined` operations underneath.
+              if (isFailure(r)) { showToast('error', failureMessage(r, 'تعذر فتح كشف الحساب')); setStatementData(null); }
+              else setStatementData(r);
+              setStatementLoading(false);
+            }} className="text-xs text-blue-600 hover:underline flex items-center gap-1"><FileText size={12} /> كشف حساب</button>
             <button onClick={() => openEdit(row)} className="text-xs text-primary-600 hover:underline flex items-center gap-1"><Edit size={12} /> تعديل</button>
           </div> },
         ]}
@@ -201,7 +211,7 @@ export function AssetsPage() {
                     <span>إجمالي المنصرف: <span className="font-bold text-red-600">{statementData.totalOut?.toFixed(2)}</span></span>
                     <span>صافي الحركة: <span className={`font-bold ${statementData.netChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>{statementData.netChange?.toFixed(2)}</span></span>
                   </div>
-                  {statementData.operations?.length === 0 ? (
+                  {asRows(statementData.operations).length === 0 ? (
                     <div className="text-center py-8 text-slate-500">لا توجد عمليات على هذا الحساب</div>
                   ) : (
                     <div className="overflow-x-auto">
@@ -218,7 +228,7 @@ export function AssetsPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {statementData.operations.map((op: any, i: number) => (
+                          {asRows<any>(statementData.operations).map((op: any, i: number) => (
                             <tr key={i} className="border-b border-slate-100 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/30">
                               <td className="p-2 whitespace-nowrap">{op.Date}</td>
                               <td className="p-2"><span className="text-slate-500">{op.OpLabel}</span></td>

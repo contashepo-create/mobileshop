@@ -6,6 +6,7 @@ import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { asRows } from '../../lib/ipc';
 
 export function EmployeeStatementPage() {
   const { showToast } = useToastStore();
@@ -136,7 +137,7 @@ export function EmployeeStatementPage() {
                 </tr>
               </thead>
               <tbody>
-                {previewData.items.map((item: any, i: number) => (
+                {asRows<any>(previewData.items).map((item: any, i: number) => (
                   <tr key={i} className="border-b border-slate-100 dark:border-slate-700">
                     <td className="p-2 text-slate-800 dark:text-white">{item.ItemName || item.Description || '—'}</td>
                     <td className="p-2 text-slate-600 dark:text-slate-300">{item.Quantity ?? '—'}</td>
@@ -439,7 +440,7 @@ export function EmployeeStatementPage() {
                 </div>
               )},
             ]}
-            data={data.operations}
+            data={asRows(data.operations)}
             keyField="RefID"
             emptyMessage="لا توجد عمليات"
           />

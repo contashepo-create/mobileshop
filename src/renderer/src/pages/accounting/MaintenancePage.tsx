@@ -7,6 +7,7 @@ import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { useAuthStore } from '../../stores/auth.store';
+import { isFailure, failureMessage, asRows } from '../../lib/ipc';
 
 const statusLabels: Record<string, string> = {
   received: 'مستلم', inspecting: 'فحص', in_progress: 'قيد العمل',
@@ -122,6 +123,16 @@ export function MaintenancePage() {
     setWbLoading(true);
     setWorkbenchTicketId(ticketId);
     const result = await window.api.invoke('maintenance:get', ticketId);
+    // `if (workbenchTicketId && wbData)` opens the workbench on a truthy value,
+    // and the very first thing it reads is `wbData.ticket.TicketNumber`. A
+    // refusal has no `ticket`, so the technician's screen would go blank.
+    if (isFailure(result)) {
+      showToast('error', failureMessage(result, 'تعذر فتح أمر الصيانة'));
+      setWorkbenchTicketId(null);
+      setWbData(null);
+      setWbLoading(false);
+      return;
+    }
     setWbData(result);
     setNewStatus('');
     setStatusNotes('');
@@ -399,6 +410,10 @@ export function MaintenancePage() {
    // === Preview ===
   const openPreview = async (ticket: any) => {
     const details = await window.api.invoke('maintenance:get', ticket.TicketID);
+    if (isFailure(details)) {
+      showToast('error', failureMessage(details, 'تعذر عرض أمر الصيانة'));
+      return;
+    }
     setPreviewTicket({ ...details.ticket, parts: details.parts, log: details.log, serviceCosts: details.serviceCosts, serviceUsage: details.serviceUsage, notes: details.notes });
     setShowPreview(true);
   };
@@ -586,7 +601,7 @@ export function MaintenancePage() {
                     {!['delivered', 'cancelled'].includes(t.Status) && <th className="text-center py-1.5"></th>}
                   </tr></thead>
                   <tbody>
-                    {wbData.parts.map((p: any, idx: number) => {
+                    {asRows<any>(wbData.parts).map((p: any, idx: number) => {
                       const salePrice = p.SalePrice || p.UnitCost;
                       const profit = (salePrice - p.UnitCost) * p.Quantity;
                       return (
@@ -640,7 +655,7 @@ export function MaintenancePage() {
                     {!['delivered', 'cancelled'].includes(t.Status) && <th></th>}
                   </tr></thead>
                   <tbody>
-                    {wbData.serviceCosts.map((c: any, idx: number) => (
+                    {asRows<any>(wbData.serviceCosts).map((c: any, idx: number) => (
                       <tr key={idx} className="border-b border-slate-100 dark:border-slate-700/50">
                         <td className="py-2 text-slate-700 dark:text-slate-200">{c.Description}</td>
                         <td className="py-2 text-center text-red-600">{c.CostOnUs?.toFixed(2)}</td>
@@ -682,7 +697,7 @@ export function MaintenancePage() {
                     {!['delivered', 'cancelled'].includes(t.Status) && <th></th>}
                   </tr></thead>
                   <tbody>
-                    {wbData.serviceUsage.map((u: any, idx: number) => (
+                    {asRows<any>(wbData.serviceUsage).map((u: any, idx: number) => (
                       <tr key={idx} className="border-b border-slate-100 dark:border-slate-700/50">
                         <td className="py-2 text-slate-700 dark:text-slate-200">{u.Description}</td>
                         <td className="py-2 text-center text-slate-600 dark:text-slate-300">{u.Quantity}</td>
@@ -955,7 +970,7 @@ export function MaintenancePage() {
 
             {previewTicket.parts?.length > 0 && (
               <div><h4 className="text-xs font-semibold text-slate-500 mb-1">قطع الغيار</h4>
-                {previewTicket.parts.map((p: any, idx: number) => (
+                {asRows<any>(previewTicket.parts).map((p: any, idx: number) => (
                   <div key={idx} className="flex justify-between text-xs py-1 border-b border-slate-100 dark:border-slate-700/50">
                     <span className="text-slate-700 dark:text-slate-200">{p.ItemName} × {p.Quantity}</span>
                     <span className="font-bold text-orange-600">{p.TotalCost?.toFixed(2)}</span>
@@ -966,7 +981,7 @@ export function MaintenancePage() {
 
             {previewTicket.serviceCosts?.length > 0 && (
               <div><h4 className="text-xs font-semibold text-slate-500 mb-1">تكاليف الخدمات</h4>
-                {previewTicket.serviceCosts.map((c: any, idx: number) => (
+                {asRows<any>(previewTicket.serviceCosts).map((c: any, idx: number) => (
                   <div key={idx} className="flex justify-between text-xs py-1 border-b border-slate-100 dark:border-slate-700/50">
                     <span className="text-slate-700 dark:text-slate-200">{c.Description}</span>
                     <span className="font-bold text-green-600">{c.PriceToClient?.toFixed(2)}</span>
@@ -983,7 +998,7 @@ export function MaintenancePage() {
 
             {previewTicket.log?.length > 0 && (
               <div><h4 className="text-xs font-semibold text-slate-500 mb-1">سجل الحالات</h4>
-                {previewTicket.log.map((l: any, idx: number) => (
+                {asRows<any>(previewTicket.log).map((l: any, idx: number) => (
                   <div key={idx} className="flex items-center gap-2 text-xs py-1">
                     <Badge variant="gray">{statusLabels[l.Status] || l.Status}</Badge>
                     <span className="text-slate-500 dark:text-slate-400">{l.Date}</span>
@@ -996,7 +1011,7 @@ export function MaintenancePage() {
 
             {previewTicket.notes?.length > 0 && (
               <div><h4 className="text-xs font-semibold text-slate-500 mb-1">ملاحظات</h4>
-                {previewTicket.notes.map((n: any, idx: number) => (
+                {asRows<any>(previewTicket.notes).map((n: any, idx: number) => (
                   <div key={idx} className="text-xs bg-slate-50 dark:bg-slate-700/30 rounded-lg p-2 mb-1">
                     <span className="text-slate-400">{n.Username} - {n.CreatedAt}</span>
                     <p className="text-slate-700 dark:text-slate-200">{n.Content}</p>

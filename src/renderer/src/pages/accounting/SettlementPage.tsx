@@ -6,6 +6,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { Modal } from '../../components/ui/Modal';
 import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
+import { isFailure, failureMessage, asRows } from '../../lib/ipc';
 
 export function SettlementPage() {
   const { showToast } = useToastStore();
@@ -27,19 +28,19 @@ export function SettlementPage() {
   const fetchData = async () => {
     let rows: any[] = [];
     if (section === 'inventory') {
-      rows = await window.api.invoke('stock:list');
+      rows = asRows(await window.api.invoke('stock:list'));
       rows = rows.map((r: any) => ({ ...r, ItemID: r.ItemID, ItemName: r.ItemName, RecordedBalance: r.Quantity, ActualBalance: '' }));
     } else if (section === 'cash') {
-      rows = await window.api.invoke('cashAccounts:list');
+      rows = asRows(await window.api.invoke('cashAccounts:list'));
       rows = rows.map((r: any) => ({ ...r, ItemID: r.CashAccountID, ItemName: r.AccountName, RecordedBalance: r.Balance, ActualBalance: '' }));
     } else if (section === 'paymentMethods') {
-      rows = await window.api.invoke('paymentMethods:list');
+      rows = asRows(await window.api.invoke('paymentMethods:list'));
       rows = rows.map((r: any) => ({ ...r, ItemID: r.PaymentMethodID, ItemName: r.MethodName, RecordedBalance: r.Balance, ActualBalance: '' }));
     } else if (section === 'customers') {
-      rows = await window.api.invoke('customers:list');
+      rows = asRows(await window.api.invoke('customers:list'));
       rows = rows.map((r: any) => ({ ...r, ItemID: r.CustomerID, ItemName: r.Name, RecordedBalance: r.Balance, ActualBalance: '' }));
     } else if (section === 'suppliers') {
-      rows = await window.api.invoke('suppliers:list');
+      rows = asRows(await window.api.invoke('suppliers:list'));
       rows = rows.map((r: any) => ({ ...r, ItemID: r.SupplierID, ItemName: r.Name, RecordedBalance: r.Balance, ActualBalance: '' }));
     }
     setData(rows);
@@ -48,7 +49,7 @@ export function SettlementPage() {
 
   const fetchSettlements = async () => {
     const result = await window.api.invoke('settlements:list', { section: 'all' });
-    setSettlements(result);
+    setSettlements(asRows(result));
   };
 
   useEffect(() => { fetchData(); }, [section]);
@@ -102,6 +103,13 @@ export function SettlementPage() {
 
   const openDetails = async (settlementId: number) => {
     const result = await window.api.invoke('settlements:getDetails', settlementId);
+    // A refusal is truthy, and `isOpen={!!detailsModal}` would then open a
+    // modal whose table is fed `detailsModal.details` — a field a refusal does
+    // not carry.
+    if (isFailure(result)) {
+      showToast('error', failureMessage(result, 'تعذر تحميل تفاصيل التسوية'));
+      return;
+    }
     setDetailsModal(result);
   };
 
@@ -210,7 +218,7 @@ export function SettlementPage() {
                 { key: 'ActualBalance', title: 'الفعلي', render: (r) => <span className="text-slate-600 dark:text-slate-300">{r.ActualBalance?.toFixed(2)}</span> },
                 { key: 'Difference', title: 'الفرق', render: (r) => <Badge variant={r.Difference > 0 ? 'green' : 'red'}>{r.Difference > 0 ? '+' : ''}{r.Difference?.toFixed(2)}</Badge> },
               ]}
-              data={detailsModal.details}
+              data={asRows(detailsModal.details)}
               keyField="DetailID"
               emptyMessage="لا توجد تفاصيل"
             />

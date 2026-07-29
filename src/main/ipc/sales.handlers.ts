@@ -283,6 +283,40 @@ export function registerSalesHandlers() {
       };
 
       const tx = db.transaction(() => {
+        // === RE-CHECK STOCK, NOW THAT THE WRITE LOCK IS HELD ===
+        //
+        // The validation above ran BEFORE this transaction opened, so nothing
+        // stopped another till from selling the same units in between. That is
+        // a check-then-act race, and it is not theoretical here: the app
+        // deliberately supports a shared database on a network path
+        // (`db:createNetwork`), where every till is a separate process against
+        // one file. Verified by holding a write inside the window: a sale of 5
+        // committed against an empty shelf and left the warehouse at -5, with
+        // negative stock switched off.
+        //
+        // SQLite serialises writers, so a re-read inside the transaction sees
+        // the committed truth and cannot be overtaken. Throwing rolls the whole
+        // transaction back, leaving nothing half-written.
+        if (!allowNegativeStock) {
+          const late = planStockAllocation(db, data.items);
+          if (late.shortages.length) {
+            const refusal = new Error(describeShortage(db, late.shortages[0]));
+            (refusal as any).userRefusal = true;
+            throw refusal;
+          }
+          for (const item of data.items) {
+            if (item.isService || !item.SerialID) continue;
+            const sv = db.prepare(
+              'SELECT Status FROM item_serials WHERE SerialID = ?',
+            ).get(item.SerialID) as any;
+            if (!sv || sv.Status !== 'available') {
+              const refusal = new Error('الجهاز برقم IMEI غير متاح للبيع');
+              (refusal as any).userRefusal = true;
+              throw refusal;
+            }
+          }
+        }
+
         // Create sale
         const result = db.prepare(`
           INSERT INTO sales (SaleNumber, FiscalYearID, Date, CustomerID, CustomerName, CustomerPhone,
@@ -406,6 +440,9 @@ export function registerSalesHandlers() {
       tx();
       return { success: true, saleNumber, totalAmount, paidAmount, remaining, status };
     } catch (err: any) {
+      // A refusal is a normal outcome, not a fault: the transaction rolled back
+      // and nothing was written.
+      if (err?.userRefusal) return { success: false, message: err.message };
       console.error('[Sales] Error creating sale:', err);
       return { success: false, message: `خطأ في إنشاء الفاتورة: ${err.message || err}` };
     }
@@ -1170,6 +1207,26 @@ export function registerSalesHandlers() {
       }
 
       const tx = db.transaction(() => {
+        // === RE-CHECK AVAILABILITY, NOW THAT THE WRITE LOCK IS HELD ===
+        // The goods could have been re-sold since the check above, which ran
+        // before this transaction opened. Verified to drive stock to -2.
+        if (allowNegStock?.Value !== '1') {
+          for (const line of details) {
+            if (!line.ItemID || !line.WarehouseID) continue;
+            const held = (db.prepare(
+              'SELECT COALESCE(SUM(Quantity),0) AS qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+            ).get(line.ItemID, line.WarehouseID) as any)?.qty || 0;
+            if (held < line.Quantity - 0.001) {
+              const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+              const refusal = new Error(
+                `لا يمكن إلغاء المرتجع - "${info?.ItemName || line.ItemID}" لم يعد بالمخزن `
+                + `(المطلوب ${line.Quantity}، المتاح ${held})`);
+              (refusal as any).userRefusal = true;
+              throw refusal;
+            }
+          }
+        }
+
         for (const line of details) {
           // The goods go back OUT of stock — the customer keeps them again.
           //
@@ -1275,6 +1332,7 @@ export function registerSalesHandlers() {
       tx();
       return { success: true, message: 'تم إلغاء المرتجع وعكس كل تأثيراته' };
     } catch (err: any) {
+      if (err?.userRefusal) return { success: false, message: err.message };
       console.error('[Sales] Error reversing return:', err);
       return { success: false, message: `خطأ: ${err.message || err}` };
     }

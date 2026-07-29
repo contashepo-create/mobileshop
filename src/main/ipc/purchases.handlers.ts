@@ -190,6 +190,28 @@ export function registerPurchasesHandlers() {
       }
 
       const tx = db.transaction(() => {
+        // === RE-CHECK THE DRAWER, NOW THAT THE WRITE LOCK IS HELD ===
+        //
+        // The balance check above ran before this transaction opened, so
+        // another till could have spent the money in between. On a shared
+        // network database (`db:createNetwork`) that is a real window, and it
+        // was verified: a payment of 900 committed against an empty drawer and
+        // left it at -900. Re-reading here cannot be overtaken, because SQLite
+        // serialises writers. Throwing rolls everything back.
+        if (allowNegCash?.Value !== '1' && paidAmount > 0 && data.PaymentSourceID) {
+          const table = data.PaymentSourceType === 'cash_account' ? 'cash_accounts' : 'payment_methods';
+          const idCol = data.PaymentSourceType === 'cash_account' ? 'CashAccountID' : 'PaymentMethodID';
+          const row = db.prepare(
+            `SELECT Balance FROM ${table} WHERE ${idCol} = ?`,
+          ).get(data.PaymentSourceID) as any;
+          if (!row || (row.Balance || 0) < paidAmount) {
+            const refusal = new Error(
+              `الرصيد غير كافٍ: المتاح ${(row?.Balance || 0).toFixed(2)}، المطلوب ${paidAmount.toFixed(2)}`);
+            (refusal as any).userRefusal = true;
+            throw refusal;
+          }
+        }
+
         const result = db.prepare(`
           INSERT INTO purchases (PurchaseNumber, FiscalYearID, Date, SupplierID, Subtotal, Discount, TaxAmount,
             TotalAmount, PaidAmount, RemainingAmount, AdditionalCost, PaymentCost,
@@ -317,6 +339,7 @@ export function registerPurchasesHandlers() {
       tx();
       return { success: true, purchaseNumber, totalAmount, paidAmount, remaining, status };
     } catch (err: any) {
+      if (err?.userRefusal) return { success: false, message: err.message };
       console.error('[Purchases] Error creating purchase:', err);
       return { success: false, message: `خطأ في إنشاء الفاتورة: ${err.message || err}` };
     }
@@ -572,6 +595,22 @@ export function registerPurchasesHandlers() {
     }
 
     const tx = db.transaction(() => {
+      // === RE-CHECK STOCK, NOW THAT THE WRITE LOCK IS HELD ===
+      // Same race as the sale side: the availability check above ran before
+      // this transaction opened. Verified to drive a warehouse to -5.
+      if (allowNegStock?.Value !== '1') {
+        for (const item of verified) {
+          const wh = lineWarehouse(item.ItemID, item.WarehouseID);
+          const held = wh ? warehouseStock(db, item.ItemID, wh) : 0;
+          if (held < item.Quantity) {
+            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(item.ItemID) as any;
+            throw new Error(
+              `الكمية غير متوفرة في المخزن للمرتجع للصنف "${info?.ItemName || item.ItemID}": `
+              + `المطلوب ${item.Quantity}، المتاح ${held}`);
+          }
+        }
+      }
+
       const result = db.prepare(`
         INSERT INTO purchase_returns (ReturnNumber, PurchaseID, Date, TotalAmount, Reason, UserID, CashAccountID,
           DebtRelief, CashRefund, TransferRefund, PaymentMethodID, TransferCost, TransferCostBearer)
@@ -850,7 +889,14 @@ export function registerPurchasesHandlers() {
         .run(invoiceOffset, returnId);
     });
 
-    tx();
+    // A refusal thrown from inside the transaction (the stock re-check above)
+    // must reach the user as a message, not as an unhandled crash. The rollback
+    // has already happened, so nothing is half-written either way.
+    try {
+      tx();
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'تعذر إتمام المرتجع' };
+    }
     return { success: true, returnNumber };
   });
 

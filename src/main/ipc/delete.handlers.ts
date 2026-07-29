@@ -164,6 +164,27 @@ export function registerDeleteHandlers() {
       }
 
       const tx = db.transaction(() => {
+        // === RE-CHECK AVAILABILITY, NOW THAT THE WRITE LOCK IS HELD ===
+        //
+        // The shortage check above ran before this transaction opened, so the
+        // goods could have been sold in between. On a shared network database
+        // every till is a separate process, and this was verified to drive a
+        // warehouse to -5. Re-reading under the write lock cannot be overtaken.
+        for (const line of lines) {
+          if (!line.ItemID || !line.WarehouseID) continue;
+          const held = (db.prepare(
+            'SELECT COALESCE(SUM(Quantity),0) AS qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
+          ).get(line.ItemID, line.WarehouseID) as any)?.qty || 0;
+          if (held < line.Quantity - 0.001) {
+            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+            const refusal = new Error(
+              `لا يمكن حذف فاتورة الشراء - "${info?.ItemName || line.ItemID}" لم تعد بالمخزن `
+              + `(المطلوب ${line.Quantity}، المتاح ${held})`);
+            (refusal as any).userRefusal = true;
+            throw refusal;
+          }
+        }
+
         const details = db.prepare('SELECT * FROM purchase_details WHERE PurchaseID = ?').all(purchaseId) as any[];
 
         // Reverse stock changes (recalculate weighted average cost)

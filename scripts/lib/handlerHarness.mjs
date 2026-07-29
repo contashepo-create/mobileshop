@@ -181,6 +181,9 @@ export async function loadHandlers() {
     // trading handlers just wrote, rather than reasoned about separately. The
     // P&L is where a valuation error becomes a wrong number on screen.
     'src/main/ipc/reports.handlers.ts',
+    // Statements are a THIRD view of the same documents (after the ledger and
+    // the reports). Loading them lets a test demand that all three agree.
+    'src/main/ipc/statement.handlers.ts',
   ];
   const loaded = [];
   for (const rel of mods) {

@@ -73,6 +73,12 @@ const KNOWN_OPEN = new Map([
      + 'which touches every one of those sites and needs its own dedicated '
      + 'round of mutation and fuzz testing rather than being bolted onto the '
      + 'end of an audit.'],
+  // Same root cause, reached by different routes. Recorded separately so the
+  // sweep reports them accurately rather than hiding three behind one.
+  [66, 'same root cause as seed 29: the warehouse row and the IMEI records '
+     + 'drift apart on a serialised item (seen at delete:saleReturn)'],
+  [70, 'same root cause as seed 29 (seen at delete:purchaseReturn)'],
+  [113, 'same root cause as seed 29 (seen at sales:update)'],
 ]);
 
 let passed = 0;

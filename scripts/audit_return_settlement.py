@@ -74,7 +74,8 @@ t('fee_exceeds_transfer_rejected', () => validateSettlement({ total: 100, transf
 // --- bad input
 t('negative_rejected', () => validateSettlement({ total: 1000, accountCredit: -100, cashRefund: 1100, hasAccount: true, cashAccountId: 1 }).ok);
 t('nan_rejected', () => validateSettlement({ total: 1000, cashRefund: NaN, hasAccount: false, cashAccountId: 1 }).ok);
-t('zero_total_rejected', () => validateSettlement({ total: 0, hasAccount: true }).ok);
+t('zero_total_accepted', () => validateSettlement({ total: 0, hasAccount: true }).ok);
+t('negative_total_rejected', () => validateSettlement({ total: -5, hasAccount: true }).ok);
 
 // --- rounding
 t('thirds_balance', () => validateSettlement({ total: 100, accountCredit: 33.33, cashRefund: 33.33, transferRefund: 33.34, hasAccount: true, cashAccountId: 1, paymentMethodId: 1 }).ok);
@@ -179,7 +180,17 @@ report(res['negative_rejected'] is False, 'a negative component is refused')
 report(res['nan_rejected'] is False,
        'NaN is refused',
        'SQLite stores NaN as NULL, so the row would vanish from every SUM()')
-report(res['zero_total_rejected'] is False, 'a zero-value return is refused')
+# A zero-value return is ACCEPTED on purpose.
+#
+# Goods handed over at a full discount — a replacement, a goodwill item — really
+# did leave the shelf, and the sale deducted them. Refusing the return left
+# those units permanently outside inventory: physically in the shop, absent from
+# every report, with no document able to bring them back. Only a NEGATIVE total
+# is nonsense, and that is still refused.
+report(res['zero_total_accepted'] is True,
+       'a zero-value return is accepted so free goods can come back')
+report(res['negative_total_rejected'] is False,
+       'a negative return value is still refused')
 
 # ---------------------------------------------------------------- 7
 print('\n[7] The suggested split is only a starting point')

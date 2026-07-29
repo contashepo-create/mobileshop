@@ -1,0 +1,188 @@
+#!/usr/bin/env node
+/**
+ * MUTATION TESTING — does the test suite actually catch a broken handler?
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * Every suite in this repository reports "passed". None of them proved they
+ * are capable of reporting anything else. A test that cannot fail is not
+ * evidence, and this audit has already produced two of them:
+ *
+ *   - the metamorphic discount pair compared two SALES, so it stayed green
+ *     when the discount was deliberately dropped from the return leg;
+ *   - `verify_fuzz_sweep` matched the literal text "all 14 invariants held",
+ *     so a fifteenth invariant made every seed report as failed.
+ *
+ * Both were found by breaking the code ON PURPOSE and checking the suite
+ * noticed. This file automates that: it introduces a specific, realistic fault
+ * into a trading handler, runs the suites, and asserts that at least one of
+ * them fails. Then it puts the file back.
+ *
+ * A mutant that SURVIVES is the finding. It means that if a future change
+ * introduces that same fault for real — a wrong sign, a dropped discount, a
+ * missing stock deduction — nothing in this repository would tell anybody.
+ *
+ * Every mutation below is a plausible mistake, not a nonsense edit.
+ *
+ * Run with:  node --experimental-strip-types scripts/verify_trade_mutation.mjs
+ */
+import { readFileSync, writeFileSync, copyFileSync, unlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(HERE, '..');
+
+const SALES = join(ROOT, 'src/main/ipc/sales.handlers.ts');
+const PURCHASES = join(ROOT, 'src/main/ipc/purchases.handlers.ts');
+const STOCK = join(ROOT, 'src/main/database/stock.ts');
+
+/**
+ * The suites a mutant is checked against.
+ *
+ * Deliberately the FAST ones that cover trading. A mutant only has to be caught
+ * by one of them; running the whole verify for every mutant would take minutes
+ * and add nothing.
+ */
+const SUITES = [
+  'scripts/verify_trade_metamorphic.mjs',
+  'scripts/verify_fuzz_regressions.mjs',
+  'scripts/verify_trade_behaviour.mjs',
+  'scripts/verify_trade_ledger_model.mjs',
+  'scripts/verify_trade_reports_agree.mjs',
+];
+
+/** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
+const MUTANTS = [
+  {
+    // `sales:create` and `sales:update` share this line verbatim, so the text
+    // is not unique. Targeting the first occurrence mutates the CREATE path,
+    // which is the one every sale goes through.
+    name: 'a sale does not reduce stock at all',
+    file: SALES,
+    find: 'deductStock(db, item.ItemID, lineWarehouse, item.Quantity);',
+    replace: '/* mutant: stock not deducted */;',
+    occurrence: 1,
+    why: 'the single most damaging inventory fault there is',
+  },
+  {
+    name: 'a discount is ignored when goods are returned',
+    file: SALES,
+    find: 'UnitPrice: money((line.UnitPrice || 0) * priceRatio),',
+    replace: 'UnitPrice: money(line.UnitPrice || 0),',
+    why: 'refunds more than the customer ever paid',
+  },
+  {
+    name: 'a supplier discount is ignored on a debit note',
+    file: PURCHASES,
+    find: 'UnitCost: money((line.UnitCost || 0) * costRatio),',
+    replace: 'UnitCost: money(line.UnitCost || 0),',
+    why: 'claims more credit from the supplier than is owed',
+  },
+  {
+    name: 'freight is left out of the landed cost',
+    file: PURCHASES,
+    find: '? (item.UnitCost - discountPerUnit) + (allocatedOverhead / item.Quantity)',
+    replace: '? (item.UnitCost - discountPerUnit)',
+    why: 'understates inventory by the whole delivery charge',
+  },
+  {
+    name: 'returned goods come back at the pool average, not their own cost',
+    file: STOCK,
+    find: '    : unitCost;',
+    replace: '    : (row.CostPrice || 0);',
+    why: 're-values stock on every return',
+  },
+  {
+    name: 'the cash refund cap is removed',
+    file: SALES,
+    find: 'paidSoFar: refundableCash,',
+    replace: 'paidSoFar: undefined,',
+    why: 'hands back money that was never received',
+  },
+];
+
+let caught = 0, survived = 0;
+const survivors = [];
+
+function runSuite(rel) {
+  try {
+    execFileSync(process.execPath, ['--experimental-strip-types', join(ROOT, rel)],
+      { cwd: ROOT, stdio: 'pipe', encoding: 'utf-8', timeout: 180_000 });
+    return true;                 // exit code 0 -> suite passed
+  } catch {
+    return false;                // non-zero -> suite failed (mutant caught)
+  }
+}
+
+console.log('MUTATION TESTING — can the suites detect a broken handler?\n');
+console.log('Each mutation is a realistic mistake. A mutant that SURVIVES means');
+console.log('nothing in this repository would notice that fault in real code.\n');
+
+for (const m of MUTANTS) {
+  const backup = m.file + '.mutbak';
+  const original = readFileSync(m.file, 'utf-8');
+
+  const occurrences = original.split(m.find).length - 1;
+  const wanted = m.occurrence ?? 0;          // 0 = must be unique, N = the Nth
+  if (occurrences === 0 || (!m.occurrence && occurrences !== 1)) {
+    console.log(`  SKIP  ${m.name}`);
+    console.log(`        anchor appears ${occurrences} times — the mutation would be ambiguous`);
+    survived++;
+    survivors.push(`${m.name} (anchor not unique)`);
+    continue;
+  }
+
+  copyFileSync(m.file, backup);
+  try {
+    // Replace either the unique match or the Nth one, never all of them: a
+    // blanket replace would mutate several code paths at once and the result
+    // would not identify which one the suites can see.
+    let mutated;
+    if (wanted > 0) {
+      let seen = 0;
+      mutated = original.split(m.find).reduce((acc, part, i, arr) =>
+        i === 0 ? part : acc + ((++seen === wanted) ? m.replace : m.find) + part, '');
+    } else {
+      mutated = original.replace(m.find, m.replace);
+    }
+    writeFileSync(m.file, mutated);
+
+    let detectedBy = null;
+    for (const s of SUITES) {
+      if (!runSuite(s)) { detectedBy = s.replace('scripts/', ''); break; }
+    }
+
+    if (detectedBy) {
+      caught++;
+      console.log(`  CAUGHT   ${m.name}`);
+      console.log(`           by ${detectedBy}`);
+    } else {
+      survived++;
+      survivors.push(m.name);
+      console.log(`  SURVIVED ${m.name}`);
+      console.log(`           ${m.why}`);
+      console.log(`           NO SUITE DETECTED THIS`);
+    }
+  } finally {
+    copyFileSync(backup, m.file);
+    unlinkSync(backup);
+  }
+}
+
+// Prove the restore worked, so a crashed run cannot leave the tree mutated.
+for (const f of [SALES, PURCHASES, STOCK]) {
+  const src = readFileSync(f, 'utf-8');
+  if (src.includes('mutant:')) {
+    console.log(`\n!!! ${f} still contains a mutation — restore it from git !!!`);
+    process.exit(2);
+  }
+}
+
+console.log(`\nRESULT: ${caught} caught, ${survived} survived`);
+if (survivors.length) {
+  console.log('\nsurviving mutants (each is a blind spot in the test suite):');
+  survivors.forEach(s => console.log('  - ' + s));
+}
+process.exit(survived ? 1 : 0);

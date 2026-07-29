@@ -103,8 +103,18 @@ export function validateSettlement(input: SettlementInput): SettlementResult {
   });
 
   const total = finite(input.total);
-  if (!Number.isFinite(total) || total <= 0) {
-    return fail('قيمة المرتجع يجب أن تكون أكبر من صفر');
+  // A NEGATIVE total is nonsense; a total of exactly zero is not.
+  //
+  // Goods handed over at a full discount — a replacement, a goodwill item, a
+  // promotional giveaway — really did leave the shelf, and `sales:create`
+  // deducts them. If the customer brings them back, the money owed is zero but
+  // the GOODS still have to be taken back into stock.
+  //
+  // Refusing a zero-value return left those units permanently outside
+  // inventory: the shop had them in its hand and nowhere in its books, and no
+  // document could ever put them back.
+  if (!Number.isFinite(total) || total < 0) {
+    return fail('قيمة المرتجع لا يمكن أن تكون سالبة');
   }
 
   const account = money(finite(input.accountCredit ?? 0));

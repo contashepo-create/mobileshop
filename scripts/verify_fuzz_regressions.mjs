@@ -634,5 +634,87 @@ t('returning every unit leaves no stranded piastre',
   Math.abs(hdrR.rem) < 0.011 && hdrR.st === 'completed',
   `remaining ${hdrR.rem}, status ${hdrR.st}`);
 
+// ===================================================================
+// Round 5 — a blind spot found by MUTATION TESTING.
+//
+// Breaking `restoreStockAtCost` on purpose — so returned goods re-enter at
+// whatever stale price the empty pool still carried, instead of the cost they
+// actually left at — was not detected by ANY suite. The fault inflated
+// inventory from 100 to 300 in the scenario below, so it was well worth
+// catching. The gap existed because every earlier test returned goods into a
+// pool that still held stock, where the weighted average hides the difference.
+// ===================================================================
+seed();
+currentDb().exec('DELETE FROM stock_quantities');
+currentDb().exec('INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,10,10)');
+// Sell the pool EMPTY, so the row survives with a stale unit cost.
+await call('sales:create', { CustomerID: 1, items: [{ ItemID: 1, Quantity: 10, UnitPrice: 20 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 200,
+  CashAccountID: 1, fiscalYearId: 1 });
+const sidStale = q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v;
+// Restock at a very different price and clear it out again, so the leftover
+// CostPrice on the empty row is now 30 while the goods to be returned cost 10.
+await call('purchases:create', { SupplierID: 1,
+  items: [{ ItemID: 1, Quantity: 5, UnitCost: 30, WarehouseID: 1 }],
+  Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
+await call('sales:create', { CustomerID: 1, items: [{ ItemID: 1, Quantity: 5, UnitPrice: 50 }],
+  Discount: 0, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 250,
+  CashAccountID: 1, fiscalYearId: 1 });
+t('the emptied pool is left carrying a stale unit cost',
+  Math.abs(q('SELECT CostPrice v FROM stock_quantities WHERE ItemID=1').v - 30) < 0.011,
+  'stale cost ' + q('SELECT CostPrice v FROM stock_quantities WHERE ItemID=1').v);
+// Return the ORIGINAL goods, which cost 10 each, into that empty pool.
+await call('saleReturns:create', { SaleID: sidStale,
+  items: [{ ItemID: 1, Quantity: 10, UnitPrice: 20 }],
+  AccountCredit: 0, CashRefund: 200, CashAccountID: 1 });
+const backVal = q('SELECT ROUND(Quantity*CostPrice,2) v FROM stock_quantities WHERE ItemID=1').v;
+t('goods return at the cost they left at, not the stale pool price',
+  Math.abs(backVal - 100) < 0.011,
+  `inventory ${backVal}, expected 100 (10 units at 10)`);
+
+// ===================================================================
+// Round 6 — goods given away at a full discount could never come back.
+//
+// A 100% discount is a real transaction: a replacement, a goodwill item, a
+// promotion. `sales:create` accepts it and the goods leave the shelf. But the
+// settlement validator refused any return whose value was not strictly
+// positive, so those units were stranded outside inventory for ever — the shop
+// physically held them and no document could put them back.
+// ===================================================================
+seed();
+currentDb().exec('DELETE FROM stock_quantities');
+currentDb().exec('INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,100,10)');
+await call('sales:create', { CustomerID: 1, items: [{ ItemID: 1, Quantity: 5, UnitPrice: 20 }],
+  Discount: 100, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 0,
+  CashAccountID: 1, fiscalYearId: 1 });
+const sidFree = q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v;
+t('goods given away at a full discount do leave the shelf',
+  q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1').v === 95,
+  'stock ' + q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1').v);
+
+const freeRet = await call('saleReturns:create', { SaleID: sidFree,
+  items: [{ ItemID: 1, Quantity: 5, UnitPrice: 20 }], AccountCredit: 0, CashRefund: 0 });
+t('a zero-value return is accepted so the goods can come back',
+  freeRet.success === true, freeRet.message);
+t('the goods are back in stock',
+  q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1').v === 100,
+  'stock ' + q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1').v);
+t('no cash moved on a zero-value return',
+  Math.abs(q('SELECT Balance v FROM cash_accounts WHERE CashAccountID=1').v - 100000) < 0.011,
+  'cash ' + q('SELECT Balance v FROM cash_accounts WHERE CashAccountID=1').v);
+
+// ...and it must not become a way to take money out.
+seed();
+currentDb().exec('DELETE FROM stock_quantities');
+currentDb().exec('INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,100,10)');
+await call('sales:create', { CustomerID: 1, items: [{ ItemID: 1, Quantity: 5, UnitPrice: 20 }],
+  Discount: 100, TaxRate: 0, TaxAmount: 0, PaymentMethod: 'cash', PaidAmount: 0,
+  CashAccountID: 1, fiscalYearId: 1 });
+const abuse = await call('saleReturns:create',
+  { SaleID: q('SELECT SaleID v FROM sales ORDER BY SaleID DESC LIMIT 1').v,
+    items: [{ ItemID: 1, Quantity: 5, UnitPrice: 20 }],
+    AccountCredit: 0, CashRefund: 50, CashAccountID: 1 });
+t('a zero-value return cannot pay out cash', abuse.success === false, abuse.message);
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

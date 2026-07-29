@@ -41,6 +41,7 @@ const MAINT = join(ROOT, 'src/main/ipc/maintenance.handlers.ts');
 const INV = join(ROOT, 'src/main/ipc/inventory.handlers.ts');
 const DATATABLE = join(ROOT, 'src/renderer/src/components/shared/DataTable.tsx');
 const REPORTSPAGE = join(ROOT, 'src/renderer/src/pages/reports/ReportsPage.tsx');
+const DBH = join(ROOT, 'src/main/ipc/database.handlers.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -58,6 +59,7 @@ const SUITES = [
   'scripts/verify_maintenance.mjs',
   'scripts/verify_transfers.mjs',
   'scripts/verify_renderer_crash.mjs',
+  'scripts/verify_backup_integrity.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -195,6 +197,37 @@ const MUTANTS = [
     find: 'if (isFailure(result)) {',
     replace: 'if (false) {',
     why: 'a permission refusal is truthy, so it reaches the table as a payload',
+  },
+  // ---- backup integrity -------------------------------------------------
+  // Measured, not assumed: a 500-sale WAL database copied with copyFileSync
+  // read back as "no such table". These mutants reinstate that.
+  {
+    name: 'the daily backup copies a live WAL database again',
+    file: DBH,
+    find: 'await db.backup(backupPath);\n\n      // Clean old backups (keep last 7 days).',
+    replace: 'fs.copyFileSync(dbPath, backupPath);\n\n      // Clean old backups (keep last 7 days).',
+    why: 'produces an unreadable backup while reporting success',
+  },
+  {
+    name: 'the backup pruner deletes unrelated files again',
+    file: DBH,
+    find: "if (!/^auto_backup_\\d{4}-\\d{2}-\\d{2}\\.db$/.test(file)) continue;",
+    replace: '',
+    why: 'wipes anything older than 7 days the owner kept in that folder',
+  },
+  {
+    name: 'the database path accepts a file that is not SQLite',
+    file: DBH,
+    find: "if (read < 16 || header.toString('utf-8', 0, 15) !== 'SQLite format 3') {",
+    replace: 'if (false) {',
+    why: 'the app only fails at the NEXT startup, and then will not open at all',
+  },
+  {
+    name: 'the whole database may be uploaded over plain http',
+    file: DBH,
+    find: "if (target.protocol !== 'https:') {",
+    replace: 'if (false) {',
+    why: 'customers, balances and password hashes cross the network in clear',
   },
 ];
 

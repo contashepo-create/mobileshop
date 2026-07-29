@@ -130,21 +130,42 @@ export function registerDatabaseHandlers() {
     }
 
     try {
-      fs.copyFileSync(dbPath, backupPath);
+      // SQLite's own backup API, NOT fs.copyFileSync.
+      //
+      // The database runs in WAL mode (see connection.ts), so recent
+      // transactions live in the `-wal` sidecar file until a checkpoint folds
+      // them back into the main file. Copying only the main file was measured
+      // against a database holding 500 sales: the copy did not merely lose the
+      // newest rows, it was UNREADABLE — "no such table: sales" — because even
+      // the schema was still in the -wal. A shop restoring that file would find
+      // its entire history gone, with the backup having reported success.
+      //
+      // `db.backup()` checkpoints and produces a consistent standalone file.
+      // `src/main/index.ts` was already fixed this way; this handler is the
+      // copy that was left behind, and it is the one the Backup button calls.
+      await db.backup(backupPath);
 
-      // Clean old backups (keep last 7 days)
-      const files = fs.readdirSync(backupDir);
+      // Clean old backups (keep last 7 days).
+      //
+      // Only files this function created are eligible. The previous version
+      // deleted EVERY entry older than 7 days in the folder — including a
+      // manual backup the owner had deliberately stored there — and threw on
+      // sub-directories, which aborted the whole handler.
       const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000);
-      for (const file of files) {
+      for (const file of fs.readdirSync(backupDir)) {
+        if (!/^auto_backup_\d{4}-\d{2}-\d{2}\.db$/.test(file)) continue;
         const filePath = path.join(backupDir, file);
-        const stats = fs.statSync(filePath);
-        if (stats.mtimeMs < cutoff) {
-          fs.unlinkSync(filePath);
-        }
+        try {
+          const stats = fs.statSync(filePath);
+          if (stats.isFile() && stats.mtimeMs < cutoff) {
+            fs.unlinkSync(filePath);
+          }
+        } catch { /* skip unreadable entries */ }
       }
 
       return { success: true, path: backupPath };
     } catch (err: any) {
+      console.error('[DB] Auto-backup failed:', err);
       return { success: false, message: err.message };
     }
   });
@@ -195,6 +216,27 @@ export function registerDatabaseHandlers() {
       return { success: false, message: 'الملف غير موجود في المسار المحدد' };
     }
 
+    // Verify the file really is a SQLite database BEFORE pointing the app at
+    // it. `setDbPath` writes to db_settings.json, which is read on the next
+    // launch — so accepting a wrong file (a .txt renamed to .db, a Word
+    // document, a truncated download) does not fail here, it fails at STARTUP,
+    // leaving the shop with an application that will not open and no obvious
+    // way back. Every SQLite file begins with the 16-byte magic string
+    // "SQLite format 3\0"; `backup:restore` already checks this and this path
+    // is the one that was missing it.
+    try {
+      const header = Buffer.alloc(16);
+      const fd = fs.openSync(newPath, 'r');
+      const read = fs.readSync(fd, header, 0, 16, 0);
+      fs.closeSync(fd);
+      if (read < 16 || header.toString('utf-8', 0, 15) !== 'SQLite format 3') {
+        return { success: false, message: 'الملف المختار ليس قاعدة بيانات SQLite صالحة' };
+      }
+    } catch (err: any) {
+      console.error('[DB] changePath validation failed:', err);
+      return { success: false, message: 'تعذر قراءة الملف المختار' };
+    }
+
     // Save the new path in settings file (not DB, since DB path is changing)
     setDbPath(newPath);
 
@@ -232,9 +274,13 @@ export function registerDatabaseHandlers() {
       return { success: false, message: 'يوجد قاعدة بيانات بهذا الاسم بالفعل في هذا المسار' };
     }
 
-    // Copy current database to network path
+    // Seed the shared database with SQLite's backup API, not a file copy.
+    // In WAL mode a plain copy can produce an unreadable file (measured: a
+    // 500-sale database copied this way reported "no such table"), and here
+    // the damage is worse than a bad backup — it would become the LIVE
+    // database every workstation then connects to.
     const currentDb = getDb();
-    fs.copyFileSync(currentDb.name, dbPath);
+    await currentDb.backup(dbPath);
 
     // Save path in settings
     currentDb.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('db_path', ?)").run(dbPath);
@@ -330,8 +376,24 @@ export function registerDatabaseHandlers() {
     const today = businessToday();
     const backupPath = path.join(app.getPath('temp'), `mobile_shop_${today}.db`);
 
+    // Refuse to send the shop's whole database over an unencrypted channel.
+    // This payload contains every customer, balance, price and password hash
+    // in the business; on plain http:// it is readable by anyone on the path.
+    let target: URL;
     try {
-      fs.copyFileSync(dbPath, backupPath);
+      target = new URL(config.url);
+    } catch {
+      return { success: false, message: 'رابط السحابة غير صالح' };
+    }
+    if (target.protocol !== 'https:') {
+      return { success: false, message: 'يجب أن يبدأ رابط السحابة بـ https — الرفع عبر http غير آمن' };
+    }
+
+    try {
+      // WAL-safe: a plain copy of a live WAL database can be unreadable, and
+      // an unreadable off-site backup is worse than none because the shop
+      // believes it is protected.
+      await db.backup(backupPath);
       const fileBuffer = fs.readFileSync(backupPath);
 
       if (config.type === 'supabase') {

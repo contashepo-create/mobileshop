@@ -38,6 +38,7 @@ const SALES = join(ROOT, 'src/main/ipc/sales.handlers.ts');
 const PURCHASES = join(ROOT, 'src/main/ipc/purchases.handlers.ts');
 const STOCK = join(ROOT, 'src/main/database/stock.ts');
 const MAINT = join(ROOT, 'src/main/ipc/maintenance.handlers.ts');
+const INV = join(ROOT, 'src/main/ipc/inventory.handlers.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -53,6 +54,7 @@ const SUITES = [
   'scripts/verify_trade_ledger_model.mjs',
   'scripts/verify_trade_reports_agree.mjs',
   'scripts/verify_maintenance.mjs',
+  'scripts/verify_transfers.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -144,6 +146,20 @@ const MUTANTS = [
     find: "      if (!Number.isFinite(v) || v < 0) {\n        return { success: false, message: `${label} يجب أن يكون رقماً غير سالب` };",
     replace: '      if (false) {\n        return { success: false, message: `${label}` };',
     why: 'a bill of -500 flows into the customer balance and the profit report',
+  },
+  {
+    name: 'a negative transfer quantity is accepted',
+    file: INV,
+    find: '      if (!Number.isFinite(qty) || qty <= 0) {',
+    replace: '      if (false) {',
+    why: 'invents stock in one warehouse and phantom stock in another',
+  },
+  {
+    name: 'a transfer keeps the destination price instead of the source cost',
+    file: INV,
+    find: 'const movedCost = existingFrom?.CostPrice ?? item.UnitCost ?? 0;',
+    replace: 'const movedCost = item.UnitCost ?? 0;',
+    why: 'moving goods silently writes off the difference in value',
   },
   {
     name: 'the cash refund cap is removed',

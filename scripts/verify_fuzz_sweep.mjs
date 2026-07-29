@@ -47,21 +47,32 @@ console.log('='.repeat(74));
  * real regression, which is the one thing this file must never do.
  */
 const KNOWN_OPEN = new Map([
-  [29, 'delete:purchaseReturn can move net worth when a serialised item was '
-     + 'bought at different prices and the pool was re-averaged between the '
-     + 'debit note and its cancellation. DIAGNOSED: a purchase return whose '
-     + 'freight was WRITTEN OFF (empty pool) records FreightAbsorbed = 0, and '
-     + 'the reversal then restores the goods at the full LANDED cost — putting '
-     + '595 back for a 573 debit note, so the shop gains the freight twice. '
-     + 'Evidence: instrumenting the handler showed two otherwise identical '
-     + 'returns of the same goods restoring 573 and 595. '
-     + 'NOT YET FIXED: the obvious repair (restore at the supplier price when '
-     + 'the freight was written off, and re-derive the warehouse row from the '
-     + 'device records) fixes this seed but breaks two others, because sales, '
-     + 'purchases and their reversals each maintain the pool and the IMEI '
-     + 'records with separate arithmetic. The real repair is to make the device '
-     + 'records the single source for serialised stock everywhere, which needs '
-     + 'its own round of mutation and fuzz testing.'],
+  [29, 'delete:purchaseReturn can move net worth (~22 on the observed case) '
+     + 'when a serialised handset was bought with freight into an EMPTY pool, '
+     + 'so the freight was written off, and the debit note is later cancelled. '
+     + 'FULLY DIAGNOSED: `item_serials.CostPrice` keeps the LANDED cost even '
+     + 'after that freight has been expensed, so the reversal restores the '
+     + 'handset at 595 against a 573 credit and the shop gains the freight '
+     + 'twice. Frequency: 3 seeds in 200 (needs a long chain to reach). '
+     + '\n'
+     + 'SIX FIXES WERE WRITTEN AND ALL SIX REVERTED, each measured against '
+     + 'seeds 1-60 rather than argued: (1) restore at the supplier price when '
+     + 'the freight was written off; (2) re-derive the warehouse row from the '
+     + 'device records; (3) fold that correction into the residual the caller '
+     + 'books; (4) book it separately at each of the five call sites; (5) '
+     + 'collapse the three overlapping corrections in the reversal into one '
+     + 'measured entry; (6) write the device down and re-derive the pool in the '
+     + 'same step. Baseline fails 1 seed in 60. Attempts 1-4 and 6 failed 10, '
+     + 'attempt 5 failed 2, and the combination failed 17.\n'
+     + 'WHY THEY FAIL: `stock_quantities` is written in about eighteen places, '
+     + 'each with its own arithmetic, and `item_serials` in about eight more. '
+     + 'Correcting one path desynchronises the others, because a figure spread '
+     + 'across a pool equals a figure shared per device only while every unit '
+     + 'costs the same. The honest repair is to make the device records the '
+     + 'single source for serialised stock and derive the pool everywhere, '
+     + 'which touches every one of those sites and needs its own dedicated '
+     + 'round of mutation and fuzz testing rather than being bolted onto the '
+     + 'end of an audit.'],
 ]);
 
 let passed = 0;

@@ -335,6 +335,34 @@ export function registerInventoryHandlers() {
   }) => {
     const db = getDb();
     const dateStr = businessToday();
+
+    // === INPUT VALIDATION ===
+    // A transfer moves goods; it cannot create them.
+    //
+    // The availability check below only asked whether `Quantity > available`,
+    // which a NEGATIVE quantity passes trivially. Transferring -50 then added
+    // 50 to the source and -50 to the destination: fifty units invented out of
+    // nothing in one warehouse and fifty phantom units owed by another, with
+    // the stock value of both silently wrong from then on.
+    if (!Array.isArray(data.items) || data.items.length === 0) {
+      return { success: false, message: 'حدد الأصناف المراد نقلها' };
+    }
+    if (!data.FromWarehouseID || !data.ToWarehouseID) {
+      return { success: false, message: 'اختر المخزن المصدر والمخزن الوجهة' };
+    }
+    if (data.FromWarehouseID === data.ToWarehouseID) {
+      return { success: false, message: 'لا يمكن النقل إلى نفس المخزن' };
+    }
+    for (const item of data.items) {
+      const qty = typeof item.Quantity === 'number' ? item.Quantity : Number(item.Quantity);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return { success: false, message: 'الكمية المنقولة يجب أن تكون رقماً أكبر من صفر' };
+      }
+      if (!item.ItemID) {
+        return { success: false, message: 'أحد الأصناف غير صالح' };
+      }
+    }
+
     const transferNumber = nextDocNumber(db, 'warehouse_transfers', 'TransferNumber', 'TR', dateStr);
 
     // Check sufficient stock before transfer (unless negative stock allowed)

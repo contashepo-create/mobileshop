@@ -188,6 +188,10 @@ export async function loadHandlers() {
     // writes a mirror invoice into `sales`, so it must be exercised against the
     // SAME books as everything else rather than in isolation.
     'src/main/ipc/maintenance.handlers.ts',
+    // Transfers move the same goods between warehouses, so they belong in the
+    // same books as everything else.
+    'src/main/ipc/inventory.handlers.ts',
+    'src/main/ipc/transfers.handlers.ts',
   ];
   const loaded = [];
   for (const rel of mods) {

@@ -47,9 +47,21 @@ console.log('='.repeat(74));
  * real regression, which is the one thing this file must never do.
  */
 const KNOWN_OPEN = new Map([
-  [29, 'delete:purchaseReturn can move net worth when the pool was re-averaged '
-     + 'between the return and its cancellation (fuzzer-only so far; every '
-     + 'hand-built reproduction of the same shape balances exactly)'],
+  [29, 'delete:purchaseReturn can move net worth when a serialised item was '
+     + 'bought at different prices and the pool was re-averaged between the '
+     + 'debit note and its cancellation. DIAGNOSED: a purchase return whose '
+     + 'freight was WRITTEN OFF (empty pool) records FreightAbsorbed = 0, and '
+     + 'the reversal then restores the goods at the full LANDED cost — putting '
+     + '595 back for a 573 debit note, so the shop gains the freight twice. '
+     + 'Evidence: instrumenting the handler showed two otherwise identical '
+     + 'returns of the same goods restoring 573 and 595. '
+     + 'NOT YET FIXED: the obvious repair (restore at the supplier price when '
+     + 'the freight was written off, and re-derive the warehouse row from the '
+     + 'device records) fixes this seed but breaks two others, because sales, '
+     + 'purchases and their reversals each maintain the pool and the IMEI '
+     + 'records with separate arithmetic. The real repair is to make the device '
+     + 'records the single source for serialised stock everywhere, which needs '
+     + 'its own round of mutation and fuzz testing.'],
 ]);
 
 let passed = 0;

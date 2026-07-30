@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { checkAmount } from '../../shared/money';
 import { getCallerUserId } from '../security/ipcGuard';
 import { businessToday } from '../../shared/businessDate';
 
@@ -14,6 +15,10 @@ export function registerRentHandlers() {
     StartDate: string; PartyName?: string; PartyPhone?: string; Notes?: string;
   }) => {
     const db = getDb();
+    // Rent is an amount of money, so it follows the same rule as every other:
+    // the direction is the RentType, never the sign.
+    const amt = checkAmount(data?.Amount, 'قيمة الإيجار', { allowZero: false });
+    if (!amt.ok) return { success: false, message: amt.message };
     const result = db.prepare(`
       INSERT INTO rents (RentName, RentType, Amount, Period, StartDate, IsActive, PartyName, PartyPhone, Notes)
       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)

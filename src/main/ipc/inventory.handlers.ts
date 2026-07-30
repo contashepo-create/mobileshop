@@ -3,6 +3,7 @@ import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
 import { moveLots } from '../database/stock';
+import { checkAmount } from '../../shared/money';
 
 export function registerInventoryHandlers() {
   // ===== WAREHOUSES =====
@@ -162,6 +163,15 @@ export function registerInventoryHandlers() {
     if (!data.SalePrice) data.SalePrice = 0;
     if (!data.MinStock) data.MinStock = 0;
     if (!data.Unit) data.Unit = 'قطعة';
+
+    // A selling price below zero would pay the customer to take the goods.
+    // Measured: an item saved with SalePrice -900, which then priced every
+    // sale line made from it. CostPrice is already forced to 0 here and is
+    // derived from purchases, so only the price the shop sets needs checking.
+    const price = checkAmount(data.SalePrice, 'سعر البيع');
+    if (!price.ok) return { success: false, message: price.message };
+    const minStock = checkAmount(data.MinStock, 'حد التنبيه');
+    if (!minStock.ok) return { success: false, message: minStock.message };
 
     const safeData = {
       ItemName: data.ItemName,

@@ -201,6 +201,10 @@ export async function loadHandlers() {
     'src/main/ipc/settlement.handlers.ts',
     'src/main/ipc/openingBalance.handlers.ts',
     'src/main/ipc/rent.handlers.ts',
+    // The master-data modules. They create the accounts, wallets and items
+    // every other figure is built on, so a bad value here is permanent.
+    'src/main/ipc/assets.handlers.ts',
+    'src/main/ipc/hr.handlers.ts',
   ];
   const loaded = [];
   for (const rel of mods) {

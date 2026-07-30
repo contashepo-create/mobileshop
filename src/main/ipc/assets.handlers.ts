@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { checkAmount } from '../../shared/money';
 
 export function registerAssetsHandlers() {
   // ===== CASH ACCOUNTS (BANKS & SAFES) =====
@@ -17,6 +18,14 @@ export function registerAssetsHandlers() {
 
   ipcMain.handle('cashAccounts:create', async (_event, data: any) => {
     const db = getDb();
+    // A cash box cannot be created already holding less than nothing.
+    //
+    // Unlike a customer, whose negative balance legitimately means the shop
+    // owes them, physical money has no credit side. Measured before this
+    // guard: a safe was created at -99,999 and every later report — the
+    // balance sheet, total liquid funds, the stocktake screen — inherited it.
+    const bal = checkAmount(data?.Balance ?? 0, 'الرصيد الافتتاحي للخزينة');
+    if (!bal.ok) return { success: false, message: bal.message };
     const result = db.prepare(`
       INSERT INTO cash_accounts (AccountName, AccountType, Balance, BankName, AccountNumber, IsActive)
       VALUES (@AccountName, @AccountType, @Balance, @BankName, @AccountNumber, 1)

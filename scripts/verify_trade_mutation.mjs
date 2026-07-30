@@ -51,6 +51,8 @@ const STMT = join(ROOT, 'src/main/ipc/statement.handlers.ts');
 const REPORTS = join(ROOT, 'src/main/ipc/reports.handlers.ts');
 const PAY = join(ROOT, 'src/main/ipc/payroll.handlers.ts');
 const OPB = join(ROOT, 'src/main/ipc/openingBalance.handlers.ts');
+const ASSETS = join(ROOT, 'src/main/ipc/assets.handlers.ts');
+const RENT = join(ROOT, 'src/main/ipc/rent.handlers.ts');
 const SCHEMA = join(ROOT, 'src/main/database/schemaVersion.ts');
 const MAIN = join(ROOT, 'src/main/index.ts');
 
@@ -79,6 +81,7 @@ const SUITES = [
   'scripts/verify_serial_costing.mjs',
   'scripts/verify_stock_lots.mjs',
   'scripts/verify_reports_money.mjs',
+  'scripts/verify_master_data.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -331,6 +334,27 @@ const MUTANTS = [
     find: "WHERE VoucherType = 'receipt' AND (PartyType = 'general' OR PartyType IS NULL)",
     replace: "WHERE VoucherType = 'receipt'",
     why: 'collecting an old debt would be reported as fresh profit',
+  },
+  {
+    name: 'a cash box can be created holding a negative balance',
+    file: ASSETS,
+    find: "    const bal = checkAmount(data?.Balance ?? 0, 'الرصيد الافتتاحي للخزينة');\n    if (!bal.ok) return { success: false, message: bal.message };",
+    replace: '',
+    why: 'a safe opened at -99,999 poisons every later report permanently',
+  },
+  {
+    name: 'an item can be sold at a negative price',
+    file: INV,
+    find: "    const price = checkAmount(data.SalePrice, 'سعر البيع');\n    if (!price.ok) return { success: false, message: price.message };",
+    replace: '',
+    why: 'the shop would pay the customer to take the goods',
+  },
+  {
+    name: 'rent can be a negative amount',
+    file: RENT,
+    find: "    const amt = checkAmount(data?.Amount, 'قيمة الإيجار', { allowZero: false });\n    if (!amt.ok) return { success: false, message: amt.message };",
+    replace: '',
+    why: 'direction is the RentType, never the sign of the money',
   },
   // ---- upgrade safety ----------------------------------------------------
   {

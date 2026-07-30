@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
+import { moveLots } from '../database/stock';
 
 export function registerInventoryHandlers() {
   // ===== WAREHOUSES =====
@@ -419,6 +420,11 @@ export function registerInventoryHandlers() {
         } else {
           db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(item.ItemID, data.ToWarehouseID, item.Quantity, movedCost);
         }
+
+        // Move the cost layers too, so the receiving warehouse holds the goods
+        // at what they really cost rather than at the destination's average.
+        moveLots(db, item.ItemID, data.FromWarehouseID, data.ToWarehouseID,
+                 item.Quantity, movedCost);
 
         // Move the actual devices, not just the pooled quantity.
         //

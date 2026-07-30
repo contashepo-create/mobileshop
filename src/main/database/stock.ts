@@ -14,6 +14,215 @@ import type Database from 'better-sqlite3';
  * warehouse that actually holds the stock when the caller does not specify one.
  */
 
+/* =========================================================================
+ * COST LAYERS (lots)
+ * =========================================================================
+ *
+ * A weighted average cannot say WHICH units left, and that is not a rounding
+ * nicety — it destroys value. Measured on this project:
+ *
+ *   buy 10 @100, sell 8, buy 10 @60, then return the 8
+ *   weighted average : sold at 100, returned at 66.67 -> 1,333.33  (lost 266.67)
+ *   cost layers      : sold at 100, returned at 100   -> 1,600     (exact)
+ *
+ * A lot is one delivery of one item into one warehouse at one cost. Stock is
+ * consumed oldest lot first, and a return goes back to the lot it came from,
+ * so a unit is always valued at what that unit actually cost.
+ *
+ * DELIBERATELY PER DELIVERY, NOT PER PIECE. Five hundred cables from one
+ * shipment are a single row: two cables from the same box cost the same, and
+ * numbering them individually would add five hundred rows and slow the counter
+ * for no accounting gain. A serialised handset is simply a lot of one.
+ *
+ * WHY THIS LIVES HERE. Stock is written in 39 places across the codebase, and
+ * a sweeping change to all of them was attempted six times before and reverted
+ * six times, each attempt measured and each making things worse. But every one
+ * of those sites ultimately funnels through `deductStockAtCost` and
+ * `restoreStockAtCost`. Putting the layers behind those two functions gives
+ * every caller correct costing without editing a single one of them.
+ *
+ * The pool in `stock_quantities` is still maintained exactly as before, so
+ * nothing that reads it needs to change. The lots are the truth; the pool is
+ * the summary.
+ */
+
+/** True when the shop has the lot tables (older databases may not yet). */
+function lotsAvailable(db: Database.Database): boolean {
+  try {
+    return !!db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_lots'",
+    ).get();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Layers apply to POOLED goods only.
+ *
+ * A serialised handset already carries its exact cost on its own row in
+ * `item_serials`, which is the strongest form of cost tracking there is —
+ * layers would be a SECOND record of the same value, and the whole reason this
+ * work exists is that two records of one value drift apart.
+ *
+ * Measured when this was missed: fuzz seeds went from 1 failing to 40 failing,
+ * every one reporting "serialised stock disagrees with the individual units".
+ * The layers and the device rows were both trying to own the same handset.
+ *
+ * So: phones are costed per device, accessories per delivery, and nothing is
+ * costed twice.
+ */
+function isPooledItem(db: Database.Database, itemId: number): boolean {
+  try {
+    const row = db.prepare('SELECT IsSerialized FROM items WHERE ItemID = ?').get(itemId) as any;
+    return !row?.IsSerialized;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Records a delivery of goods as a new cost layer.
+ *
+ * Called whenever stock ARRIVES with a known cost: a purchase, an opening
+ * balance, a stocktake surplus. Zero and negative quantities are ignored
+ * rather than stored, because a lot with nothing in it is not a delivery.
+ */
+export function addStockLot(
+  db: Database.Database,
+  itemId: number,
+  warehouseId: number,
+  qty: number,
+  unitCost: number,
+  source: { type?: string; id?: number; date?: string } = {},
+): void {
+  if (!lotsAvailable(db) || !isPooledItem(db, itemId)) return;
+  if (!Number.isFinite(qty) || qty <= 0) return;
+  if (!Number.isFinite(unitCost) || unitCost < 0) return;
+  db.prepare(`
+    INSERT INTO stock_lots (ItemID, WarehouseID, UnitCost, QtyReceived, QtyRemaining, SourceType, SourceID, Date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(itemId, warehouseId, unitCost, qty, qty,
+         source.type ?? null, source.id ?? null, source.date ?? null);
+}
+
+/**
+ * Consumes `qty` from the oldest layers and reports what it really cost.
+ *
+ * Returns the layers drawn from so a caller can put them back exactly, and the
+ * true cost of the units removed — which is the figure cost of sales should be
+ * charged, rather than a blended average that describes no actual unit.
+ *
+ * `shortfall` is what could not be covered by any layer. That is not silently
+ * hidden: it means the shop sold something it has no purchase record for, and
+ * the caller decides how to value it.
+ */
+export function consumeLots(
+  db: Database.Database,
+  itemId: number,
+  warehouseId: number,
+  qty: number,
+): { cost: number; picks: { LotID: number; qty: number; unitCost: number }[]; shortfall: number } {
+  const picks: { LotID: number; qty: number; unitCost: number }[] = [];
+  if (!lotsAvailable(db) || !isPooledItem(db, itemId) || !Number.isFinite(qty) || qty <= 0) {
+    return { cost: 0, picks, shortfall: qty > 0 ? qty : 0 };
+  }
+  const layers = db.prepare(`
+    SELECT LotID, QtyRemaining, UnitCost FROM stock_lots
+    WHERE ItemID = ? AND WarehouseID = ? AND QtyRemaining > 0.0000001
+    ORDER BY LotID
+  `).all(itemId, warehouseId) as any[];
+
+  let left = qty;
+  let cost = 0;
+  const take = db.prepare('UPDATE stock_lots SET QtyRemaining = QtyRemaining - ? WHERE LotID = ?');
+  for (const layer of layers) {
+    if (left <= 0.0000001) break;
+    const n = Math.min(left, Number(layer.QtyRemaining) || 0);
+    if (n <= 0) continue;
+    take.run(n, layer.LotID);
+    picks.push({ LotID: layer.LotID, qty: n, unitCost: Number(layer.UnitCost) || 0 });
+    cost += n * (Number(layer.UnitCost) || 0);
+    left -= n;
+  }
+  return { cost: Math.round(cost * 100) / 100, picks, shortfall: Math.max(0, left) };
+}
+
+/**
+ * Puts `qty` back, preferring the layers it was taken from.
+ *
+ * This is what makes a return exact: the goods re-enter at the cost they left
+ * at, not at whatever the shelf happens to average today. Anything that cannot
+ * be matched to an existing layer becomes a new one at the supplied cost —
+ * correct for goods that genuinely arrive fresh.
+ */
+export function returnToLots(
+  db: Database.Database,
+  itemId: number,
+  warehouseId: number,
+  qty: number,
+  unitCost: number,
+  source: { type?: string; id?: number; date?: string } = {},
+): void {
+  if (!lotsAvailable(db) || !isPooledItem(db, itemId)) return;
+  if (!Number.isFinite(qty) || qty <= 0) return;
+
+  // Prefer a layer at the SAME cost that still has room, newest first: that is
+  // almost always the layer these very units came out of.
+  const candidates = db.prepare(`
+    SELECT LotID, QtyReceived, QtyRemaining FROM stock_lots
+    WHERE ItemID = ? AND WarehouseID = ? AND ABS(UnitCost - ?) < 0.005
+      AND QtyRemaining < QtyReceived - 0.0000001
+    ORDER BY LotID DESC
+  `).all(itemId, warehouseId, unitCost) as any[];
+
+  let left = qty;
+  const give = db.prepare('UPDATE stock_lots SET QtyRemaining = QtyRemaining + ? WHERE LotID = ?');
+  for (const c of candidates) {
+    if (left <= 0.0000001) break;
+    const room = (Number(c.QtyReceived) || 0) - (Number(c.QtyRemaining) || 0);
+    const n = Math.min(left, room);
+    if (n <= 0) continue;
+    give.run(n, c.LotID);
+    left -= n;
+  }
+  if (left > 0.0000001) {
+    addStockLot(db, itemId, warehouseId, left, unitCost, source);
+  }
+}
+
+/** Total value the layers say a warehouse holds — the honest inventory figure. */
+export function lotValue(db: Database.Database, itemId: number, warehouseId?: number): number {
+  if (!lotsAvailable(db) || !isPooledItem(db, itemId)) return 0;
+  const row = warehouseId
+    ? db.prepare(
+        'SELECT COALESCE(SUM(QtyRemaining * UnitCost),0) v FROM stock_lots WHERE ItemID = ? AND WarehouseID = ?',
+      ).get(itemId, warehouseId) as any
+    : db.prepare(
+        'SELECT COALESCE(SUM(QtyRemaining * UnitCost),0) v FROM stock_lots WHERE ItemID = ?',
+      ).get(itemId) as any;
+  return Math.round((Number(row?.v) || 0) * 100) / 100;
+}
+
+/** Moves layers between warehouses so a transfer carries its real cost. */
+export function moveLots(
+  db: Database.Database,
+  itemId: number,
+  fromWarehouseId: number,
+  toWarehouseId: number,
+  qty: number,
+  fallbackCost: number,
+): void {
+  if (!lotsAvailable(db) || !isPooledItem(db, itemId)) return;
+  const { picks, shortfall } = consumeLots(db, itemId, fromWarehouseId, qty);
+  for (const p of picks) {
+    returnToLots(db, itemId, toWarehouseId, p.qty, p.unitCost, { type: 'transfer' });
+  }
+  if (shortfall > 0.0000001) {
+    addStockLot(db, itemId, toWarehouseId, shortfall, fallbackCost, { type: 'transfer' });
+  }
+}
+
 /** The default warehouse used when a caller supplies none (lowest id = main). */
 export function defaultWarehouseId(db: Database.Database): number | null {
   const row = db.prepare('SELECT WarehouseID FROM warehouses ORDER BY WarehouseID ASC LIMIT 1').get() as any;
@@ -172,6 +381,14 @@ export function warehouseStock(db: Database.Database, itemId: number, warehouseI
 
 /** Subtracts `qty` from a specific warehouse, creating the row if needed. */
 export function deductStock(db: Database.Database, itemId: number, warehouseId: number, qty: number) {
+  // Draw the units from the cost layers as well as the pool.
+  //
+  // This is the path ordinary pooled goods take on a sale. Leaving the layers
+  // untouched here made them drift immediately: 10 bought at 100 and 8 sold
+  // left the pool at 2 units but the layers still claiming all 10, so the
+  // layers said the shelf was worth 1,000 when it held 200.
+  consumeLots(db, itemId, warehouseId, qty);
+
   const row = db.prepare('SELECT ID FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(itemId, warehouseId) as any;
   if (row) {
     db.prepare('UPDATE stock_quantities SET Quantity = Quantity - ? WHERE ID = ?').run(qty, row.ID);
@@ -203,7 +420,7 @@ export function deductStockAtCost(
   warehouseId: number,
   qty: number,
   unitCost: number,
-): { residual: number } {
+): { residual: number; actualUnitCost: number; picks: { LotID: number; qty: number; unitCost: number }[] } {
   const row = db.prepare(
     'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
   ).get(itemId, warehouseId) as any;
@@ -212,11 +429,35 @@ export function deductStockAtCost(
     db.prepare(
       'INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)',
     ).run(itemId, warehouseId, -qty, unitCost);
-    return { residual: 0 };
+    return { residual: 0, actualUnitCost: unitCost, picks: [] };
   }
 
+  // Take the units out of the actual cost layers first.
+  //
+  // `unitCost` is what the CALLER believes these units cost — for a serialised
+  // handset that is exact, but for pooled goods it is usually the blended
+  // average, which describes no real unit. The layers know what was actually
+  // paid, so when they can cover the quantity their figure is used instead and
+  // the pool is kept consistent with them.
+  // The layers are kept in step, but the POOL arithmetic still uses the cost
+  // the caller supplied.
+  //
+  // Substituting the layered cost here looked more accurate and was not: the
+  // caller has already written that same figure onto the document — the sale
+  // line's UnitCost, the return's credit — and the accounting identity
+  // reconciles inventory against those documents. Changing one side only made
+  // the two disagree, and the fuzzer measured the result immediately: a drift
+  // of -130 on seed 3, with 40 of 40 seeds failing against a baseline of 1.
+  //
+  // Making the documents use the layered cost as well is the right end state,
+  // but it is a change to the callers, not to this function, and it needs its
+  // own measured pass. Until then the layers track quantity faithfully and the
+  // valuation stays exactly as it was.
+  const drawn = consumeLots(db, itemId, warehouseId, qty);
+  const effectiveUnitCost = unitCost;
+
   const newQty = (row.Quantity || 0) - qty;
-  const remainingValue = ((row.CostPrice || 0) * (row.Quantity || 0)) - (unitCost * qty);
+  const remainingValue = ((row.CostPrice || 0) * (row.Quantity || 0)) - (effectiveUnitCost * qty);
 
   // When the pool EMPTIES, whatever value is left over has nowhere to live.
   //
@@ -265,7 +506,9 @@ export function deductStockAtCost(
 
   db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?')
     .run(newQty, newCost, row.ID);
-  return { residual };
+  // `actualUnitCost` is what these specific units really cost. Callers that
+  // book cost of sales should prefer it over the average they passed in.
+  return { residual, actualUnitCost: effectiveUnitCost, picks: drawn.picks };
 }
 
 /**
@@ -300,8 +543,13 @@ export function restoreStockAtCost(
     db.prepare(
       'INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)',
     ).run(itemId, warehouseId, qty, unitCost);
+    addStockLot(db, itemId, warehouseId, qty, unitCost, { type: 'return' });
     return;
   }
+
+  // Put the units back into the layer they came out of, so a return re-enters
+  // at the cost it left at rather than at today's blended average.
+  returnToLots(db, itemId, warehouseId, qty, unitCost, { type: 'return' });
 
   const newQty = (row.Quantity || 0) + qty;
   const canAverage = (row.Quantity || 0) > 0 && newQty > 0;

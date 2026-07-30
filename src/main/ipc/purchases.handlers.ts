@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { resolveSourceWarehouse, warehouseStock, deductStock, deductStockAtCost, restoreStockAtCost, recordValuationResidual } from '../database/stock';
+import { resolveSourceWarehouse, warehouseStock, deductStock, deductStockAtCost, restoreStockAtCost, recordValuationResidual, addStockLot } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
 
@@ -322,6 +322,15 @@ export function registerPurchasesHandlers() {
           } else {
             db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(item.ItemID, item.WarehouseID, item.Quantity, effectiveUnitCost);
           }
+
+          // Record the delivery as its own cost layer, at the LANDED cost.
+          //
+          // This is what lets a later sale or return be valued at what these
+          // particular units actually cost, instead of a blended average that
+          // describes no real unit. The pool above is still maintained, so
+          // everything that reads it is unaffected.
+          addStockLot(db, item.ItemID, item.WarehouseID, item.Quantity, effectiveUnitCost,
+            { type: 'purchase', id: Number(purchaseId), date: dateStr });
 
           // Update items.CostPrice to reflect weighted average across all warehouses
           const allStock = db.prepare('SELECT SUM(Quantity) as totalQty, SUM(CostPrice * Quantity) as totalValue FROM stock_quantities WHERE ItemID = ?').get(item.ItemID) as any;

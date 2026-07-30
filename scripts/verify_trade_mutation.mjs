@@ -76,6 +76,7 @@ const SUITES = [
   'scripts/verify_fuzz_back_office.mjs',
   'scripts/verify_upgrade_safety.mjs',
   'scripts/verify_serial_costing.mjs',
+  'scripts/verify_stock_lots.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -307,6 +308,20 @@ const MUTANTS = [
     find: '        } else if (isSerialised) {',
     replace: '        } else if (false) {',
     why: 'the pool moves but every device stays in the source warehouse',
+  },
+  {
+    name: 'a return re-enters stock at the blended average, not its own cost',
+    file: STOCK,
+    find: "  returnToLots(db, itemId, warehouseId, qty, unitCost, { type: 'return' });",
+    replace: '',
+    why: 'buy 10@100, sell 8, buy 10@60, return the 8 -> 266.67 of value evaporates',
+  },
+  {
+    name: 'a sale does not draw from the cost layers',
+    file: STOCK,
+    find: '  consumeLots(db, itemId, warehouseId, qty);\n\n  const row = db.prepare',
+    replace: '  const row = db.prepare',
+    why: 'the layers claim stock that has already been sold',
   },
   // ---- upgrade safety ----------------------------------------------------
   {

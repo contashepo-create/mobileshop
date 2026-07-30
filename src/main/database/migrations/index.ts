@@ -527,6 +527,38 @@ export function runMigrations(db: Database.Database) {
     -- can be charged to the profit and loss account like any other adjustment.
     -- A positive amount is value written OFF; a negative one is value written
     -- back on.
+    -- COST LAYERS ("lots")
+    --
+    -- A weighted average cannot say WHICH units left. Buy 10 at 100, sell 8,
+    -- buy 10 at 60, then return the 8: the average has moved to 66.67, so the
+    -- goods come back valued at 66.67 having left at 100, and 266.67 of
+    -- inventory value evaporates with no entry anywhere. Measured.
+    --
+    -- A lot is one delivery of one item into one warehouse at one cost. Stock
+    -- is consumed oldest-lot-first and returns go back to the lot they came
+    -- from, so a unit's cost is always the cost that unit was bought at.
+    --
+    -- This is per DELIVERY, not per piece: 500 cables from one shipment are a
+    -- single row, because two cables from the same box cost the same and
+    -- numbering them individually would slow the counter for no accounting
+    -- gain. A serialised handset is simply a lot whose quantity is one.
+    CREATE TABLE IF NOT EXISTS stock_lots (
+      LotID         INTEGER PRIMARY KEY AUTOINCREMENT,
+      ItemID        INTEGER NOT NULL,
+      WarehouseID   INTEGER NOT NULL,
+      UnitCost      REAL NOT NULL,
+      QtyReceived   REAL NOT NULL,
+      QtyRemaining  REAL NOT NULL,
+      SourceType    TEXT,
+      SourceID      INTEGER,
+      Date          TEXT,
+      CreatedAt     TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (ItemID) REFERENCES items(ItemID),
+      FOREIGN KEY (WarehouseID) REFERENCES warehouses(WarehouseID)
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_lots_pick
+      ON stock_lots (ItemID, WarehouseID, QtyRemaining);
+
     CREATE TABLE IF NOT EXISTS inventory_adjustments (
       AdjustmentID INTEGER PRIMARY KEY AUTOINCREMENT,
       Date         TEXT NOT NULL,

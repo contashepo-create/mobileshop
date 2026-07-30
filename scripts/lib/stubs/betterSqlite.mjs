@@ -40,7 +40,14 @@ class Wrapped {
   transaction(fn) {
     const self = this;
     return function wrapped(...args) {
-      if (self._inTx) return fn.apply(this, args);
+      // `_inTx` only tracks transactions this wrapper opened. The runtime book
+      // guard opens a SAVEPOINT with `exec`, which puts the connection in a
+      // transaction without this flag knowing — and the stub then issued a
+      // second BEGIN and failed with "cannot start a transaction within a
+      // transaction". Real better-sqlite3 converts a nested transaction into a
+      // savepoint and copes fine (measured), so the stub must ask the driver
+      // rather than rely on its own bookkeeping.
+      if (self._inTx || self._db.isTransaction) return fn.apply(this, args);
       self._inTx = true;
       self._db.exec('BEGIN');
       try {

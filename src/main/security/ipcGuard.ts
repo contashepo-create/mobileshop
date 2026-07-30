@@ -15,6 +15,7 @@
  */
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
 import { getSession, type Session } from './session';
+import { isGuardedChannel, checkBooks, netWorth } from './bookGuard';
 
 export interface CallerContext {
   userId: number;
@@ -399,10 +400,103 @@ export function installIpcGuard() {
         }
       }
 
-      return listener(event, ...args);
+      // Read-only or non-financial channels run exactly as before.
+      if (!isGuardedChannel(channel)) {
+        return listener(event, ...args);
+      }
+      return runGuarded(channel, () => listener(event, ...args));
     });
   }) as typeof ipcMain.handle;
 }
+
+/**
+ * Runs a money-moving handler inside a SAVEPOINT and refuses to keep the result
+ * if it left the books in an impossible state.
+ *
+ * A SAVEPOINT rather than a transaction, because the handlers open transactions
+ * of their own: `db.transaction(...)` cannot be nested, but a savepoint wraps
+ * one perfectly and can still roll it back afterwards. Verified against real
+ * SQLite before this was written — a handler's own committed transaction is
+ * undone by `ROLLBACK TO`.
+ *
+ * The guard never invents an answer. If the operation is sound it is released
+ * untouched and the handler's own return value is passed through unchanged; if
+ * not, the data is restored and the user is told why in Arabic.
+ */
+async function runGuarded(channel: string, run: () => unknown): Promise<unknown> {
+  // The connection is imported lazily, on purpose. A static import would pull
+  // `better-sqlite3` — a native module — into every consumer of this file,
+  // including the offline verifiers that check the permission table without a
+  // database. Requiring it only when a guarded channel actually fires keeps
+  // this module importable anywhere.
+  let db: any;
+  try {
+    const mod = await import('../database/connection');
+    db = mod.getDb();
+  } catch {
+    // No database yet (first run). Nothing to protect.
+    return run();
+  }
+
+  let worthBefore: number | null = null;
+  try { worthBefore = netWorth(db); } catch { worthBefore = null; }
+
+  const sp = `bookguard_${(guardDepth += 1)}`;
+  try {
+    db.exec(`SAVEPOINT ${sp}`);
+  } catch {
+    // Could not open a savepoint; never block the shop from working.
+    guardDepth -= 1;
+    return run();
+  }
+
+  let result: unknown;
+  try {
+    result = await run();
+  } catch (err) {
+    try { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); } catch { /* already gone */ }
+    guardDepth -= 1;
+    throw err;
+  }
+
+  // A handler that reported its own failure has normally rolled itself back.
+  // Releasing is still correct: there is nothing to undo.
+  let verdict;
+  try {
+    verdict = checkBooks(db, channel, worthBefore);
+  } catch {
+    verdict = { ok: true as const };
+  }
+
+  try {
+    if (verdict.ok) {
+      db.exec(`RELEASE ${sp}`);
+    } else {
+      db.exec(`ROLLBACK TO ${sp}`);
+      db.exec(`RELEASE ${sp}`);
+    }
+  } catch { /* savepoint already unwound by the handler */ }
+  guardDepth -= 1;
+
+  if (!verdict.ok && verdict.breach) {
+    console.error(
+      `[BookGuard] refused ${channel}: ${verdict.breach.rule} — ${verdict.breach.detail}`,
+    );
+    return {
+      success: false,
+      code: 'BOOKS_INVARIANT',
+      message:
+        'تم رفض العملية للحفاظ على سلامة الحسابات. ' +
+        verdict.breach.detail +
+        ' برجاء إبلاغ الدعم الفني.',
+    };
+  }
+
+  return result;
+}
+
+/** Distinguishes nested savepoints so an inner one cannot release an outer. */
+let guardDepth = 0;
 
 /**
  * Trusted user id for handlers that receive `userId` as a POSITIONAL argument

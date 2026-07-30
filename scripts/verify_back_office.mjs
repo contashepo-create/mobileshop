@@ -388,5 +388,50 @@ console.log('\n[8] Advances cannot drive a wage below zero');
     !res?.success && books() === before, JSON.stringify(res).slice(0, 90));
 }
 
+// ---------------------------------------------------------------- 9
+console.log('\n[9] Opening balances are the foundation — they must be sane');
+// These channels write a balance DIRECTLY, with no document behind them, and
+// every later figure is built on top. A wrong opening balance is not an error
+// that shows up once; it is permanently baked into the books.
+{
+  seed();
+  const before = q('SELECT Balance v FROM cash_accounts WHERE CashAccountID=1').v;
+  const res = await call('openingBalances:updateCash', 1, -5000);
+  t('a cash box cannot open holding less than nothing',
+    !res?.success && q('SELECT Balance v FROM cash_accounts WHERE CashAccountID=1').v === before,
+    `balance ${q('SELECT Balance v FROM cash_accounts WHERE CashAccountID=1').v}`);
+}
+{
+  seed();
+  const before = q('SELECT Balance v FROM payment_methods WHERE PaymentMethodID=1').v;
+  const res = await call('openingBalances:updatePaymentMethod', 1, -3000);
+  t('nor can a wallet',
+    !res?.success && q('SELECT Balance v FROM payment_methods WHERE PaymentMethodID=1').v === before);
+}
+{
+  seed();
+  const before = q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1 AND WarehouseID=1').v;
+  const res = await call('openingBalances:updateStock', 1, 1, -50, 100);
+  t('you cannot open with minus fifty units on the shelf',
+    !res?.success && q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1 AND WarehouseID=1').v === before,
+    `quantity ${q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1 AND WarehouseID=1').v}`);
+}
+{
+  seed();
+  const before = q('SELECT CostPrice v FROM stock_quantities WHERE ItemID=1 AND WarehouseID=1').v;
+  const res = await call('openingBalances:updateStock', 1, 1, 10, -100);
+  t('nor at a negative unit cost',
+    !res?.success && q('SELECT CostPrice v FROM stock_quantities WHERE ItemID=1 AND WarehouseID=1').v === before);
+}
+{
+  seed();
+  // A customer CAN legitimately open in credit: it means the shop owes them.
+  // The guard must not over-reach and block a real accounting position.
+  const res = await call('openingBalances:updateCustomer', 1, -500);
+  t('but a customer may open in credit — the shop can owe them',
+    res?.success === true && q('SELECT Balance v FROM customers WHERE CustomerID=1').v === -500,
+    JSON.stringify(res));
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

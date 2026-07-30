@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { checkAmount } from '../../shared/money';
 
 export function registerOpeningBalanceHandlers() {
   // Get all opening balances overview
@@ -59,6 +60,12 @@ export function registerOpeningBalanceHandlers() {
   // Update cash account opening balance
   ipcMain.handle('openingBalances:updateCash', async (_event, id: number, balance: number) => {
     const db = getDb();
+    // A cash box cannot open holding less than nothing. Unlike a customer,
+    // whose negative balance legitimately means the shop owes them, physical
+    // money has no credit side — and this figure is the starting point every
+    // later balance is built on, so an error here is permanent.
+    const res = checkAmount(balance, 'الرصيد الافتتاحي للخزينة');
+    if (!res.ok) return { success: false, message: res.message };
     db.prepare('UPDATE cash_accounts SET Balance = ? WHERE CashAccountID = ?').run(balance, id);
     return { success: true };
   });
@@ -66,6 +73,8 @@ export function registerOpeningBalanceHandlers() {
   // Update payment method opening balance
   ipcMain.handle('openingBalances:updatePaymentMethod', async (_event, id: number, balance: number) => {
     const db = getDb();
+    const res = checkAmount(balance, 'الرصيد الافتتاحي لطريقة الدفع');
+    if (!res.ok) return { success: false, message: res.message };
     db.prepare('UPDATE payment_methods SET Balance = ? WHERE PaymentMethodID = ?').run(balance, id);
     return { success: true };
   });
@@ -94,6 +103,16 @@ export function registerOpeningBalanceHandlers() {
   // Update stock quantity opening balance
   ipcMain.handle('openingBalances:updateStock', async (_event, itemId: number, warehouseId: number, quantity: number, costPrice: number) => {
     const db = getDb();
+    // Neither a negative count nor a negative unit cost is a thing that can be
+    // observed on a shelf, and both would poison the stock valuation from the
+    // first day.
+    for (const [value, label] of [
+      [quantity, 'الكمية الافتتاحية'],
+      [costPrice, 'تكلفة الوحدة الافتتاحية'],
+    ] as const) {
+      const res = checkAmount(value, label);
+      if (!res.ok) return { success: false, message: res.message };
+    }
     const existing = db.prepare('SELECT ID FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(itemId, warehouseId) as any;
     if (existing) {
       db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?').run(quantity, costPrice, existing.ID);

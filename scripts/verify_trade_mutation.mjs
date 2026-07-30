@@ -49,6 +49,7 @@ const SET = join(ROOT, 'src/main/ipc/settlement.handlers.ts');
 const SVC = join(ROOT, 'src/main/ipc/services.handlers.ts');
 const STMT = join(ROOT, 'src/main/ipc/statement.handlers.ts');
 const PAY = join(ROOT, 'src/main/ipc/payroll.handlers.ts');
+const OPB = join(ROOT, 'src/main/ipc/openingBalance.handlers.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -288,6 +289,13 @@ const MUTANTS = [
     find: '      if (advance.IsDeducted) {',
     replace: '      if (false) {',
     why: 'the shop keeps the money twice and the employee is short',
+  },
+  {
+    name: 'an opening balance may be negative again',
+    file: OPB,
+    find: "    const res = checkAmount(balance, 'الرصيد الافتتاحي للخزينة');\n    if (!res.ok) return { success: false, message: res.message };",
+    replace: '',
+    why: 'a wrong opening figure is permanently baked into every later balance',
   },
   // ---- back office ------------------------------------------------------
   {

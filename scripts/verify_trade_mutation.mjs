@@ -75,6 +75,7 @@ const SUITES = [
   'scripts/verify_statements.mjs',
   'scripts/verify_fuzz_back_office.mjs',
   'scripts/verify_upgrade_safety.mjs',
+  'scripts/verify_serial_costing.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -299,6 +300,13 @@ const MUTANTS = [
     find: "    const res = checkAmount(balance, 'الرصيد الافتتاحي للخزينة');\n    if (!res.ok) return { success: false, message: res.message };",
     replace: '',
     why: 'a wrong opening figure is permanently baked into every later balance',
+  },
+  {
+    name: 'a warehouse transfer leaves the handsets behind',
+    file: INV,
+    find: '        } else if (isSerialised) {',
+    replace: '        } else if (false) {',
+    why: 'the pool moves but every device stays in the source warehouse',
   },
   // ---- upgrade safety ----------------------------------------------------
   {

@@ -420,9 +420,40 @@ export function registerInventoryHandlers() {
           db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(item.ItemID, data.ToWarehouseID, item.Quantity, movedCost);
         }
 
-        // If serial item, move the serial
+        // Move the actual devices, not just the pooled quantity.
+        //
+        // This only ran when the CALLER supplied a SerialID. The transfer
+        // screen sends a quantity, not IMEIs, so for a serialised item the
+        // pool moved to the destination while every handset stayed recorded in
+        // the source warehouse. Measured: after moving one phone, warehouse 1
+        // held 0 units but still listed the device, and warehouse 2 held one
+        // unit worth 16,500 with no device behind it. Stock reports, the
+        // stocktake screen and any "what is on this shelf" question all
+        // disagreed with each other from that moment on.
+        //
+        // The devices are now selected explicitly when none were named, oldest
+        // first, so the count that moves matches the quantity that moved.
+        const isSerialised = (db.prepare(
+          'SELECT IsSerialized FROM items WHERE ItemID = ?',
+        ).get(item.ItemID) as any)?.IsSerialized;
+
         if (item.SerialID) {
-          db.prepare('UPDATE item_serials SET WarehouseID = ? WHERE SerialID = ?').run(data.ToWarehouseID, item.SerialID);
+          db.prepare('UPDATE item_serials SET WarehouseID = ? WHERE SerialID = ?')
+            .run(data.ToWarehouseID, item.SerialID);
+        } else if (isSerialised) {
+          const movable = db.prepare(`
+            SELECT SerialID FROM item_serials
+            WHERE ItemID = ? AND WarehouseID = ? AND Status = 'available'
+            ORDER BY SerialID LIMIT ?
+          `).all(item.ItemID, data.FromWarehouseID, Math.floor(item.Quantity)) as any[];
+          if (movable.length < Math.floor(item.Quantity)) {
+            throw new Error(
+              `لا توجد أجهزة كافية بالرقم التسلسلي في المخزن المصدر: `
+              + `المطلوب ${Math.floor(item.Quantity)}، المتاح ${movable.length}`,
+            );
+          }
+          const move = db.prepare('UPDATE item_serials SET WarehouseID = ? WHERE SerialID = ?');
+          for (const s of movable) move.run(data.ToWarehouseID, s.SerialID);
         }
       }
     });

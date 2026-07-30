@@ -493,17 +493,27 @@ export function registerDeleteHandlers() {
                 restoreStockAtCost(db, sd.ItemID, sd.WarehouseID, sd.Quantity, sd.UnitCost || 0);
               }
             }
-            if (sale.CustomerID && sale.RemainingAmount > 0) {
-              db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(sale.RemainingAmount, sale.CustomerID);
-            } else if (sale.CustomerID && sale.RemainingAmount < 0) {
-              db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(Math.abs(sale.RemainingAmount), sale.CustomerID);
-            }
-            if (sale.CashAccountID && sale.PaidAmount > 0) {
-              db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(sale.PaidAmount, sale.CashAccountID);
-            }
-            if (sale.PaymentMethodID && sale.PaidAmount > 0) {
-              db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(sale.PaidAmount, sale.PaymentMethodID);
-            }
+            // NO customer/cash reversal from the mirror invoice.
+            //
+            // `maintenance:deliver` charges the customer and banks the payment
+            // exactly ONCE, from the DELIVERY record (steps 5 and 6 of that
+            // handler). The `sales` row it also writes is a MIRROR whose only
+            // purpose is to print an invoice and feed the sales reports: it
+            // repeats the same PaidAmount and RemainingAmount figures, but no
+            // money was ever moved on its behalf.
+            //
+            // Reversing it here as if it were a normal sale undid the same
+            // debt twice. Measured on a 1,000 repair with 400 paid: the
+            // customer owed 600 before the delete and was left at -600 after
+            // it, so the shop's books said it OWED the customer 600 for a
+            // repair that had simply been cancelled. On a fully-unpaid 800
+            // repair the swing was the full 1,600.
+            //
+            // The cash legs happened to be harmless only because `deliver`
+            // deliberately stores CashAccountID/PaymentMethodID on the mirror
+            // as NULL when the other one is used — an accident of that
+            // defence, not a guarantee. They are removed for the same reason:
+            // the money is already reversed above from `delivery.PaidAmount`.
             db.prepare('DELETE FROM sale_details WHERE SaleID = ?').run(delivery.SaleID);
             db.prepare('DELETE FROM sales WHERE SaleID = ?').run(delivery.SaleID);
           }

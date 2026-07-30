@@ -43,6 +43,7 @@ const DATATABLE = join(ROOT, 'src/renderer/src/components/shared/DataTable.tsx')
 const REPORTSPAGE = join(ROOT, 'src/renderer/src/pages/reports/ReportsPage.tsx');
 const DBH = join(ROOT, 'src/main/ipc/database.handlers.ts');
 const CONN = join(ROOT, 'src/main/database/connection.ts');
+const DEL = join(ROOT, 'src/main/ipc/delete.handlers.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -236,6 +237,16 @@ const MUTANTS = [
     find: '  if (db) return db.name;',
     replace: '',
     why: 'an offline network share made the app silently use another database while the restore wrote to the unreachable one',
+  },
+  {
+    name: 'deleting a delivery reverses the customer debt twice',
+    file: DEL,
+    find: '            // NO customer/cash reversal from the mirror invoice.',
+    replace: `            if (sale.CustomerID && sale.RemainingAmount > 0) {
+              db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(sale.RemainingAmount, sale.CustomerID);
+            }
+            //`,
+    why: 'a cancelled repair left the shop owing the customer what they had owed it',
   },
 ];
 

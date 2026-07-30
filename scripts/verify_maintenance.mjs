@@ -381,5 +381,51 @@ console.log('\n[15] Warranty parts are an expense, not a cost of sales');
     Math.abs(pl.costs.parts) < 0.011, 'costs.parts ' + pl.costs.parts);
 }
 
+// ---------------------------------------------------------------- 16
+console.log('\n[16] Deleting a delivery must not reverse the same debt twice');
+// `delete:maintenanceDelivery` had never been executed by any test. It moves
+// money in seven places, and `maintenance:deliver` writes the customer's debt
+// in TWO records: the delivery, and a MIRROR `sales` row that exists only to
+// print an invoice. The delete reversed both, so cancelling a repair left the
+// shop owing the customer the very amount they had owed the shop.
+//
+// Every payment shape is covered, because the first probe used a fully-paid
+// repair and passed — the fault only shows when something is still owed.
+for (const [label, paid, labour] of [
+  ['unpaid on credit', 0, 500],
+  ['partly paid', 500, 500],
+  ['paid in full', 800, 500],
+]) {
+  const db = seed();
+  await receive();
+  await issue({ TicketID: 1, ItemID: 1, Quantity: 2, SalePrice: 250 });
+  const opening = netWorth(db);
+  const custBefore = q('SELECT Balance v FROM customers WHERE CustomerID=1').v;
+  await deliver({ TicketID: 1, LaborCost: labour, PaidAmount: paid, CashAccountID: 1 });
+  const res = await call('delete:maintenanceDelivery',
+    q('SELECT DeliveryID v FROM maintenance_deliveries').v);
+
+  t(`${label}: the delete succeeds`, res?.success === true, JSON.stringify(res));
+  t(`${label}: net worth returns to where it was`,
+    Math.abs(netWorth(db) - opening) < 0.011,
+    `${opening} -> ${netWorth(db)} (moved ${r2(netWorth(db) - opening)})`);
+  t(`${label}: the customer owes exactly what they did before`,
+    Math.abs(q('SELECT Balance v FROM customers WHERE CustomerID=1').v - custBefore) < 0.011,
+    `${custBefore} -> ${q('SELECT Balance v FROM customers WHERE CustomerID=1').v}`);
+  t(`${label}: no customer is left with a phantom credit`,
+    q('SELECT COUNT(*) v FROM customers WHERE Balance < -0.005').v === 0,
+    'a cancelled repair must never make the shop a debtor');
+  t(`${label}: the cash drawer is back to its opening figure`,
+    Math.abs(q('SELECT Balance v FROM cash_accounts WHERE CashAccountID=1').v - 100000) < 0.011,
+    'cash ' + q('SELECT Balance v FROM cash_accounts WHERE CashAccountID=1').v);
+  t(`${label}: the mirror invoice is gone`,
+    q('SELECT COUNT(*) v FROM sales').v === 0);
+  t(`${label}: the parts are NOT credited back to stock a second time`,
+    q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1 AND WarehouseID=1').v === 48,
+    'stock ' + q('SELECT Quantity v FROM stock_quantities WHERE ItemID=1 AND WarehouseID=1').v);
+  t(`${label}: the ticket is reopened so it can be delivered again`,
+    q('SELECT Status v FROM maintenance_tickets WHERE TicketID=1').v === 'ready');
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

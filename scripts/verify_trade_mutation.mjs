@@ -42,6 +42,7 @@ const INV = join(ROOT, 'src/main/ipc/inventory.handlers.ts');
 const DATATABLE = join(ROOT, 'src/renderer/src/components/shared/DataTable.tsx');
 const REPORTSPAGE = join(ROOT, 'src/renderer/src/pages/reports/ReportsPage.tsx');
 const DBH = join(ROOT, 'src/main/ipc/database.handlers.ts');
+const CONN = join(ROOT, 'src/main/database/connection.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -228,6 +229,13 @@ const MUTANTS = [
     find: "if (target.protocol !== 'https:') {",
     replace: 'if (false) {',
     why: 'customers, balances and password hashes cross the network in clear',
+  },
+  {
+    name: 'a restore targets a different file from the one the app opened',
+    file: CONN,
+    find: '  if (db) return db.name;',
+    replace: '',
+    why: 'an offline network share made the app silently use another database while the restore wrote to the unreachable one',
   },
 ];
 

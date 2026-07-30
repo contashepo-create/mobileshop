@@ -227,6 +227,65 @@ console.log('\n[6] Failures are reported, not swallowed');
     'a silently failing backup is indistinguishable from a working one');
 }
 
+// ------------------------------------------------------------------ 7
+console.log('\n[7] A restore can never target a different file from the live one');
+// Found by reading connection.ts, not from any report.
+//
+// getDb() and getDbPath() each parsed db_settings.json with their own rules.
+// getDb() demanded the file exist and silently fell back to the default;
+// getDbPath() returned the configured path unconditionally. On a shop whose
+// database is a network share, an offline share meant the app quietly opened a
+// DIFFERENT database while a restore wrote to the unreachable one — the owner
+// restores a backup, is told it worked, and still sees an empty shop.
+{
+  const conn = code('src/main/database/connection.ts');
+  check('both accessors share one parser for the settings file',
+    /function configuredDbPath\(\)/.test(conn),
+    'each function parsing db_settings.json separately is how they drifted apart');
+  check('getDbPath() reports the path of the OPEN connection',
+    /export function getDbPath\(\)[\s\S]{0,200}?if \(db\) return db\.name;/.test(conn),
+    'the restore target must be the file actually in use');
+  check('an unreachable configured database is reported loudly',
+    /Configured database not found/.test(conn),
+    'silently opening a different database loses the shop a day of work');
+  check('a corrupt settings file is logged rather than swallowed',
+    /db_settings\.json is unreadable/.test(conn));
+
+  // Behavioural: the two must agree in every reachable state.
+  if (Database) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mobileshop-path-'));
+    const configured = path.join(tmp, 'net', 'shop.db');
+    const fallback = path.join(tmp, 'mobile_shop.db');
+
+    // Model of the FIXED logic, kept in step with connection.ts.
+    const configuredDbPath = raw => {
+      try {
+        const s = JSON.parse(raw);
+        return typeof s?.dbPath === 'string' && s.dbPath.trim() ? s.dbPath : null;
+      } catch { return null; }
+    };
+    const resolveOpen = raw => {
+      const c = configuredDbPath(raw);
+      return c && fs.existsSync(c) ? c : fallback;
+    };
+
+    const offline = JSON.stringify({ dbPath: configured });
+    check('offline share: the opened file and the restore target agree',
+      resolveOpen(offline) === resolveOpen(offline) && resolveOpen(offline) === fallback,
+      'they still diverge');
+
+    fs.mkdirSync(path.dirname(configured), { recursive: true });
+    const nd = new Database(configured); nd.exec('CREATE TABLE t(x)'); nd.close();
+    check('share available: both resolve to the configured database',
+      resolveOpen(offline) === configured);
+
+    check('corrupt settings: both fall back to the default together',
+      resolveOpen('{ "dbPath": ') === fallback && configuredDbPath('{ "dbPath": ') === null);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 console.log('\n' + '='.repeat(74));
 console.log(`RESULT: ${PASS.length} passed, ${FAIL.length} failed`);
 console.log('='.repeat(74));

@@ -52,6 +52,8 @@ const REPORTS = join(ROOT, 'src/main/ipc/reports.handlers.ts');
 const PAY = join(ROOT, 'src/main/ipc/payroll.handlers.ts');
 const OPB = join(ROOT, 'src/main/ipc/openingBalance.handlers.ts');
 const ASSETS = join(ROOT, 'src/main/ipc/assets.handlers.ts');
+const USERS = join(ROOT, 'src/main/ipc/users.handlers.ts');
+const FY = join(ROOT, 'src/main/ipc/fiscalYear.handlers.ts');
 const RENT = join(ROOT, 'src/main/ipc/rent.handlers.ts');
 const SCHEMA = join(ROOT, 'src/main/database/schemaVersion.ts');
 const MAIN = join(ROOT, 'src/main/index.ts');
@@ -82,6 +84,7 @@ const SUITES = [
   'scripts/verify_stock_lots.mjs',
   'scripts/verify_reports_money.mjs',
   'scripts/verify_master_data.mjs',
+  'scripts/verify_users_access.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -355,6 +358,27 @@ const MUTANTS = [
     find: "    const amt = checkAmount(data?.Amount, 'قيمة الإيجار', { allowZero: false });\n    if (!amt.ok) return { success: false, message: amt.message };",
     replace: '',
     why: 'direction is the RentType, never the sign of the money',
+  },
+  {
+    name: 'the last administrator can be deactivated',
+    file: USERS,
+    find: "    if (target.RoleID === ADMIN_ROLE_ID && target.IsActive && otherActiveAdmins(db, id) === 0) {",
+    replace: '    if (false) {',
+    why: 'the shop is locked out of its own books with no way back but hand-editing the database',
+  },
+  {
+    name: 'a user can be created with no password',
+    file: USERS,
+    find: "    const pwProblem = checkPassword(data?.password);\n    if (pwProblem) return { success: false, message: pwProblem };",
+    replace: '',
+    why: 'the account exists, fills a seat, and can never sign in',
+  },
+  {
+    name: 'two fiscal years can be open at once',
+    file: FY,
+    find: '    if (stillOpen) {',
+    replace: '    if (false) {',
+    why: 'getActive picks one arbitrarily, so postings land in the wrong year',
   },
   // ---- upgrade safety ----------------------------------------------------
   {

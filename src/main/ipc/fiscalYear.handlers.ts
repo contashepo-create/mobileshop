@@ -16,6 +16,39 @@ export function registerFiscalYearHandlers() {
 
   ipcMain.handle('fiscalYear:create', async (_event, data: { YearName: string; StartDate: string; EndDate: string }) => {
     const db = getDb();
+
+    // Exactly one year may be open at a time.
+    //
+    // `fiscalYear:getActive` resolves the year with `ORDER BY StartDate DESC
+    // LIMIT 1`, and settlements, salaries and every document stamp themselves
+    // with whatever it returns. With two years open that choice is silent and
+    // arbitrary: postings meant for the old year land in the new one, and
+    // every report that filters by year is then wrong in both directions with
+    // nothing on screen to explain it. Measured — a second year was created
+    // while the first was still open and both showed Status 'open'.
+    //
+    // Closing the previous year is a deliberate accounting act (it is what
+    // fixes the comparatives), so it is required rather than done implicitly.
+    const stillOpen = db.prepare(
+      "SELECT YearName FROM fiscal_years WHERE Status = 'open' ORDER BY StartDate DESC LIMIT 1",
+    ).get() as any;
+    if (stillOpen) {
+      return {
+        success: false,
+        message: `لا يمكن فتح سنة مالية جديدة قبل إقفال السنة الحالية (${stillOpen.YearName}).`,
+      };
+    }
+
+    if (!data?.YearName?.trim()) {
+      return { success: false, message: 'اسم السنة المالية مطلوب' };
+    }
+    if (!data?.StartDate || !data?.EndDate) {
+      return { success: false, message: 'تاريخ البداية والنهاية مطلوبان' };
+    }
+    if (data.EndDate <= data.StartDate) {
+      return { success: false, message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية' };
+    }
+
     const result = db.prepare('INSERT INTO fiscal_years (YearName, StartDate, EndDate, Status) VALUES (?, ?, ?, ?)').run(data.YearName, data.StartDate, data.EndDate, 'open');
     return { success: true, id: result.lastInsertRowid };
   });

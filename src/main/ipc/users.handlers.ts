@@ -4,6 +4,52 @@ import { getDb } from '../database/connection';
 import { verifyDevToken } from '../security/devAuth';
 import { destroyAllSessionsForUser } from '../security/session';
 
+
+/**
+ * The role that can administer the system. Seeded first, so RoleID 1.
+ *
+ * A shop must never be able to lock itself out of its own books: if the last
+ * account that can manage users is deactivated or demoted, nobody can add
+ * users, fix permissions or reach the settings again, and the only way back is
+ * editing the database by hand.
+ *
+ * Measured before this guard existed: `users:delete` on the only administrator
+ * returned `{ success: true }` and left zero active administrators.
+ */
+
+/**
+ * Minimum password length, matching the first-run wizard.
+ *
+ * `setup:initialize` already refuses anything under six characters, but
+ * `users:create` and `users:update` enforced nothing at all: an account could
+ * be created with an EMPTY password. Login rejects a blank password, so such
+ * an account cannot be used — the practical result is a user who exists, fills
+ * a licence seat, appears in every dropdown, and can never sign in, with no
+ * explanation offered to whoever created them.
+ *
+ * Validating in one place per rule is the point: the wizard and the users
+ * screen must not disagree about what a valid password is.
+ */
+const MIN_PASSWORD_LENGTH = 6;
+
+function checkPassword(pw: unknown): string | null {
+  if (typeof pw !== 'string' || !pw.trim()) return 'كلمة المرور مطلوبة';
+  if (pw.length < MIN_PASSWORD_LENGTH) {
+    return `كلمة المرور يجب أن تكون ${MIN_PASSWORD_LENGTH} أحرف على الأقل`;
+  }
+  return null;
+}
+
+const ADMIN_ROLE_ID = 1;
+
+/** How many administrators would remain if `excludeUserId` stopped being one. */
+function otherActiveAdmins(db: ReturnType<typeof getDb>, excludeUserId: number): number {
+  const row = db.prepare(
+    'SELECT COUNT(*) n FROM users WHERE RoleID = ? AND IsActive = 1 AND UserID != ?',
+  ).get(ADMIN_ROLE_ID, excludeUserId) as any;
+  return Number(row?.n) || 0;
+}
+
 export function registerUsersHandlers() {
   // List users
   ipcMain.handle('users:list', async () => {
@@ -21,6 +67,12 @@ export function registerUsersHandlers() {
   // Create user
   ipcMain.handle('users:create', async (_event, data: { username: string; password: string; employeeId?: number; roleId: number }) => {
     const db = getDb();
+    if (typeof data?.username !== 'string' || !data.username.trim()) {
+      return { success: false, message: 'اسم المستخدم مطلوب' };
+    }
+    const pwProblem = checkPassword(data?.password);
+    if (pwProblem) return { success: false, message: pwProblem };
+
     const existing = db.prepare('SELECT UserID FROM users WHERE Username = ?').get(data.username);
     if (existing) {
       return { success: false, message: 'اسم المستخدم موجود بالفعل' };
@@ -36,7 +88,28 @@ export function registerUsersHandlers() {
   // Update user
   ipcMain.handle('users:update', async (_event, id: number, data: { username?: string; password?: string; employeeId?: number; roleId?: number; isActive?: number }) => {
     const db = getDb();
+
+    // The same lockout applies to an EDIT: demoting the last administrator to
+    // a salesperson, or switching them inactive, removes the last account that
+    // can manage the system just as surely as deleting it.
+    const current = db.prepare('SELECT RoleID, IsActive FROM users WHERE UserID = ?').get(id) as any;
+    if (!current) return { success: false, message: 'المستخدم غير موجود' };
+    const nextRole = data.roleId ?? 1;
+    const nextActive = data.isActive ?? 1;
+    const wasAdmin = current.RoleID === ADMIN_ROLE_ID && current.IsActive;
+    const staysAdmin = nextRole === ADMIN_ROLE_ID && nextActive;
+    if (wasAdmin && !staysAdmin && otherActiveAdmins(db, id) === 0) {
+      return {
+        success: false,
+        message: 'لا يمكن تغيير دور آخر مدير أو تعطيله — أنشئ مديراً آخر أولاً.',
+      };
+    }
+
     if (data.password) {
+      // Only checked when a NEW password is supplied; leaving the field blank
+      // on an edit means "keep the existing one", which is not a weak password.
+      const pwProblem = checkPassword(data.password);
+      if (pwProblem) return { success: false, message: pwProblem };
       const hash = bcrypt.hashSync(data.password, 10);
       db.prepare(`
         UPDATE users SET Username = ?, PasswordHash = ?, EmployeeID = ?, RoleID = ?, IsActive = ?
@@ -54,6 +127,15 @@ export function registerUsersHandlers() {
   // Delete user (deactivate)
   ipcMain.handle('users:delete', async (_event, id: number) => {
     const db = getDb();
+    const target = db.prepare('SELECT RoleID, IsActive FROM users WHERE UserID = ?').get(id) as any;
+    if (!target) return { success: false, message: 'المستخدم غير موجود' };
+    if (target.RoleID === ADMIN_ROLE_ID && target.IsActive && otherActiveAdmins(db, id) === 0) {
+      return {
+        success: false,
+        message: 'لا يمكن تعطيل آخر مدير للنظام — أنشئ مديراً آخر أولاً، '
+          + 'وإلا لن يتمكن أحد من إدارة المستخدمين أو الصلاحيات.',
+      };
+    }
     db.prepare('UPDATE users SET IsActive = 0 WHERE UserID = ?').run(id);
     return { success: true };
   });

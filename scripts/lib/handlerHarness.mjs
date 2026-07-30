@@ -59,6 +59,9 @@ const LOADER_SOURCE = `
     if (specifier === 'better-sqlite3') {
       return { url: STUBS + 'betterSqlite.mjs', shortCircuit: true };
     }
+    if (specifier === 'bcryptjs') {
+      return { url: STUBS + 'bcryptjs.mjs', shortCircuit: true };
+    }
     // Matched on the tail so every relative depth resolves to one stub.
     if (CONNECTION.test(specifier)) {
       return { url: STUBS + 'connection.mjs', shortCircuit: true };
@@ -205,6 +208,10 @@ export async function loadHandlers() {
     // every other figure is built on, so a bad value here is permanent.
     'src/main/ipc/assets.handlers.ts',
     'src/main/ipc/hr.handlers.ts',
+    // Users, roles and permissions: the gate on everything else. A shop that
+    // deactivates its last administrator is locked out of its own books.
+    'src/main/ipc/users.handlers.ts',
+    'src/main/ipc/fiscalYear.handlers.ts',
   ];
   const loaded = [];
   for (const rel of mods) {

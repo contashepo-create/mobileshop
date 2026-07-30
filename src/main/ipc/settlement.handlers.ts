@@ -72,6 +72,11 @@ export function registerSettlementHandlers() {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(settlementId, data.section, item.ItemID, item.ItemName, item.RecordedBalance, item.ActualBalance, item.Difference, item.AdjustmentType);
 
+        // Unit cost of the stock row that absorbed an inventory variance,
+        // captured at the moment of the adjustment. Only meaningful for the
+        // inventory section.
+        let adjustedUnitCost = 0;
+
         // Apply the actual balance change
         if (data.section === 'cash') {
           db.prepare('UPDATE cash_accounts SET Balance = ? WHERE CashAccountID = ?').run(item.ActualBalance, item.ItemID);
@@ -93,12 +98,19 @@ export function registerSettlementHandlers() {
           // The difference is applied to one row instead, so the item's total
           // ends at exactly the counted figure.
           const target = db.prepare(
-            'SELECT ID, Quantity FROM stock_quantities WHERE ItemID = ? ORDER BY Quantity DESC LIMIT 1'
+            'SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? ORDER BY Quantity DESC LIMIT 1'
           ).get(item.ItemID) as any;
           if (target) {
             const delta = Number(item.ActualBalance) - Number(item.RecordedBalance);
             const adjusted = Number(target.Quantity || 0) + delta;
             db.prepare('UPDATE stock_quantities SET Quantity = ? WHERE ID = ?').run(adjusted, target.ID);
+            // Remember the cost of the row that ACTUALLY absorbed the variance.
+            // Re-reading it further down picked "the largest row" a second
+            // time — by then a different warehouse, because this update had
+            // just shrunk this one. With two warehouses holding the same item
+            // at different costs (10 @ 100 and 10 @ 50), a shortage of two
+            // destroyed 200 of value and was expensed at 100.
+            adjustedUnitCost = Number(target.CostPrice) || 0;
           } else {
             const wh = db.prepare('SELECT WarehouseID FROM warehouses ORDER BY WarehouseID ASC LIMIT 1').get() as any;
             if (wh) {
@@ -115,7 +127,19 @@ export function registerSettlementHandlers() {
         // 'general' voucher so both reports pick it up, with CashAccountID left
         // NULL so it does not move any account balance a second time (the
         // balance was already set to the counted value above).
-        const diff = +(Number(item.Difference) || 0).toFixed(2);
+        // For every section except inventory the difference IS money. For
+        // inventory it is a QUANTITY, and booking it as money understated the
+        // loss by the entire unit cost: measured, five handsets missing at a
+        // cost of 100 destroyed 500 of stock value but was recorded as an
+        // expense of 5. The shop's profit was overstated by 495 on a single
+        // count, and the balance sheet stopped balancing by the same amount.
+        //
+        // The unit cost is read from the warehouse row the adjustment was
+        // applied to, so the expense equals the value that actually left.
+        let diff = +(Number(item.Difference) || 0).toFixed(2);
+        if (data.section === 'inventory') {
+          diff = +(diff * adjustedUnitCost).toFixed(2);
+        }
         if (Math.abs(diff) >= 0.01) {
           const isShortage = diff < 0;
           const vType = isShortage ? 'payment' : 'receipt';

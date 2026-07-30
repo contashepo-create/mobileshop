@@ -328,6 +328,21 @@ export function registerDeleteHandlers() {
       const advance = db.prepare('SELECT * FROM employee_advances WHERE AdvanceID = ?').get(advanceId) as any;
       if (!advance) return { success: false, message: 'السلفية غير موجودة' };
 
+      // An advance already recovered from a salary is part of that salary's
+      // arithmetic and cannot be unpicked from here.
+      //
+      // The delete puts the cash back in the drawer, but the employee has
+      // ALREADY had the same amount withheld from their pay — so the shop ends
+      // up holding the money twice and the employee is short. Measured by the
+      // fuzzer: 221.61 appearing from nowhere after deleting a settled advance.
+      if (advance.IsDeducted) {
+        return {
+          success: false,
+          message: 'لا يمكن حذف سلفية تم خصمها من راتب بالفعل — '
+            + 'احذف الراتب أولاً أو أصدر تسوية.',
+        };
+      }
+
       const tx = db.transaction(() => {
         if (advance.CashAccountID) {
           db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(advance.Amount, advance.CashAccountID);
@@ -358,6 +373,24 @@ export function registerDeleteHandlers() {
     try {
       const voucher = db.prepare('SELECT * FROM vouchers WHERE VoucherID = ?').get(voucherId) as any;
       if (!voucher) return { success: false, message: 'السند غير موجود' };
+
+      // A settlement variance is not a document the user created, it is the
+      // RECORD of a stocktake result. `settlements:apply` writes the counted
+      // balance straight to the account and then raises this voucher purely so
+      // the shortage or surplus reaches the income statement.
+      //
+      // Deleting it therefore deletes only the evidence: measured, a 192 cash
+      // shortage left the drawer at 499,808 while the expense vanished from
+      // the books, so the shop's own profit figure claimed 192 it did not
+      // have. Nothing here can put the money back, because nothing here took
+      // it. The settlement itself is the thing to reverse.
+      if (voucher.ReferenceType === 'settlement') {
+        return {
+          success: false,
+          message: 'لا يمكن حذف سند تسوية جردية — هذا السند هو سجل فرق الجرد. '
+            + 'لتصحيحه أنشئ تسوية جديدة بالرصيد الصحيح.',
+        };
+      }
 
       const tx = db.transaction(() => {
         // Give back exactly what was taken — from ONE account.
@@ -428,9 +461,18 @@ export function registerDeleteHandlers() {
           db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(sale.PaidAmount, sale.CashAccountID);
         }
 
-        // Reverse payment method (machine balance - add back the transferred amount)
-        if (sale.PaymentMethodID && sale.Amount > 0) {
-          db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(sale.Amount, sale.PaymentMethodID);
+        // Put the transferred principal back where it came from.
+        //
+        // Mirrors `serviceSales:create`, which debits the principal from the
+        // wallet when there is one and from the cash drawer otherwise. This
+        // reversal used to credit the wallet only, so a cash-funded transfer
+        // that was cancelled never got its principal back.
+        if (sale.Amount > 0) {
+          if (sale.PaymentMethodID) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(sale.Amount, sale.PaymentMethodID);
+          } else if (sale.CashAccountID) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(sale.Amount, sale.CashAccountID);
+          }
         }
 
         // Give back the provider and transfer fees.

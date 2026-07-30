@@ -321,5 +321,72 @@ console.log('\n[6] Money cannot be taken from an account that does not hold it')
     `cash ${cash()}`);
 }
 
+// ---------------------------------------------------------------- 7
+console.log('\n[7] A deduction or commission is settled ONCE, not every month');
+// These were read with IsDeducted = 0 / IsPaid = 0, folded into the salary, and
+// never flagged — so the same penalty came off the employee's wage again the
+// next month, for ever. The fuzzer found the drift; this pins the behaviour.
+{
+  seed();
+  await call('deductions:create', {
+    EmployeeID: 1, Amount: 300, Reason: 'absence', Date: '2026-07-30',
+    fiscalYearId: 1, userId: 1,
+  });
+  await call('salaries:issue', { EmployeeID: 1, Month: '2026-07', fiscalYearId: 1, userId: 1 });
+  const july = q("SELECT NetSalary, DeductionsTotal FROM salaries WHERE Month='2026-07'");
+  await call('salaries:issue', { EmployeeID: 1, Month: '2026-08', fiscalYearId: 1, userId: 1 });
+  const august = q("SELECT NetSalary, DeductionsTotal FROM salaries WHERE Month='2026-08'");
+
+  t('the deduction reduces the month it belongs to',
+    Math.abs(july.DeductionsTotal - 300) < 0.011, `July deductions ${july.DeductionsTotal}`);
+  t('the SAME deduction is not taken again next month',
+    Math.abs(august.DeductionsTotal) < 0.011,
+    `August deductions ${august.DeductionsTotal} — the employee is being penalised for ever`);
+  t('so the second month pays the full wage',
+    Math.abs(august.NetSalary - 3500) < 0.011, `August net ${august.NetSalary}`);
+  t('and the deduction is marked settled against a salary',
+    q('SELECT COUNT(*) v FROM employee_deductions WHERE IsDeducted = 1').v === 1);
+}
+{
+  seed();
+  currentDb().exec(
+    "INSERT INTO commissions(EmployeeID,CommissionType,Amount,Date,ReferenceType,ReferenceID,IsPaid,PaidAmount,FiscalYearID,UserID) "
+    + "VALUES(1,'maintenance',400,'2026-07-30','maintenance_delivery',1,0,0,1,1)");
+  await call('salaries:issue', { EmployeeID: 1, Month: '2026-07', fiscalYearId: 1, userId: 1 });
+  await call('salaries:issue', { EmployeeID: 1, Month: '2026-08', fiscalYearId: 1, userId: 1 });
+  const august = q("SELECT CommissionsTotal FROM salaries WHERE Month='2026-08'");
+  t('a commission is not paid a second time next month',
+    Math.abs(august.CommissionsTotal) < 0.011,
+    `August commissions ${august.CommissionsTotal}`);
+}
+
+// ---------------------------------------------------------------- 8
+console.log('\n[8] Advances cannot drive a wage below zero');
+{
+  seed();
+  currentDb().exec('UPDATE employees SET BaseSalary = 2000, Allowances = 0 WHERE EmployeeID = 1');
+  await call('advances:create', { EmployeeID: 1, Amount: 1500, Reason: 'r', Date: '2026-07-30', CashAccountID: 1, fiscalYearId: 1, userId: 1 });
+  await call('advances:create', { EmployeeID: 1, Amount: 1500, Reason: 'r', Date: '2026-07-30', CashAccountID: 1, fiscalYearId: 1, userId: 1 });
+  await call('salaries:issue', { EmployeeID: 1, Month: '2026-07', fiscalYearId: 1, userId: 1 });
+  const sal = q('SELECT NetSalary, AdvancesTotal FROM salaries');
+  t('3,000 of advances against a 2,000 wage does not produce a negative salary',
+    sal.NetSalary >= -0.011, `net ${sal.NetSalary}`);
+  t('only what the wage can absorb is recovered',
+    Math.abs(sal.AdvancesTotal - 2000) < 0.011, `recovered ${sal.AdvancesTotal}`);
+  t('the remaining 1,000 stays outstanding for next month',
+    Math.abs(q('SELECT COALESCE(SUM(Amount),0) v FROM employee_advances WHERE IsDeducted = 0').v - 1000) < 0.011,
+    `outstanding ${q('SELECT COALESCE(SUM(Amount),0) v FROM employee_advances WHERE IsDeducted = 0').v}`);
+}
+{
+  seed();
+  await call('advances:create', { EmployeeID: 1, Amount: 500, Reason: 'r', Date: '2026-07-30', CashAccountID: 1, fiscalYearId: 1, userId: 1 });
+  await call('salaries:issue', { EmployeeID: 1, Month: '2026-07', fiscalYearId: 1, userId: 1 });
+  const aid = q('SELECT AdvanceID v FROM employee_advances').v;
+  const before = books();
+  const res = await call('delete:advance', aid);
+  t('an advance already recovered from a salary cannot be deleted for cash',
+    !res?.success && books() === before, JSON.stringify(res).slice(0, 90));
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

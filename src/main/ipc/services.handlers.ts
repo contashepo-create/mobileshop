@@ -117,9 +117,23 @@ export function registerServicesHandlers() {
           db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(data.PaidAmount, data.CashAccountID);
         }
 
-        // The principal we push out of the machine/wallet to the target line.
-        if (data.PaymentMethodID && data.Amount > 0) {
-          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(data.Amount, data.PaymentMethodID);
+        // The principal we push out to the target line.
+        //
+        // This only left the books when a MACHINE funded it. Funded from the
+        // cash drawer, the 1,000 sent to the customer's phone was never
+        // debited anywhere: the shop collected 1,020, sent 1,000, and its
+        // books recorded a gain of 1,020 instead of 20. Measured on a single
+        // transfer — 1,000 of value invented per operation, and a shop doing
+        // twenty transfers a day would show a fortune it does not have.
+        //
+        // The money must leave the same place the fees leave from, and in the
+        // same order of preference.
+        if (data.Amount > 0) {
+          if (data.PaymentMethodID) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(data.Amount, data.PaymentMethodID);
+          } else if (data.CashAccountID) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(data.Amount, data.CashAccountID);
+          }
         }
 
         // === REAL COST OUTFLOW ===

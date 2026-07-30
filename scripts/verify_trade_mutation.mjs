@@ -48,6 +48,7 @@ const VOU = join(ROOT, 'src/main/ipc/vouchers.handlers.ts');
 const SET = join(ROOT, 'src/main/ipc/settlement.handlers.ts');
 const SVC = join(ROOT, 'src/main/ipc/services.handlers.ts');
 const STMT = join(ROOT, 'src/main/ipc/statement.handlers.ts');
+const PAY = join(ROOT, 'src/main/ipc/payroll.handlers.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -69,6 +70,7 @@ const SUITES = [
   'scripts/verify_backup_integrity.mjs',
   'scripts/verify_back_office.mjs',
   'scripts/verify_statements.mjs',
+  'scripts/verify_fuzz_back_office.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -251,6 +253,41 @@ const MUTANTS = [
     find: '             COALESCE(PaidAmount,0) as Debit, TotalAmount as Credit,',
     replace: '             0 as Debit, TotalAmount as Credit,',
     why: 'the page the owner pays from overstated the debt, so a supplier gets paid twice',
+  },
+  {
+    name: 'a cash-funded transfer never sends the principal out',
+    file: SVC,
+    find: "        if (data.Amount > 0) {\n          if (data.PaymentMethodID) {",
+    replace: "        if (data.Amount > 0) {\n          if (false) {",
+    why: 'the shop booked a 1,020 gain on a 1,000 transfer, inventing 1,000 per operation',
+  },
+  {
+    name: 'a stocktake expenses a quantity as if it were money',
+    file: SET,
+    find: '          diff = +(diff * adjustedUnitCost).toFixed(2);',
+    replace: '          diff = +(diff * 1).toFixed(2);',
+    why: 'five handsets lost at cost 100 were written off as an expense of five',
+  },
+  {
+    name: 'a salary can go negative when advances exceed the pay',
+    file: PAY,
+    find: '    const advancesApplied = Math.min(advancesTotal, payAfterDeductions);',
+    replace: '    const advancesApplied = advancesTotal;',
+    why: 'paying a negative salary ran the whole transaction backwards',
+  },
+  {
+    name: 'the same deduction is taken every month for ever',
+    file: PAY,
+    find: "          UPDATE employee_deductions SET IsDeducted = 1, DeductedFromSalaryID = ?",
+    replace: "          UPDATE employee_deductions SET IsDeducted = 0, DeductedFromSalaryID = ?",
+    why: 'a 300 absence penalty reduced July, August and every month after',
+  },
+  {
+    name: 'an advance already recovered can be deleted for cash',
+    file: DEL,
+    find: '      if (advance.IsDeducted) {',
+    replace: '      if (false) {',
+    why: 'the shop keeps the money twice and the employee is short',
   },
   // ---- back office ------------------------------------------------------
   {

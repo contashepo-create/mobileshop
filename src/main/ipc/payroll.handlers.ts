@@ -47,7 +47,21 @@ export function registerPayrollHandlers() {
     const advances = db.prepare("SELECT * FROM employee_advances WHERE EmployeeID = ? AND IsDeducted = 0").all(data.EmployeeID) as any[];
     const advancesTotal = advances.reduce((sum, a) => sum + a.Amount, 0);
 
-    const netSalary = emp.BaseSalary + emp.Allowances + commissionsTotal - deductionsTotal - advancesTotal;
+    // A month's pay can never be a negative number.
+    //
+    // Advances and deductions were subtracted without a floor, so an employee
+    // who had drawn more than the month's wage produced a salary of
+    // -611.47 — which the shop could then "pay", running the whole transaction
+    // backwards: cash flowed INTO the drawer and the employee's balance moved
+    // the wrong way. Measured by the fuzzer on seed 12.
+    //
+    // Only as much of the advance as this month's pay can absorb is settled
+    // here; the rest stays outstanding and is recovered from the next salary,
+    // which is both the correct accounting and what the employee expects.
+    const grossPay = emp.BaseSalary + emp.Allowances + commissionsTotal;
+    const payAfterDeductions = Math.max(0, grossPay - deductionsTotal);
+    const advancesApplied = Math.min(advancesTotal, payAfterDeductions);
+    const netSalary = +(payAfterDeductions - advancesApplied).toFixed(2);
 
     const tx = db.transaction(() => {
       const ins = db.prepare(`
@@ -57,7 +71,7 @@ export function registerPayrollHandlers() {
       `).run(
         data.EmployeeID, data.Month, data.fiscalYearId,
         emp.BaseSalary, emp.Allowances,
-        commissionsTotal, deductionsTotal, advancesTotal,
+        commissionsTotal, deductionsTotal, advancesApplied,
         netSalary, data.userId
       );
       const salaryId = ins.lastInsertRowid as number;
@@ -72,14 +86,50 @@ export function registerPayrollHandlers() {
       // liability, the expense and the advance asset consistent: the advance
       // stops being an asset exactly when it starts reducing what we still owe.
       db.prepare('UPDATE employees SET Balance = Balance + ? WHERE EmployeeID = ?')
-        .run(netSalary + advancesTotal, data.EmployeeID);
-      if (advancesTotal > 0) {
+        .run(netSalary + advancesApplied, data.EmployeeID);
+      if (advancesApplied > 0) {
         db.prepare('UPDATE employees SET Balance = Balance - ? WHERE EmployeeID = ?')
-          .run(advancesTotal, data.EmployeeID);
-        // Mark them settled now — they have been applied to this salary.
+          .run(advancesApplied, data.EmployeeID);
+        // Settle advances oldest-first, and only up to what this month's pay
+        // could actually absorb. Marking them ALL deducted when the pay could
+        // not cover them wrote off money the employee still owes.
+        let left = advancesApplied;
+        const open = db.prepare(
+          'SELECT AdvanceID, Amount FROM employee_advances WHERE EmployeeID = ? AND IsDeducted = 0 ORDER BY AdvanceID',
+        ).all(data.EmployeeID) as any[];
+        for (const adv of open) {
+          if (left <= 0.005) break;
+          if (Number(adv.Amount) <= left + 0.005) {
+            db.prepare('UPDATE employee_advances SET IsDeducted = 1, DeductedFromSalaryID = ? WHERE AdvanceID = ?')
+              .run(salaryId, adv.AdvanceID);
+            left = +(left - Number(adv.Amount)).toFixed(2);
+          } else {
+            // Partly recovered: reduce it and leave the remainder outstanding.
+            db.prepare('UPDATE employee_advances SET Amount = ? WHERE AdvanceID = ?')
+              .run(+(Number(adv.Amount) - left).toFixed(2), adv.AdvanceID);
+            left = 0;
+          }
+        }
+      }
+
+      // Deductions and commissions must be marked settled too.
+      //
+      // Both were read with `IsDeducted = 0` / `IsPaid = 0` and folded into the
+      // salary, but nothing ever flipped those flags — so the SAME penalty was
+      // taken from the employee's wage again the next month, and every month
+      // after that, for ever. Measured: a 300 absence deduction reduced both
+      // July and August. Commissions had the mirror fault, being paid out
+      // repeatedly.
+      if (deductionsTotal > 0) {
         db.prepare(`
-          UPDATE employee_advances SET IsDeducted = 1, DeductedFromSalaryID = ?
+          UPDATE employee_deductions SET IsDeducted = 1, DeductedFromSalaryID = ?
           WHERE EmployeeID = ? AND IsDeducted = 0
+        `).run(salaryId, data.EmployeeID);
+      }
+      if (commissionsTotal > 0) {
+        db.prepare(`
+          UPDATE commissions SET IsPaid = 1, PaidInSalaryID = ?, PaidAmount = Amount
+          WHERE EmployeeID = ? AND IsPaid = 0
         `).run(salaryId, data.EmployeeID);
       }
     });

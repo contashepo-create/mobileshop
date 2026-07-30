@@ -48,6 +48,7 @@ const VOU = join(ROOT, 'src/main/ipc/vouchers.handlers.ts');
 const SET = join(ROOT, 'src/main/ipc/settlement.handlers.ts');
 const SVC = join(ROOT, 'src/main/ipc/services.handlers.ts');
 const STMT = join(ROOT, 'src/main/ipc/statement.handlers.ts');
+const REPORTS = join(ROOT, 'src/main/ipc/reports.handlers.ts');
 const PAY = join(ROOT, 'src/main/ipc/payroll.handlers.ts');
 const OPB = join(ROOT, 'src/main/ipc/openingBalance.handlers.ts');
 const SCHEMA = join(ROOT, 'src/main/database/schemaVersion.ts');
@@ -77,6 +78,7 @@ const SUITES = [
   'scripts/verify_upgrade_safety.mjs',
   'scripts/verify_serial_costing.mjs',
   'scripts/verify_stock_lots.mjs',
+  'scripts/verify_reports_money.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -322,6 +324,13 @@ const MUTANTS = [
     find: '  consumeLots(db, itemId, warehouseId, qty);\n\n  const row = db.prepare',
     replace: '  const row = db.prepare',
     why: 'the layers claim stock that has already been sold',
+  },
+  {
+    name: 'a customer receipt is counted as income as well as collection',
+    file: REPORTS,
+    find: "WHERE VoucherType = 'receipt' AND (PartyType = 'general' OR PartyType IS NULL)",
+    replace: "WHERE VoucherType = 'receipt'",
+    why: 'collecting an old debt would be reported as fresh profit',
   },
   // ---- upgrade safety ----------------------------------------------------
   {

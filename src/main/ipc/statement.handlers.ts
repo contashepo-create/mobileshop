@@ -472,8 +472,19 @@ export function registerCustomerStatementHandlers() {
     const fVRec = df('v.Date');
 
     // Purchases (credit - increases supplier balance / we owe them)
+    //
+    // `PaidAmount` is booked as a DEBIT on the same line, exactly as the
+    // customer statement does with a sale. Anything settled at the counter
+    // never became a debt, so leaving it out overstated what the shop owes:
+    // measured, an 800 invoice with 300 paid on the spot left the supplier
+    // owed 500 in `suppliers.Balance` while the statement footed to 800.
+    //
+    // The owner reconciles a supplier from this page. A statement that
+    // disagrees with the ledger by exactly the amount already handed over is
+    // how a supplier gets paid twice.
     const purchases = db.prepare(`
-      SELECT PurchaseID as RefID, PurchaseNumber as RefNumber, Date, 0 as Debit, TotalAmount as Credit,
+      SELECT PurchaseID as RefID, PurchaseNumber as RefNumber, Date,
+             COALESCE(PaidAmount,0) as Debit, TotalAmount as Credit,
              'purchase' as OpType, 'فاتورة شراء' as Description,
              PaymentMethod, PaidAmount, RemainingAmount, Status
       FROM purchases WHERE SupplierID = ? ${fPur.sql}

@@ -47,6 +47,7 @@ const DEL = join(ROOT, 'src/main/ipc/delete.handlers.ts');
 const VOU = join(ROOT, 'src/main/ipc/vouchers.handlers.ts');
 const SET = join(ROOT, 'src/main/ipc/settlement.handlers.ts');
 const SVC = join(ROOT, 'src/main/ipc/services.handlers.ts');
+const STMT = join(ROOT, 'src/main/ipc/statement.handlers.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -67,6 +68,7 @@ const SUITES = [
   'scripts/verify_renderer_crash.mjs',
   'scripts/verify_backup_integrity.mjs',
   'scripts/verify_back_office.mjs',
+  'scripts/verify_statements.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -242,6 +244,13 @@ const MUTANTS = [
     find: '  if (db) return db.name;',
     replace: '',
     why: 'an offline network share made the app silently use another database while the restore wrote to the unreachable one',
+  },
+  {
+    name: 'a supplier statement ignores what was paid at the counter',
+    file: STMT,
+    find: '             COALESCE(PaidAmount,0) as Debit, TotalAmount as Credit,',
+    replace: '             0 as Debit, TotalAmount as Credit,',
+    why: 'the page the owner pays from overstated the debt, so a supplier gets paid twice',
   },
   // ---- back office ------------------------------------------------------
   {

@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
+import { checkAmounts } from '../../shared/money';
 
 export function registerTransfersHandlers() {
   // Transfer between cash accounts / payment methods
@@ -17,6 +18,24 @@ export function registerTransfersHandlers() {
     userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
+
+    // Direction is expressed by which account is FROM and which is TO, never
+    // by the sign of the money. A negative transfer ran the whole operation
+    // backwards: measured, -5,000 from the safe to the bank ADDED 5,000 to the
+    // safe and took it from the bank, with the document still reading as a
+    // normal transfer in that direction.
+    const badMoney = checkAmounts([
+      [data.Amount, 'مبلغ التحويل', { allowZero: false }],
+      [data.TransferCost ?? 0, 'رسوم التحويل'],
+    ]);
+    if (badMoney) return { success: false, message: badMoney };
+
+    // Moving money to the account it already sits in is not a transfer. It
+    // costs the shop the fee, writes a document that explains nothing, and on
+    // a shared row would net to a no-op that still deducted the commission.
+    if (data.FromType === data.ToType && Number(data.FromID) === Number(data.ToID)) {
+      return { success: false, message: 'لا يمكن التحويل إلى نفس الحساب' };
+    }
 
     try {
       // Check source balance

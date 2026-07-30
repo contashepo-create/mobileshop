@@ -54,6 +54,7 @@ const OPB = join(ROOT, 'src/main/ipc/openingBalance.handlers.ts');
 const ASSETS = join(ROOT, 'src/main/ipc/assets.handlers.ts');
 const USERS = join(ROOT, 'src/main/ipc/users.handlers.ts');
 const FY = join(ROOT, 'src/main/ipc/fiscalYear.handlers.ts');
+const TRF = join(ROOT, 'src/main/ipc/transfers.handlers.ts');
 const RENT = join(ROOT, 'src/main/ipc/rent.handlers.ts');
 const SCHEMA = join(ROOT, 'src/main/database/schemaVersion.ts');
 const MAIN = join(ROOT, 'src/main/index.ts');
@@ -85,6 +86,7 @@ const SUITES = [
   'scripts/verify_reports_money.mjs',
   'scripts/verify_master_data.mjs',
   'scripts/verify_users_access.mjs',
+  'scripts/verify_transfers_deletes.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -379,6 +381,27 @@ const MUTANTS = [
     find: '    if (stillOpen) {',
     replace: '    if (false) {',
     why: 'getActive picks one arbitrarily, so postings land in the wrong year',
+  },
+  {
+    name: 'a negative money transfer runs the movement backwards',
+    file: TRF,
+    find: "    if (badMoney) return { success: false, message: badMoney };",
+    replace: '',
+    why: '-5,000 from the safe to the bank ADDED 5,000 to the safe',
+  },
+  {
+    name: 'money can be transferred to the account it is already in',
+    file: TRF,
+    find: "    if (data.FromType === data.ToType && Number(data.FromID) === Number(data.ToID)) {",
+    replace: '    if (false) {',
+    why: 'a no-op document that still charges the commission',
+  },
+  {
+    name: 'a deduction already taken from a salary can be deleted',
+    file: DEL,
+    find: '      if (ded.IsDeducted) {',
+    replace: '      if (false) {',
+    why: 'the employee stays short with nothing on file to explain it',
   },
   // ---- upgrade safety ----------------------------------------------------
   {

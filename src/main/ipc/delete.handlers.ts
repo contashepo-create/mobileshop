@@ -360,6 +360,29 @@ export function registerDeleteHandlers() {
   ipcMain.handle('delete:deduction', async (_event, deductionId: number) => {
     const db = getDb();
     try {
+      const ded = db.prepare(
+        'SELECT IsDeducted FROM employee_deductions WHERE DeductionID = ?',
+      ).get(deductionId) as any;
+      if (!ded) return { success: false, message: 'الخصم غير موجود' };
+
+      // A deduction already taken out of a salary cannot be unpicked here.
+      //
+      // The wage was reduced when the salary was issued, and the employee has
+      // been paid the smaller figure. Deleting the record now removes the only
+      // evidence of WHY they were paid less — the salary still shows the
+      // reduced net, but nothing explains it, and the employee is permanently
+      // short with no document to appeal to. Measured: a 200 deduction applied
+      // to a 3,000 salary left NetSalary at 2,800 and then deleted cleanly.
+      //
+      // Mirrors the guard already on `delete:advance`.
+      if (ded.IsDeducted) {
+        return {
+          success: false,
+          message: 'لا يمكن حذف خصم تم تطبيقه على راتب بالفعل — '
+            + 'احذف الراتب أولاً أو أصدر تسوية للموظف.',
+        };
+      }
+
       db.prepare('DELETE FROM employee_deductions WHERE DeductionID = ?').run(deductionId);
       return { success: true, message: 'تم حذف الخصم' };
     } catch (err: any) {

@@ -192,6 +192,15 @@ export async function loadHandlers() {
     // same books as everything else.
     'src/main/ipc/inventory.handlers.ts',
     'src/main/ipc/transfers.handlers.ts',
+    // The remaining money-moving sections. A coverage scan showed 18 channels
+    // that write balances or stock had never been executed by any test, so
+    // they are loaded here and exercised against the SAME books as trading.
+    'src/main/ipc/vouchers.handlers.ts',
+    'src/main/ipc/payroll.handlers.ts',
+    'src/main/ipc/services.handlers.ts',
+    'src/main/ipc/settlement.handlers.ts',
+    'src/main/ipc/openingBalance.handlers.ts',
+    'src/main/ipc/rent.handlers.ts',
   ];
   const loaded = [];
   for (const rel of mods) {

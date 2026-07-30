@@ -63,6 +63,42 @@ function rebuildTable(
 }
 
 /** sale_details.ItemID must allow NULL so service lines can be stored. */
+/**
+ * `vouchers.CashAccountID` must accept NULL.
+ *
+ * A settlement variance is recorded as a voucher with no cash account: the
+ * counted balance was already written straight to the account, so naming one
+ * here would move the same money twice. The original schema declared the
+ * column NOT NULL, so that INSERT threw and the whole stocktake transaction
+ * rolled back — inventory settlement could never succeed.
+ */
+function relaxVoucherCashAccountIfNeeded(db: Database.Database) {
+  if (columnsOf(db, 'vouchers').length === 0) return;          // fresh DB, already correct
+  if (!isNotNull(db, 'vouchers', 'CashAccountID')) return;      // already migrated
+  rebuildTable(db, 'vouchers', 'vouchers_migrate', `
+    CREATE TABLE vouchers_migrate (
+      VoucherID        INTEGER PRIMARY KEY AUTOINCREMENT,
+      VoucherNumber    TEXT UNIQUE NOT NULL,
+      VoucherType      TEXT NOT NULL,
+      FiscalYearID     INTEGER NOT NULL,
+      Date             TEXT NOT NULL,
+      Amount           REAL NOT NULL,
+      PartyType        TEXT,
+      PartyID          INTEGER,
+      PartyName        TEXT,
+      Description      TEXT NOT NULL,
+      CashAccountID    INTEGER,
+      PaymentMethodID  INTEGER,
+      ReferenceType    TEXT,
+      ReferenceID      INTEGER,
+      UserID           INTEGER NOT NULL,
+      CreatedAt        TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (FiscalYearID) REFERENCES fiscal_years(FiscalYearID),
+      FOREIGN KEY (CashAccountID) REFERENCES cash_accounts(CashAccountID),
+      FOREIGN KEY (UserID) REFERENCES users(UserID)
+    )`);
+}
+
 function rebuildSaleDetailsIfNeeded(db: Database.Database) {
   if (columnsOf(db, 'sale_details').length === 0) return;   // fresh DB, already correct
   if (!isNotNull(db, 'sale_details', 'ItemID')) return;      // already migrated
@@ -655,7 +691,13 @@ export function runMigrations(db: Database.Database) {
       PartyID          INTEGER,
       PartyName        TEXT,
       Description      TEXT NOT NULL,
-      CashAccountID    INTEGER NOT NULL,
+      -- Nullable on purpose. A stocktake variance is booked as a 'general'
+      -- voucher with NO cash account, because the counted balance has already
+      -- been written directly; naming an account here would move the money a
+      -- second time. Declared NOT NULL, that INSERT threw
+      -- "NOT NULL constraint failed: vouchers.CashAccountID" and every
+      -- inventory settlement failed outright on a fresh install.
+      CashAccountID    INTEGER,
       PaymentMethodID  INTEGER,
       ReferenceType    TEXT,
       ReferenceID      INTEGER,
@@ -945,6 +987,7 @@ export function runMigrations(db: Database.Database) {
   //      column-order change could drop the real table after a partial copy.
   // We now only rebuild when it is actually needed, and copy columns by NAME.
   rebuildSaleDetailsIfNeeded(db);
+  relaxVoucherCashAccountIfNeeded(db);
 
   // Add Source and SourceID to sales (for maintenance invoices)
   try {

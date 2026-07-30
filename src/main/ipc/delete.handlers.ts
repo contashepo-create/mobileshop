@@ -360,20 +360,22 @@ export function registerDeleteHandlers() {
       if (!voucher) return { success: false, message: 'السند غير موجود' };
 
       const tx = db.transaction(() => {
-        // Reverse cash account
-        if (voucher.VoucherType === 'receipt') {
-          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(voucher.Amount, voucher.CashAccountID);
-        } else {
-          db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(voucher.Amount, voucher.CashAccountID);
-        }
-
-        // Reverse payment method
+        // Give back exactly what was taken — from ONE account.
+        //
+        // Mirrors the fix in `vouchers:create`. This reversal used to credit
+        // the cash box AND the wallet whenever the voucher named both, so
+        // deleting a 300 receipt removed 600. Left as it was, it would also
+        // have "corrected" the create-side double count by accident on delete
+        // and left a real one-account voucher short. The reversal must undo
+        // precisely what the create did: the wallet when there is one,
+        // otherwise the cash box.
+        const back = voucher.VoucherType === 'receipt' ? -1 : 1;
         if (voucher.PaymentMethodID) {
-          if (voucher.VoucherType === 'receipt') {
-            db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(voucher.Amount, voucher.PaymentMethodID);
-          } else {
-            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(voucher.Amount, voucher.PaymentMethodID);
-          }
+          db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?')
+            .run(back * voucher.Amount, voucher.PaymentMethodID);
+        } else if (voucher.CashAccountID) {
+          db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?')
+            .run(back * voucher.Amount, voucher.CashAccountID);
         }
 
         // Reverse party balance
@@ -429,6 +431,30 @@ export function registerDeleteHandlers() {
         // Reverse payment method (machine balance - add back the transferred amount)
         if (sale.PaymentMethodID && sale.Amount > 0) {
           db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(sale.Amount, sale.PaymentMethodID);
+        }
+
+        // Give back the provider and transfer fees.
+        //
+        // `serviceSales:create` debits `ServiceCost + TransferCost` from the
+        // funding source as a REAL outflow — that was itself a fix for cash
+        // being invented out of nothing. The deletion never returned it, so
+        // cancelling a service quietly kept the fee.
+        //
+        // Measured on a 1,000 transfer charged 1,020 with a 5 fee: creating
+        // then deleting left the cash box 5 SHORT of where it started when the
+        // fee came out of cash, and 5 OVER when it came out of the wallet —
+        // value destroyed in one direction and invented in the other, from an
+        // operation that is supposed to be perfectly neutral.
+        //
+        // The refund must follow the same account the charge did, in the same
+        // order of preference, or the money reappears in the wrong pocket.
+        const feesPaid = (sale.ServiceCost || 0) + (sale.TransferCost || 0);
+        if (feesPaid > 0) {
+          if (sale.PaymentMethodID) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(feesPaid, sale.PaymentMethodID);
+          } else if (sale.CashAccountID) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(feesPaid, sale.CashAccountID);
+          }
         }
 
         db.prepare('DELETE FROM service_sales WHERE ServiceSaleID = ?').run(id);

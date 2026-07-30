@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
+import { checkAmounts } from '../../shared/money';
 
 export function registerServicesHandlers() {
   // List service sales
@@ -42,6 +43,20 @@ export function registerServicesHandlers() {
     userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
+
+    // Negative figures were accepted and stored. The cash box happened not to
+    // move (the two sides cancelled), so nothing looked wrong — but the row
+    // was saved with Amount -5000 / Charge -4900 and reported a phantom
+    // profit of 100 in the income statement. A refund is a deletion, never a
+    // negative sale.
+    const badMoney = checkAmounts([
+      [data.Amount, 'المبلغ المحوَّل'],
+      [data.ChargeAmount, 'المبلغ المحصَّل'],
+      [data.PaidAmount, 'المدفوع'],
+      [data.ServiceCost ?? 0, 'تكلفة الخدمة'],
+      [data.TransferCost ?? 0, 'رسوم التحويل'],
+    ]);
+    if (badMoney) return { success: false, message: badMoney };
 
     try {
       const dateStr = businessToday();

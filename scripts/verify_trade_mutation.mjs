@@ -44,6 +44,9 @@ const REPORTSPAGE = join(ROOT, 'src/renderer/src/pages/reports/ReportsPage.tsx')
 const DBH = join(ROOT, 'src/main/ipc/database.handlers.ts');
 const CONN = join(ROOT, 'src/main/database/connection.ts');
 const DEL = join(ROOT, 'src/main/ipc/delete.handlers.ts');
+const VOU = join(ROOT, 'src/main/ipc/vouchers.handlers.ts');
+const SET = join(ROOT, 'src/main/ipc/settlement.handlers.ts');
+const SVC = join(ROOT, 'src/main/ipc/services.handlers.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -61,7 +64,9 @@ const SUITES = [
   'scripts/verify_maintenance.mjs',
   'scripts/verify_transfers.mjs',
   'scripts/verify_renderer_crash.mjs',
+  'scripts/verify_renderer_crash.mjs',
   'scripts/verify_backup_integrity.mjs',
+  'scripts/verify_back_office.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -237,6 +242,49 @@ const MUTANTS = [
     find: '  if (db) return db.name;',
     replace: '',
     why: 'an offline network share made the app silently use another database while the restore wrote to the unreachable one',
+  },
+  // ---- back office ------------------------------------------------------
+  {
+    name: 'a voucher naming both a safe and a wallet banks the money twice',
+    file: VOU,
+    find: "      const sign = data.VoucherType === 'receipt' ? 1 : -1;",
+    replace: "      const sign = data.VoucherType === 'receipt' ? 1 : -1;\n      if (data.PaymentMethodID && data.CashAccountID) db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(sign * data.Amount, data.CashAccountID);",
+    why: 'a 300 receipt credited 600 and the shop invented cash',
+  },
+  {
+    name: 'a negative amount is accepted again',
+    file: VOU,
+    find: "    if (badAmount) return { success: false, message: badAmount };",
+    replace: '',
+    why: 'a receipt of -9999 took money out of the till and called it income',
+  },
+  {
+    name: 'cancelling a service keeps the provider fee',
+    file: DEL,
+    find: '        const feesPaid = (sale.ServiceCost || 0) + (sale.TransferCost || 0);',
+    replace: '        const feesPaid = 0;',
+    why: 'a neutral operation destroyed value in one direction and invented it in the other',
+  },
+  {
+    name: 'a stocktake writes the item total into one warehouse row',
+    file: SET,
+    find: '            const delta = Number(item.ActualBalance) - Number(item.RecordedBalance);\n            const adjusted = Number(target.Quantity || 0) + delta;',
+    replace: '            const adjusted = Number(item.ActualBalance);',
+    why: 'counting 12 across two warehouses ended with 16',
+  },
+  {
+    name: 'a negative counted balance is accepted',
+    file: SET,
+    find: '      if (countable && !res.ok) {',
+    replace: '      if (false) {',
+    why: 'stock and cash could be counted as negative',
+  },
+  {
+    name: 'a negative service is stored again',
+    file: SVC,
+    find: '    if (badMoney) return { success: false, message: badMoney };',
+    replace: '',
+    why: 'a negative transfer reported phantom profit in the income statement',
   },
   {
     name: 'deleting a delivery reverses the customer debt twice',

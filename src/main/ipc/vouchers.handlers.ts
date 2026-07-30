@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
+import { checkAmounts } from '../../shared/money';
 
 export function registerVouchersHandlers() {
   ipcMain.handle('vouchers:get', async (_event, voucherId: number) => {
@@ -39,6 +40,13 @@ export function registerVouchersHandlers() {
     userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
+
+    // Direction is expressed by VoucherType, never by the sign of the money.
+    // Measured: a receipt of -9999 took 9,999 OUT of the till and recorded it
+    // as cash coming in, so the document and the balance agreed on a figure
+    // that was the exact opposite of the truth.
+    const badAmount = checkAmounts([[data.Amount, 'مبلغ السند', { allowZero: false }]]);
+    if (badAmount) return { success: false, message: badAmount };
     const dateStr = businessToday();
     const prefix = data.VoucherType === 'receipt' ? 'RCV' : 'PAY';
     const voucherNumber = nextDocNumber(db, 'vouchers', 'VoucherNumber', prefix, dateStr);
@@ -73,17 +81,24 @@ export function registerVouchersHandlers() {
         data.ReferenceType ?? null, data.ReferenceID ?? null, data.userId
       );
 
-      // Update cash account balance
-      if (data.VoucherType === 'receipt') {
-        db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(data.Amount, data.CashAccountID);
-        if (data.PaymentMethodID) {
-          db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(data.Amount, data.PaymentMethodID);
-        }
-      } else {
-        db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(data.Amount, data.CashAccountID);
-        if (data.PaymentMethodID) {
-          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(data.Amount, data.PaymentMethodID);
-        }
+      // The money lands in exactly ONE place.
+      //
+      // These used to be a cash update with a NESTED wallet update, so a
+      // voucher naming both a cash box and a machine moved the amount TWICE.
+      // Measured: a 300 receipt from a customer credited the safe 300 AND the
+      // wallet 300, so the shop booked 600 against a single 300 payment and
+      // invented cash out of nothing. A payment voucher destroyed it the same
+      // way. The UI offers both fields, so this needed no unusual input.
+      //
+      // `maintenance:deliver` already carries the identical fix; this is the
+      // same defect in the voucher path.
+      const sign = data.VoucherType === 'receipt' ? 1 : -1;
+      if (data.PaymentMethodID) {
+        db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?')
+          .run(sign * data.Amount, data.PaymentMethodID);
+      } else if (data.CashAccountID) {
+        db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?')
+          .run(sign * data.Amount, data.CashAccountID);
       }
 
       // Update party balance

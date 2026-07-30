@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { businessToday } from '../../shared/businessDate';
+import { checkAmounts } from '../../shared/money';
 
 export function registerPayrollHandlers() {
   // ===== SALARIES =====
@@ -342,6 +343,11 @@ export function registerPayrollHandlers() {
     const db = getDb();
     const dateStr = businessToday();
 
+    // A negative advance ran the payment backwards: measured, Amount = -5000
+    // ADDED 5,000 to the cash box while recording an advance to the employee.
+    const badAdv = checkAmounts([[data.Amount, 'مبلغ السلفة', { allowZero: false }]]);
+    if (badAdv) return { success: false, message: badAdv };
+
     // Check sufficient balance (unless negative cash allowed)
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
     if (allowNegCash?.Value !== '1') {
@@ -386,6 +392,10 @@ export function registerPayrollHandlers() {
   }) => {
     const db = getDb();
     const dateStr = businessToday();
+
+    // A negative deduction is a bonus nobody authorised.
+    const badDed = checkAmounts([[data.Amount, 'مبلغ الخصم', { allowZero: false }]]);
+    if (badDed) return { success: false, message: badDed };
 
     let amount = data.Amount;
     if (data.Reason === 'damage' && data.DamagedItemID) {

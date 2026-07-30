@@ -29,6 +29,8 @@ import { registerSmartNotificationsHandlers } from './ipc/notifications.handlers
 import { registerTransfersHandlers } from './ipc/transfers.handlers';
 import { registerDeleteHandlers } from './ipc/delete.handlers';
 import { runMigrations } from './database/migrations';
+import { migrateWithSafetyNet, SchemaTooNewError } from './database/schemaVersion';
+import { startUpdater } from './updater';
 import { installIpcGuard } from './security/ipcGuard';
 import { registerRemoteHandlers } from './ipc/remote.handlers';
 import { startHeartbeat } from './remote/heartbeat';
@@ -112,7 +114,34 @@ app.whenReady().then(() => {
   try {
     console.log('[Main] Initializing database...');
     const db = getDb();
-    runMigrations(db);
+
+    // The upgrade is the most dangerous routine event in this product's life:
+    // the shop's invoices exist in exactly one file. A snapshot is taken with
+    // SQLite's backup API BEFORE the first migration statement and restored
+    // automatically if anything throws — previously the only backup of the day
+    // was taken AFTER migrating, so a bad migration left nothing to go back to.
+    const upgrade = migrateWithSafetyNet(db, app.getPath('userData'), runMigrations, {
+      onUpgradeStart: (from, to) =>
+        console.log(`[Main] Upgrading database schema v${from} -> v${to} (snapshot first)`),
+    });
+
+    if (upgrade.error) {
+      // The data has been put back. Tell the owner plainly and stop, rather
+      // than running the app against a half-migrated database.
+      const recovered = upgrade.restoredFrom
+        ? 'تمت استعادة بياناتك كما كانت قبل التحديث.'
+        : 'تعذرت الاستعادة التلقائية — لا تشغّل البرنامج وتواصل مع الدعم فوراً.';
+      dialog.showErrorBox(
+        'فشل تحديث قاعدة البيانات',
+        `${recovered}\n\nنسخة ما قبل التحديث:\n${upgrade.snapshot ?? '—'}\n\nالتفاصيل: ${upgrade.error.message}`,
+      );
+      app.quit();
+      return;
+    }
+
+    if (upgrade.upgraded) {
+      console.log(`[Main] Schema upgraded to v${upgrade.to}; snapshot at ${upgrade.snapshot}`);
+    }
     console.log('[Main] Database ready');
 
     // Must run BEFORE any handler is registered: it patches ipcMain.handle so
@@ -165,10 +194,25 @@ app.whenReady().then(() => {
     setInterval(() => { void autoBackup(); }, 60 * 60 * 1000);
     console.log('[Main] Auto-backup scheduled (every 1 hour)');
 
+    // Automatic updates. Started last and entirely fail-safe: a shop with no
+    // internet must be able to trade all day without ever seeing a message
+    // about it. The first check is minutes away so start-up is not slowed.
+    startUpdater();
+
     // Daily check-in with the developer's server. Deliberately started AFTER
     // the window exists and is fully fail-safe: no network, no effect.
     startHeartbeat(currentDeviceId, currentLicenseSummary);
   } catch (err) {
+    // A database written by a NEWER build must not be opened read-write by an
+    // older one: this build would happily write rows missing whatever the
+    // newer schema added, and nobody would notice until a report disagreed.
+    // Measured before this guard existed — the old build wrote successfully.
+    if (err instanceof SchemaTooNewError) {
+      console.error('[Main] Refusing to open a newer database:', err.message);
+      dialog.showErrorBox('البرنامج أقدم من قاعدة البيانات', err.message);
+      app.quit();
+      return;
+    }
     console.error('[Main] STARTUP ERROR:', err);
     dialog.showErrorBox('خطأ في التشغيل', `${err}`);
     app.quit();

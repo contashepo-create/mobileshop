@@ -50,6 +50,8 @@ const SVC = join(ROOT, 'src/main/ipc/services.handlers.ts');
 const STMT = join(ROOT, 'src/main/ipc/statement.handlers.ts');
 const PAY = join(ROOT, 'src/main/ipc/payroll.handlers.ts');
 const OPB = join(ROOT, 'src/main/ipc/openingBalance.handlers.ts');
+const SCHEMA = join(ROOT, 'src/main/database/schemaVersion.ts');
+const MAIN = join(ROOT, 'src/main/index.ts');
 
 /**
  * The suites a mutant is checked against.
@@ -72,6 +74,7 @@ const SUITES = [
   'scripts/verify_back_office.mjs',
   'scripts/verify_statements.mjs',
   'scripts/verify_fuzz_back_office.mjs',
+  'scripts/verify_upgrade_safety.mjs',
 ];
 
 /** One realistic fault each. `find` must appear EXACTLY once, or the run aborts. */
@@ -296,6 +299,42 @@ const MUTANTS = [
     find: "    const res = checkAmount(balance, 'الرصيد الافتتاحي للخزينة');\n    if (!res.ok) return { success: false, message: res.message };",
     replace: '',
     why: 'a wrong opening figure is permanently baked into every later balance',
+  },
+  // ---- upgrade safety ----------------------------------------------------
+  {
+    name: 'the pre-upgrade snapshot is taken after migrating, not before',
+    file: SCHEMA,
+    find: '    db.exec(`VACUUM INTO \'${snapshot.replace(/\'/g, "\'\'")}\'`);',
+    replace: '    /* mutant: snapshot skipped */',
+    why: 'a backup of the damage is not a backup',
+  },
+  {
+    name: 'a failed migration is not rolled back',
+    file: SCHEMA,
+    find: '      fs.copyFileSync(snapshot, live);',
+    replace: '      /* mutant: no restore */',
+    why: 'the customer is left with a half-migrated database and no way back',
+  },
+  {
+    name: 'the schema version is stamped before the migration runs',
+    file: SCHEMA,
+    find: '  writeSchemaVersion(db, to);\n  pruneSnapshots',
+    replace: '  pruneSnapshots',
+    why: 'an interrupted upgrade would look finished and never be retried',
+  },
+  {
+    name: 'an older build happily opens a newer database',
+    file: SCHEMA,
+    find: '  if (from > to) throw new SchemaTooNewError(from, to);',
+    replace: '',
+    why: 'the old build writes rows missing whatever the newer schema added',
+  },
+  {
+    name: 'start-up migrates without the safety net',
+    file: MAIN,
+    find: '    const upgrade = migrateWithSafetyNet(db, app.getPath(\'userData\'), runMigrations, {',
+    replace: '    runMigrations(db);\n    const upgrade = ((): any => ({ upgraded: false }))() || migrateWithSafetyNet(db, app.getPath(\'userData\'), runMigrations, {',
+    why: 'the snapshot would be skipped entirely on every customer upgrade',
   },
   // ---- back office ------------------------------------------------------
   {

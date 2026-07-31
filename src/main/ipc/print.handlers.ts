@@ -132,9 +132,37 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
   const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const isA5 = paperSize === 'A5';
   const width = paperSize === '80mm' ? '80mm' : paperSize === '58mm' ? '58mm' : paperSize === 'A5' ? '148mm' : '210mm';
-  const font = isThermal ? '12px' : isA5 ? '13px' : '14px';
-  const pageMargin = isThermal ? '0' : isA5 ? '8mm' : '12mm';
+
+  /**
+   * Every dimension below used to be hardcoded, so a shop whose printer cut off
+   * the last column, or whose thermal roll needed a wider margin, had no way to
+   * fix it. These are the settings a real invoice designer exposes.
+   *
+   * Each falls back to the value that was previously fixed, so a shop that
+   * changes nothing sees exactly the same document as before. A stored value is
+   * only honoured when it parses as a sane number — a blank or a typo must not
+   * produce a page with a 900mm margin.
+   */
+  const numOpt = (key: string, fallback: number, min: number, max: number): number => {
+    const raw = Number(companyInfo[key]);
+    if (!Number.isFinite(raw)) return fallback;
+    return Math.min(max, Math.max(min, raw));
+  };
+
+  const font = `${numOpt('print_font_size', isThermal ? 12 : isA5 ? 13 : 14, 7, 24)}px`;
+  const pageMargin = isThermal
+    ? `${numOpt('print_margin_thermal', 0, 0, 20)}mm`
+    : `${numOpt('print_margin', isA5 ? 8 : 12, 0, 40)}mm`;
   const bodyPad = isThermal ? '4mm 3mm' : '0';
+  const logoMaxH = numOpt('print_logo_height', 50, 20, 200);
+  const fontFamily = companyInfo.print_font_family === 'tahoma'
+    ? "Tahoma, 'Segoe UI', sans-serif"
+    : companyInfo.print_font_family === 'arial'
+      ? "Arial, Helvetica, sans-serif"
+      : "'Cairo', 'Segoe UI', Tahoma, sans-serif";
+
+  /** Column visibility. Absent means shown, matching the previous behaviour. */
+  const col = (key: string): boolean => companyInfo[`print_col_${key}`] !== '0';
 
   const titles: any = {
     sale: 'فاتورة مبيعات', purchase: 'فاتورة مشتريات',
@@ -160,18 +188,26 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
   let totalsHTML = '';
 
   if (type === 'sale' && invoiceData) {
+    // Columns are individually switchable. A 58mm thermal roll cannot fit four
+    // columns legibly, and a shop that sells one-off items has no use for a
+    // quantity column that always reads 1 — both used to be unavoidable.
     itemsHTML = `
       <table class="items-table">
         <thead><tr>
-          <th>الصنف</th><th>كمية</th><th>سعر</th><th>إجمالي</th>
+          ${col('index') ? '<th>#</th>' : ''}
+          <th>الصنف</th>
+          ${col('qty') ? '<th>كمية</th>' : ''}
+          ${col('price') ? '<th>سعر</th>' : ''}
+          ${col('total') ? '<th>إجمالي</th>' : ''}
         </tr></thead>
         <tbody>
-          ${(invoiceData.items || []).map((item: any) => `
+          ${(invoiceData.items || []).map((item: any, i: number) => `
             <tr>
-              <td>${esc(item.ItemName || item.IMEI || item.ServiceName || '—')}${item.IMEI ? `<br/><small class="imei">${esc(item.IMEI)}</small>` : ''}</td>
-              <td class="center">${esc(item.Quantity)}</td>
-              <td class="center">${num(item.UnitPrice)}</td>
-              <td class="center bold">${num((Number(item.Quantity) || 0) * (Number(item.UnitPrice) || 0))}</td>
+              ${col('index') ? `<td class="center">${i + 1}</td>` : ''}
+              <td>${esc(item.ItemName || item.IMEI || item.ServiceName || '—')}${col('imei') && item.IMEI ? `<br/><small class="imei">${esc(item.IMEI)}</small>` : ''}</td>
+              ${col('qty') ? `<td class="center">${esc(item.Quantity)}</td>` : ''}
+              ${col('price') ? `<td class="center">${num(item.UnitPrice)}</td>` : ''}
+              ${col('total') ? `<td class="center bold">${num((Number(item.Quantity) || 0) * (Number(item.UnitPrice) || 0))}</td>` : ''}
             </tr>
           `).join('')}
         </tbody>
@@ -253,10 +289,10 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       <title>${esc(titles[type] || 'فاتورة')}</title>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Cairo', 'Segoe UI', Tahoma, sans-serif; font-size: ${font}; color: #333; padding: ${bodyPad}; width: ${isThermal ? width : 'auto'}; max-width: ${isThermal ? width : '210mm'}; margin: 0 auto; }
+        body { font-family: ${fontFamily}; font-size: ${font}; color: #333; padding: ${bodyPad}; width: ${isThermal ? width : 'auto'}; max-width: ${isThermal ? width : '210mm'}; margin: 0 auto; }
         @media print { body { width: auto; padding: 0; } @page { margin: ${pageMargin}; size: ${isThermal ? width + ' auto' : 'A4'}; } .no-print { display: none !important; } }
         .invoice-header { text-align: center; margin-bottom: 8px; }
-        .logo { max-height: 50px; max-width: 150px; margin-bottom: 5px; }
+        .logo { max-height: ${logoMaxH}px; max-width: ${Math.round(logoMaxH * 3)}px; margin-bottom: 5px; }
         .printed-by { margin-top: 6px; padding-top: 4px; border-top: 1px dashed #bbb;
                       font-size: 9px; color: #666; text-align: center; }
         .terms { margin-top: 6px; font-size: 9px; color: #555; text-align: center;

@@ -7,6 +7,8 @@ import { devLogin, revokeDevToken } from '../security/devAuth';
 import { getRemoteOverrides } from '../remote/remoteStore';
 import { isRemoteManaged } from '../remote/remoteConfig';
 import { requestCode, verifyCode } from '../security/confirmCode';
+import { validateRegistration } from '../../shared/registration';
+import { notifyDeveloperOfRegistration } from '../security/resetNotify';
 import { notifyDatabaseReset, notifyDeveloperOfReset } from '../security/resetNotify';
 import { recordSecurityEvent } from '../security/securityLog';
 
@@ -151,7 +153,12 @@ export function registerSettingsHandlers() {
 
   // ===== FIRST-RUN INITIALIZATION =====
   ipcMain.handle('setup:initialize', async (_event, data: {
-    company: { companyName: string; ownerName: string; phone: string; email: string; address: string; taxNumber: string };
+    company: {
+      companyName: string; ownerName: string; phone: string; email: string;
+      address: string; taxNumber: string;
+      governorate?: string; city?: string; birthDate?: string;
+      shareWithDeveloper?: boolean;
+    };
     customer: { name: string; phone: string; email: string; address: string };
     admin: { username: string; password: string; employeeName: string; position: string; phone: string };
   }) => {
@@ -175,6 +182,24 @@ export function registerSettingsHandlers() {
       return { success: false, message: 'اسم المستخدم مطلوب وكلمة المرور 6 أحرف على الأقل' };
     }
 
+    // Validated HERE, not only in the wizard. The renderer can be modified or
+    // bypassed entirely — this channel is reachable before any login — so the
+    // rules have to be enforced where they cannot be skipped. Same module the
+    // wizard uses, so the two can never disagree about what is acceptable.
+    const problems = validateRegistration({
+      companyName: company?.companyName,
+      ownerName: company?.ownerName,
+      phone: company?.phone,
+      email: company?.email,
+      governorate: company?.governorate,
+      city: company?.city,
+      address: company?.address,
+      birthDate: company?.birthDate,
+    });
+    if (problems.length > 0) {
+      return { success: false, message: problems.map(p => p.message).join(' • '), problems };
+    }
+
     const tx = db.transaction(() => {
       // Save company settings
       const settings = {
@@ -185,6 +210,11 @@ export function registerSettingsHandlers() {
         'email': company.email,
         'address': company.address,
         'tax_number': company.taxNumber,
+        'governorate': company.governorate || '',
+        'city': company.city || '',
+        'owner_birth_date': company.birthDate || '',
+        'registered_at': new Date().toISOString(),
+        'registration_consent': company.shareWithDeveloper ? '1' : '0',
       };
       for (const [key, value] of Object.entries(settings)) {
         db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)').run(key, value);
@@ -210,6 +240,26 @@ export function registerSettingsHandlers() {
       db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('setup_completed', '1')").run();
     });
     tx();
+
+    // Tell the developer who registered — only with explicit consent.
+    //
+    // Deliberately AFTER the transaction commits and deliberately not awaited:
+    // the shop is now set up, and a slow or unreachable server must not delay
+    // or fail the wizard. Personal data is involved, so silence is the default
+    // and the checkbox is the only thing that turns it on.
+    if (company.shareWithDeveloper) {
+      void notifyDeveloperOfRegistration({
+        companyName: company.companyName,
+        ownerName: company.ownerName,
+        phone: company.phone,
+        email: company.email,
+        governorate: company.governorate || '',
+        city: company.city || '',
+        address: company.address,
+        birthDate: company.birthDate || '',
+      });
+    }
+
     return { success: true };
   });
 

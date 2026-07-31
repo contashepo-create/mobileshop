@@ -159,6 +159,19 @@ async function ensureSchema(env) {
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS counters (
       name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0
     )`),
+    // Shop details, recorded only when the owner consented in the wizard.
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS registrations (
+      device_id     TEXT PRIMARY KEY,
+      company_name  TEXT,
+      owner_name    TEXT,
+      phone         TEXT,
+      email         TEXT,
+      governorate   TEXT,
+      city          TEXT,
+      address       TEXT,
+      birth_date    TEXT,
+      registered_at TEXT
+    )`),
   ]);
 }
 
@@ -177,6 +190,51 @@ async function ensureSchema(env) {
  * operation a shop is entitled to perform, and nothing here writes to the
  * licences table.
  */
+/**
+ * A new shop registered, and consented to sharing its details.
+ *
+ * Stored so the developer can look a customer up when they call for support,
+ * and announced on Telegram so a new install is noticed at the time.
+ *
+ * The client only calls this when the owner ticked the consent box, and this
+ * endpoint is the only place the data lands.
+ */
+async function handleRegistration(request, env) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return json({ ok: false, error: 'unauthorised' }, 401);
+  }
+  const b = await request.json().catch(() => null);
+  const deviceId = String(b?.deviceId || '').trim().toLowerCase();
+  const cut = (v, n) => String(v || '').slice(0, n);
+
+  await env.DB.prepare(`
+    INSERT INTO registrations
+      (device_id, company_name, owner_name, phone, email, governorate, city, address, birth_date, registered_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(device_id) DO UPDATE SET
+      company_name = excluded.company_name, owner_name = excluded.owner_name,
+      phone = excluded.phone, email = excluded.email,
+      governorate = excluded.governorate, city = excluded.city,
+      address = excluded.address, birth_date = excluded.birth_date
+  `).bind(
+    deviceId, cut(b?.companyName, 80), cut(b?.ownerName, 80), cut(b?.phone, 20),
+    cut(b?.email, 120), cut(b?.governorate, 40), cut(b?.city, 60),
+    cut(b?.address, 200), cut(b?.birthDate, 12),
+    String(b?.at || new Date().toISOString()).slice(0, 32),
+  ).run();
+
+  await tg(env,
+    `\u{1F195} <b>تسجيل عميل جديد</b>\n\n`
+    + `المحل: ${cut(b?.companyName, 80) || '—'}\n`
+    + `المالك: ${cut(b?.ownerName, 80) || '—'}\n`
+    + `الهاتف: ${cut(b?.phone, 20) || '—'}\n`
+    + `البريد: ${cut(b?.email, 120) || '—'}\n`
+    + `المحافظة: ${cut(b?.governorate, 40) || '—'} - ${cut(b?.city, 60) || '—'}\n`
+    + (deviceId ? `<code>${deviceId}</code>` : ''));
+
+  return json({ ok: true });
+}
+
 async function handleDatabaseReset(request, env) {
   if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
     return json({ ok: false, error: 'unauthorised' }, 401);
@@ -517,6 +575,12 @@ async function screenDevice(env, messageId, deviceId) {
   const label = s => s === 'active' ? '🟢 مفعّل' : s === 'trial' ? '🔵 تجريبي'
     : s === 'expired' ? '🔴 منتهٍ' : '⚪ غير معروف';
 
+  // Registration details, when the owner consented to sharing them. Shown here
+  // because "who is this shop, and what is their number" is the first thing
+  // needed when a customer calls for support.
+  const reg = await env.DB.prepare('SELECT * FROM registrations WHERE device_id = ?')
+    .bind(deviceId).first();
+
   let text = `<b>${d.shop_name || 'بلا اسم'}</b>\n\n` +
     `الحالة: ${label(d.license_status)}\n` +
     `ينتهي: ${d.license_expiry || '—'}\n` +
@@ -526,6 +590,16 @@ async function screenDevice(env, messageId, deviceId) {
     `آخر ظهور: ${(d.last_seen || '').slice(0, 16).replace('T', ' ') || '—'}\n` +
     `عدد الاتصالات: ${d.seen_count ?? 0}\n\n` +
     `<code>${d.device_id}</code>`;
+
+  if (reg) {
+    text += `\n\n<b>بيانات التسجيل</b>\n` +
+      `المالك: ${reg.owner_name || '—'}\n` +
+      `الهاتف: ${reg.phone || '—'}\n` +
+      `البريد: ${reg.email || '—'}\n` +
+      `المحافظة: ${reg.governorate || '—'} - ${reg.city || '—'}\n` +
+      `العنوان: ${reg.address || '—'}\n` +
+      `الميلاد: ${reg.birth_date || '—'}`;
+  }
 
   const history = codes?.results || [];
   if (history.length) {
@@ -866,6 +940,7 @@ export default {
           case '/message':   return await handleMessage(request, env);
           case '/telegram':  return await handleTelegram(request, env);
           case '/database-reset': return await handleDatabaseReset(request, env);
+          case '/registration':   return await handleRegistration(request, env);
         }
       }
       if (request.method === 'GET' && url.pathname === '/devices') {

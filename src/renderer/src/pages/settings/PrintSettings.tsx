@@ -30,6 +30,14 @@ export function PrintSettings() {
   const [showPrintUser, setShowPrintUser] = useState(true);
   const [thanksNote, setThanksNote] = useState('');
   const [terms, setTerms] = useState('');
+  // Layout tunables. Every one of these was a hardcoded constant.
+  const [fontSize, setFontSize] = useState('');
+  const [fontFamily, setFontFamily] = useState('cairo');
+  const [margin, setMargin] = useState('');
+  const [logoHeight, setLogoHeight] = useState('');
+  const [cols, setCols] = useState<Record<string, boolean>>({
+    index: true, qty: true, price: true, total: true, imei: true,
+  });
 
   useEffect(() => {
     (async () => {
@@ -43,6 +51,17 @@ export function PrintSettings() {
       setShowPrintUser(settings.print_show_user !== '0');
       setThanksNote(settings.invoice_thanks_note || '');
       setTerms(settings.invoice_terms || '');
+      setFontSize(settings.print_font_size || '');
+      setFontFamily(settings.print_font_family || 'cairo');
+      setMargin(settings.print_margin || '');
+      setLogoHeight(settings.print_logo_height || '');
+      setCols({
+        index: settings.print_col_index !== '0',
+        qty: settings.print_col_qty !== '0',
+        price: settings.print_col_price !== '0',
+        total: settings.print_col_total !== '0',
+        imei: settings.print_col_imei !== '0',
+      });
     })();
   }, []);
 
@@ -57,6 +76,15 @@ export function PrintSettings() {
       print_show_user: showPrintUser ? '1' : '0',
       invoice_thanks_note: thanksNote,
       invoice_terms: terms,
+      print_font_size: fontSize,
+      print_font_family: fontFamily,
+      print_margin: margin,
+      print_logo_height: logoHeight,
+      print_col_index: cols.index ? '1' : '0',
+      print_col_qty: cols.qty ? '1' : '0',
+      print_col_price: cols.price ? '1' : '0',
+      print_col_total: cols.total ? '1' : '0',
+      print_col_imei: cols.imei ? '1' : '0',
     });
     showToast('success', 'تم حفظ إعدادات الطباعة');
   };
@@ -96,6 +124,75 @@ export function PrintSettings() {
               </button>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Layout. Each of these replaced a hardcoded constant, so a shop whose
+          printer clipped a column, or whose thermal roll needed a different
+          margin, previously had no way to correct it. */}
+      <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
+        <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-4">تنسيق المستند</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+              حجم الخط (نقطة) — اتركه فارغاً للافتراضي
+            </label>
+            <input type="number" min={7} max={24} value={fontSize} dir="ltr"
+              onChange={(e) => setFontSize(e.target.value)} placeholder="14"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">نوع الخط</label>
+            <select value={fontFamily} onChange={(e) => setFontFamily(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm">
+              <option value="cairo">Cairo (افتراضي)</option>
+              <option value="tahoma">Tahoma</option>
+              <option value="arial">Arial</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+              هامش الصفحة (مم) — لـ A4 و A5
+            </label>
+            <input type="number" min={0} max={40} value={margin} dir="ltr"
+              onChange={(e) => setMargin(e.target.value)} placeholder="12"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+              أقصى ارتفاع للشعار (بكسل)
+            </label>
+            <input type="number" min={20} max={200} value={logoHeight} dir="ltr"
+              onChange={(e) => setLogoHeight(e.target.value)} placeholder="50"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm" />
+          </div>
+        </div>
+        <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+          القيم خارج المدى المسموح تُضبط تلقائياً — لن يُطبع مستند بهامش مستحيل.
+        </p>
+      </div>
+
+      {/* Which columns appear in the items table. */}
+      <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
+        <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-2">أعمدة جدول الأصناف</h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+          الورق الحراري 58مم ضيّق — أخفِ ما لا تحتاجه ليظهر الباقي بوضوح.
+        </p>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+          {([
+            ['index', 'رقم مسلسل'],
+            ['qty', 'الكمية'],
+            ['price', 'سعر الوحدة'],
+            ['total', 'الإجمالي'],
+            ['imei', 'رقم IMEI تحت اسم الصنف'],
+          ] as [string, string][]).map(([key, label]) => (
+            <label key={key} className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
+              <input type="checkbox" checked={cols[key]}
+                onChange={(e) => setCols({ ...cols, [key]: e.target.checked })}
+                className="rounded" />
+              {label}
+            </label>
+          ))}
         </div>
       </div>
 

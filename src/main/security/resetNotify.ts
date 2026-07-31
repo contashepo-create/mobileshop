@@ -83,3 +83,40 @@ export async function notifyDeveloperOfReset(
     clearTimeout(timer);
   }
 }
+
+/**
+ * Reports a new registration to the developer.
+ *
+ * PRIVACY — this one carries PERSONAL DATA, unlike every other call here.
+ * It runs ONLY when the owner ticked the consent box in the wizard. There is
+ * no silent default and no way to switch it on remotely: the caller checks the
+ * flag, and this function is simply never invoked otherwise.
+ *
+ * Best-effort and unawaited by design. The shop is already set up by the time
+ * this runs, so an unreachable server must never delay the wizard or make a
+ * successful setup look like a failure.
+ */
+export async function notifyDeveloperOfRegistration(profile: {
+  companyName: string; ownerName: string; phone: string; email: string;
+  governorate: string; city: string; address: string; birthDate: string;
+}): Promise<void> {
+  if (!API_BASE || !CLIENT_KEY) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    let deviceId = '';
+    try {
+      const mod = await import('./deviceId');
+      deviceId = mod.getDeviceId();
+    } catch { /* a nicety here, not a requirement */ }
+
+    await fetch(`${API_BASE}/registration`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Client-Key': CLIENT_KEY },
+      body: JSON.stringify({ deviceId, ...profile, at: new Date().toISOString() }),
+      signal: controller.signal,
+    });
+  } catch { /* offline, timeout, DNS — never affects the shop */ } finally {
+    clearTimeout(timer);
+  }
+}

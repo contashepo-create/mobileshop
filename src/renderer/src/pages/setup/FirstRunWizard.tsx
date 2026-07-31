@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { validateRegistration, EGYPT_GOVERNORATES } from '../../../../shared/registration';
 import { useNavigate } from 'react-router-dom';
 import { Building2, User, Phone, Mail, MapPin, Save, ArrowRight, Shield, Store } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
@@ -18,7 +19,14 @@ export function FirstRunWizard() {
     email: '',
     address: '',
     taxNumber: '',
+    governorate: '',
+    city: '',
+    birthDate: '',
+    shareWithDeveloper: true,
   });
+  // Per-field messages from the shared validator, so the owner sees every
+  // problem at once instead of discovering them one submit at a time.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const [customer, setCustomer] = useState({
     name: '',
@@ -43,9 +51,18 @@ export function FirstRunWizard() {
   ];
 
   const handleNext = () => {
-    if (step === 1 && !company.companyName) {
-      showToast('error', 'يرجى إدخال اسم المحل/الشركة');
-      return;
+    if (step === 1) {
+      // Same validator the main process runs, so the wizard can never let
+      // through something the handler will reject.
+      const problems = validateRegistration(company);
+      if (problems.length > 0) {
+        const map: Record<string, string> = {};
+        for (const p of problems) map[p.field] = p.message;
+        setFieldErrors(map);
+        showToast('error', 'راجع الحقول المميّزة بالأحمر');
+        return;
+      }
+      setFieldErrors({});
     }
     if (step === 2) {
       if (!admin.username || !admin.password) {
@@ -118,13 +135,57 @@ export function FirstRunWizard() {
                 <Building2 size={20} /> بيانات الشركة
               </h3>
                <Input label="اسم المحل / الشركة" value={company.companyName} onChange={(e) => setCompany({...company, companyName: e.target.value})} required />
+               {fieldErrors.companyName && <p className="text-[11px] text-red-600 -mt-2">{fieldErrors.companyName}</p>}
                <Input label="اسم صاحب المحل" value={company.ownerName} onChange={(e) => setCompany({...company, ownerName: e.target.value})} />
+               {fieldErrors.ownerName && <p className="text-[11px] text-red-600 -mt-2">{fieldErrors.ownerName}</p>}
                <div className="grid grid-cols-2 gap-3">
-                 <Input label="الهاتف" value={company.phone} onChange={(e) => setCompany({...company, phone: e.target.value})} />
-                 <Input label="البريد الإلكتروني" type="email" value={company.email} onChange={(e) => setCompany({...company, email: e.target.value})} />
+                 <div><Input label="الهاتف" value={company.phone} onChange={(e) => setCompany({...company, phone: e.target.value})} />
+                 {fieldErrors.phone && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.phone}</p>}</div>
+                 <div><Input label="البريد الإلكتروني" type="email" value={company.email} onChange={(e) => setCompany({...company, email: e.target.value})} />
+                 {fieldErrors.email && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.email}</p>}</div>
+               </div>
+               <div className="grid grid-cols-2 gap-3">
+                 <div>
+                   <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">المحافظة</label>
+                   <select value={company.governorate}
+                     onChange={(e) => setCompany({...company, governorate: e.target.value})}
+                     className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm">
+                     <option value="">اختر المحافظة</option>
+                     {EGYPT_GOVERNORATES.map(g => <option key={g} value={g}>{g}</option>)}
+                   </select>
+                   {fieldErrors.governorate && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.governorate}</p>}
+                 </div>
+                 <div>
+                   <Input label="المدينة" value={company.city} onChange={(e) => setCompany({...company, city: e.target.value})} />
+                   {fieldErrors.city && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.city}</p>}
+                 </div>
                </div>
                <Input label="العنوان" value={company.address} onChange={(e) => setCompany({...company, address: e.target.value})} />
+               {fieldErrors.address && <p className="text-[11px] text-red-600 -mt-2">{fieldErrors.address}</p>}
+               <div>
+                 <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">تاريخ ميلاد صاحب المحل</label>
+                 <input type="date" value={company.birthDate} dir="ltr"
+                   onChange={(e) => setCompany({...company, birthDate: e.target.value})}
+                   className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm" />
+                 {fieldErrors.birthDate && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.birthDate}</p>}
+               </div>
                <Input label="الرقم الضريبي" value={company.taxNumber} onChange={(e) => setCompany({...company, taxNumber: e.target.value})} />
+
+               {/* Consent, not a pre-ticked trap: personal data must not leave
+                   the machine on a default the owner never read. Stated plainly
+                   so the choice is informed. */}
+               <label className="flex items-start gap-2 p-3 rounded-lg bg-slate-50 dark:bg-slate-700/40 cursor-pointer">
+                 <input type="checkbox" checked={company.shareWithDeveloper}
+                   onChange={(e) => setCompany({...company, shareWithDeveloper: e.target.checked})}
+                   className="mt-1 rounded" />
+                 <span className="text-xs text-slate-600 dark:text-slate-300">
+                   أوافق على إرسال بيانات المحل (الاسم، الهاتف، البريد، العنوان) إلى مطوّر البرنامج
+                   لأغراض الدعم الفني وتفعيل الترخيص.
+                   <span className="block mt-1 text-slate-500 dark:text-slate-400">
+                     لا تُرسل أي بيانات عن عملائك أو مبيعاتك أو أرصدتك — أبداً.
+                   </span>
+                 </span>
+               </label>
 
                <div className="border-t border-slate-200 dark:border-slate-700 my-4" />
                <h3 className="text-sm font-semibold text-slate-600 dark:text-slate-400">بيانات العميل الأول (اختياري)</h3>

@@ -1,4 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron';
+import { getSession } from '../security/session';
 import { businessToday } from '../../shared/businessDate';
 
 /**
@@ -36,14 +37,26 @@ function safeImageSrc(value: unknown): string | null {
 
 export function registerPrintHandlers() {
   // Preview invoice - shows preview window with print button
-  ipcMain.handle('print:preview', async (_event, data: {
+  /**
+   * Who is printing, taken from the SESSION rather than the payload.
+   *
+   * Every screen that prints would otherwise have to remember to pass a
+   * username, and the one that forgot would silently produce an unattributed
+   * document. Reading it here means the line is always correct and cannot be
+   * spoofed by a modified renderer.
+   */
+  const printingUser = (event: Electron.IpcMainInvokeEvent): string => {
+    try { return getSession(event.sender.id)?.username || ''; } catch { return ''; }
+  };
+
+  ipcMain.handle('print:preview', async (event, data: {
     type: string;
     paperSize: string;
     template: string;
     companyInfo: any;
     invoiceData: any;
   }) => {
-    const html = generateInvoiceHTML(data, false);
+    const html = generateInvoiceHTML({ ...data, printedBy: printingUser(event) }, false);
 
     const previewWindow = new BrowserWindow({
       width: data.paperSize === 'A4' ? 820 : 420,
@@ -63,14 +76,14 @@ export function registerPrintHandlers() {
   });
 
   // Print directly - opens print dialog
-  ipcMain.handle('print:invoice', async (_event, data: {
+  ipcMain.handle('print:invoice', async (event, data: {
     type: string;
     paperSize: string;
     template: string;
     companyInfo: any;
     invoiceData: any;
   }) => {
-    const html = generateInvoiceHTML(data, false);
+    const html = generateInvoiceHTML({ ...data, printedBy: printingUser(event) }, false);
 
     const printWindow = new BrowserWindow({
       width: data.paperSize === 'A4' ? 820 : 420,
@@ -112,6 +125,10 @@ function getPageSize(paperSize: string) {
 
 function generateInvoiceHTML(data: any, autoPrint: boolean): string {
   const { type, paperSize, template, companyInfo, invoiceData } = data;
+  // Supplied by the caller (the renderer knows who is signed in). Falls back to
+  // a blank rather than guessing, so the line is never misleading.
+  const printedBy = (data as any).printedBy || companyInfo.printed_by || '';
+  const printedAt = new Date().toLocaleString('en-GB');
   const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const isA5 = paperSize === 'A5';
   const width = paperSize === '80mm' ? '80mm' : paperSize === '58mm' ? '58mm' : paperSize === 'A5' ? '148mm' : '210mm';
@@ -240,6 +257,10 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
         @media print { body { width: auto; padding: 0; } @page { margin: ${pageMargin}; size: ${isThermal ? width + ' auto' : 'A4'}; } .no-print { display: none !important; } }
         .invoice-header { text-align: center; margin-bottom: 8px; }
         .logo { max-height: 50px; max-width: 150px; margin-bottom: 5px; }
+        .printed-by { margin-top: 6px; padding-top: 4px; border-top: 1px dashed #bbb;
+                      font-size: 9px; color: #666; text-align: center; }
+        .terms { margin-top: 6px; font-size: 9px; color: #555; text-align: center;
+                 white-space: pre-line; }
         .company-name { font-size: ${isThermal ? '14px' : '20px'}; font-weight: bold; }
         .info-line { font-size: 11px; color: #666; }
         .divider { border: none; border-top: 1px dashed #ccc; margin: 5px 0; }
@@ -279,11 +300,24 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       ${partyInfo}
       ${itemsHTML}
       ${totalsHTML}
-      <div class="thank-you">شكراً لتعاملكم معنا</div>
+      <div class="thank-you">${esc(companyInfo.invoice_thanks_note || 'شكراً لتعاملكم معنا')}</div>
+      ${companyInfo.invoice_terms ? `<div class="terms">${esc(companyInfo.invoice_terms)}</div>` : ''}
       <div class="footer">
         ${companyInfo.owner_name ? `المالك: ${esc(companyInfo.owner_name)} | ` : ''}
         ${companyInfo.phone ? `هاتف: ${esc(companyInfo.phone)}` : ''}
       </div>
+      ${/*
+         Who printed this, and when.
+         Not decoration: a statement of account or an invoice reprint is
+         evidence in a dispute, and "which of my staff produced this copy" is a
+         question that gets asked. Without it a printout has no provenance at
+         all. Suppressible for shops that would rather not show it.
+      */ ''}
+      ${companyInfo.print_show_user === '0' ? '' : `
+      <div class="printed-by">
+        تمت الطباعة بواسطة: ${esc(printedBy || 'غير معروف')}
+        &nbsp;·&nbsp; ${esc(printedAt)}
+      </div>`}
       <button class="print-btn no-print" onclick="window.print()">🖨️ طباعة</button>
     </body>
     </html>

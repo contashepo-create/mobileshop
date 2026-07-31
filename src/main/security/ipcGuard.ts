@@ -62,6 +62,12 @@ const PUBLIC_CHANNELS = new Set<string>([
   // NOTE: no apostrophes in this comment. verify_ipc_coverage.py reads channel
   // names by matching single-quoted strings in this block, so a stray
   // apostrophe pairs with a real quote and hides the entries below it.
+  // The books belong to the shop that entered them. This must be reachable
+  // from the activation screen when a licence has lapsed, which is precisely
+  // when there is no session. It proves an administrator password inside the
+  // handler. (No apostrophes here: verify_ipc_coverage.py reads channel names
+  // by matching single-quoted strings, so a stray one hides the entries below.)
+  'db:exportForOwner',
   'users:listRecoverable',
   'recovery:isAvailable',
   'recovery:requestCode',
@@ -302,6 +308,7 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   // itself: asking whether it is possible, and asking for the confirmation
   // code, are both part of the destructive flow and must not be reachable by
   // an account that could not complete it.
+  'settings:pickLogo': 'settings.edit',
   'settings:resetIsAvailable': 'settings.edit',
   'settings:resetRequestCode': 'settings.edit',
   'users:create': 'settings.users',

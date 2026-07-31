@@ -1,4 +1,4 @@
-import { ipcMain, app } from 'electron';
+import { ipcMain, app, dialog } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { getDb } from '../database/connection';
@@ -249,6 +249,58 @@ export function registerSettingsHandlers() {
   };
 
   /** True when the shop can receive a confirmation code at all. */
+  /**
+   * Choose a shop logo and return it as a data URL.
+   *
+   * Stored inline rather than as a filesystem path, deliberately:
+   *   - a path breaks the moment the database is restored on another machine,
+   *     or moved to a shared network folder, and the invoice silently loses its
+   *     logo with no error anywhere;
+   *   - a data URL travels inside the backup, so a restored shop keeps its
+   *     branding.
+   *
+   * Size is capped because this ends up in every settings read. A logo is a
+   * small image; anything larger is a photograph chosen by mistake.
+   */
+  ipcMain.handle('settings:pickLogo', async () => {
+    const result = await dialog.showOpenDialog({
+      title: 'اختر صورة الشعار',
+      filters: [{ name: 'صور', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
+      properties: ['openFile'],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, message: '' };
+    }
+
+    const file = result.filePaths[0];
+    try {
+      const stat = fs.statSync(file);
+      const MAX_BYTES = 512 * 1024;
+      if (stat.size > MAX_BYTES) {
+        return {
+          success: false,
+          message: `حجم الصورة ${(stat.size / 1024).toFixed(0)} كيلوبايت - الحد الأقصى 512 كيلوبايت`,
+        };
+      }
+
+      const bytes = fs.readFileSync(file);
+      // Identify the type from the file's own bytes, not its extension: a
+      // renamed file must not be embedded with a mime type that lies.
+      const sig = bytes.subarray(0, 12);
+      let mime = '';
+      if (sig[0] === 0x89 && sig[1] === 0x50) mime = 'image/png';
+      else if (sig[0] === 0xff && sig[1] === 0xd8) mime = 'image/jpeg';
+      else if (sig.subarray(0, 4).toString('ascii') === 'RIFF'
+               && sig.subarray(8, 12).toString('ascii') === 'WEBP') mime = 'image/webp';
+      else if (sig.subarray(0, 3).toString('ascii') === 'GIF') mime = 'image/gif';
+      if (!mime) return { success: false, message: 'الملف المختار ليس صورة صالحة' };
+
+      return { success: true, dataUrl: `data:${mime};base64,${bytes.toString('base64')}` };
+    } catch (err: any) {
+      return { success: false, message: `تعذّر قراءة الصورة: ${err?.message || err}` };
+    }
+  });
+
   ipcMain.handle('settings:resetIsAvailable', async () => ({
     available: shopTelegram() !== null,
   }));

@@ -15,6 +15,12 @@ function toInternational(local: string): string {
 }
 
 export function LicenseActivationPage() {
+  // Owner data export, usable while the licence is expired.
+  const [showExport, setShowExport] = useState(false);
+  const [expUser, setExpUser] = useState('');
+  const [expPass, setExpPass] = useState('');
+  const [expBusy, setExpBusy] = useState(false);
+  const [expMsg, setExpMsg] = useState('');
   const [licenseStatus, setLicenseStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [code, setCode] = useState('');
@@ -240,8 +246,60 @@ export function LicenseActivationPage() {
           </Button>
         </div>
 
-        <div className="mt-5 pt-3 border-t border-slate-200 dark:border-slate-700 text-center">
-          <p className="text-[10px] text-slate-400 dark:text-slate-500">
+        {/* The books belong to the shop that entered them. Locking an owner out
+            of their own records because a subscription lapsed is wrong, and in
+            several jurisdictions unlawful — they still have tax filings to make.
+            This is reachable precisely when nothing else is. */}
+        <div className="mt-5 pt-3 border-t border-slate-200 dark:border-slate-700">
+          {!showExport ? (
+            <button
+              type="button"
+              onClick={() => setShowExport(true)}
+              className="w-full text-xs text-slate-500 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors"
+            >
+              📤 تصدير بياناتي (يعمل حتى بعد انتهاء الاشتراك)
+            </button>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                بياناتك ملكك. أدخل بيانات حساب المدير لتصديرها بصيغة CSV.
+              </p>
+              <Input
+                label="" placeholder="اسم المستخدم" value={expUser}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setExpUser(e.target.value)}
+              />
+              <Input
+                label="" type="password" placeholder="كلمة المرور" value={expPass}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setExpPass(e.target.value)}
+              />
+              {expMsg && (
+                <p className="text-xs text-slate-600 dark:text-slate-300">{expMsg}</p>
+              )}
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary" className="flex-1" loading={expBusy}
+                  disabled={!expUser.trim() || !expPass}
+                  onClick={async () => {
+                    setExpBusy(true); setExpMsg('');
+                    const r = await window.api.invoke('db:exportForOwner', {
+                      username: expUser.trim(), password: expPass,
+                    });
+                    setExpBusy(false);
+                    setExpMsg(r?.message || '');
+                    if (r?.success) setExpPass('');
+                  }}
+                >
+                  تصدير
+                </Button>
+                <Button variant="ghost" onClick={() => {
+                  setShowExport(false); setExpUser(''); setExpPass(''); setExpMsg('');
+                }}>
+                  إلغاء
+                </Button>
+              </div>
+            </div>
+          )}
+          <p className="mt-3 text-[10px] text-slate-400 dark:text-slate-500 text-center">
             {dev.name} · {dev.phone}
           </p>
         </div>

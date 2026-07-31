@@ -3,6 +3,8 @@ import { getDb, closeDb, getDbPath, setDbPath } from '../database/connection';
 import path from 'node:path';
 import fs from 'node:fs';
 import { businessToday } from '../../shared/businessDate';
+import bcrypt from 'bcryptjs';
+import { recordSecurityEvent } from '../security/securityLog';
 import {
   testTelegram, sendBackupToTelegram, looksLikeBotToken, looksLikeChatId,
 } from '../backup/telegramBackup';
@@ -567,6 +569,77 @@ export function registerDatabaseHandlers() {
       // the OS temp folder whether the upload worked or not.
       try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* best effort */ }
     }
+  });
+
+  /**
+   * Export every table, WITHOUT a licence.
+   *
+   * A shop's books belong to the shop, not to the software. Holding them
+   * hostage behind an expired subscription is wrong commercially, corrosive to
+   * trust, and in several jurisdictions unlawful — the owner still has tax
+   * filings to make from data they entered themselves.
+   *
+   * The regular `db:exportAllCSV` sits behind `settings.edit`, which requires a
+   * logged-in session, and the whole UI is replaced by the activation screen
+   * once a licence lapses. So this channel exists to be reachable from that
+   * screen. It is not an open door: the caller must still prove an
+   * administrator password, the same blocklist hides password hashes and
+   * credentials, and every export is written to the security log.
+   */
+  ipcMain.handle('db:exportForOwner', async (_event, data: { username?: unknown; password?: unknown }) => {
+    const db = getDb();
+    const username = String(data?.username ?? '').trim();
+    const password = String(data?.password ?? '');
+    if (!username || !password) {
+      return { success: false, message: 'أدخل اسم المستخدم وكلمة المرور' };
+    }
+
+    const user = db.prepare(
+      'SELECT UserID, Username, PasswordHash, RoleID, IsActive FROM users WHERE Username = ?',
+    ).get(username) as any;
+    // One uniform message, and a dummy compare, so this cannot be used to
+    // discover which usernames exist while the app is otherwise locked.
+    if (!user || !user.IsActive) {
+      bcrypt.compareSync(password, '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvaliduO');
+      return { success: false, message: 'بيانات الدخول غير صحيحة' };
+    }
+    if (!bcrypt.compareSync(password, user.PasswordHash)) {
+      return { success: false, message: 'بيانات الدخول غير صحيحة' };
+    }
+    if (user.RoleID !== 1) {
+      return { success: false, message: 'التصدير متاح لحساب المدير فقط' };
+    }
+
+    const result = await dialog.showOpenDialog({
+      title: 'اختر مجلداً لحفظ بياناتك',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, message: 'تم الإلغاء' };
+    }
+
+    const folder = result.filePaths[0];
+    const tables = db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
+    `).all() as any[];
+
+    let exported = 0;
+    for (const table of tables) {
+      const tableName = table.name as string;
+      if (EXPORT_BLOCKLIST.has(tableName)) continue;   // never dump credentials
+      const rows = db.prepare(`SELECT * FROM "${tableName}"`).all() as any[];
+      if (rows.length === 0) continue;
+      const headers = Object.keys(rows[0]);
+      const lines: string[] = ['\uFEFF' + headers.join(',')];
+      for (const row of rows) lines.push(headers.map(h => csvCell(row[h])).join(','));
+      fs.writeFileSync(path.join(folder, `${tableName}.csv`), lines.join('\n'), 'utf-8');
+      exported++;
+    }
+
+    recordSecurityEvent(db, 'data_export_owner', user.UserID, user.Username,
+      `تصدير ${exported} جدول إلى ${folder}`);
+
+    return { success: true, message: `تم تصدير ${exported} ملف إلى المجلد المختار`, exported };
   });
 
   // Get all table names for export

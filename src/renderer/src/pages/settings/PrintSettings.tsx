@@ -25,6 +25,11 @@ export function PrintSettings() {
   const [showShopInfo, setShowShopInfo] = useState(true);
   const [paperSize, setPaperSize] = useState('80mm');
   const [defaultAction, setDefaultAction] = useState('preview');
+  // Branding and provenance on printed documents.
+  const [logoPath, setLogoPath] = useState('');
+  const [showPrintUser, setShowPrintUser] = useState(true);
+  const [thanksNote, setThanksNote] = useState('');
+  const [terms, setTerms] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -34,6 +39,10 @@ export function PrintSettings() {
       setShowShopInfo(settings.invoice_show_shop !== '0');
       setPaperSize(settings.paper_size || '80mm');
       setDefaultAction(settings.print_default_action || 'preview');
+      setLogoPath(settings.logo_path || '');
+      setShowPrintUser(settings.print_show_user !== '0');
+      setThanksNote(settings.invoice_thanks_note || '');
+      setTerms(settings.invoice_terms || '');
     })();
   }, []);
 
@@ -44,12 +53,88 @@ export function PrintSettings() {
       invoice_show_shop: showShopInfo ? '1' : '0',
       paper_size: paperSize,
       print_default_action: defaultAction,
+      logo_path: logoPath,
+      print_show_user: showPrintUser ? '1' : '0',
+      invoice_thanks_note: thanksNote,
+      invoice_terms: terms,
     });
     showToast('success', 'تم حفظ إعدادات الطباعة');
   };
 
   return (
     <div className="max-w-3xl space-y-6">
+      {/* Shop logo — the value already reached the printed invoice, but there
+          was no way to set it, so it sat unused in the database. */}
+      <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
+        <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-2">شعار المحل</h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+          يظهر أعلى الفاتورة وكشف الحساب والتقارير.
+        </p>
+        <div className="flex items-center gap-3">
+          {logoPath ? (
+            <img src={logoPath} alt="شعار" className="h-14 w-auto max-w-[140px] object-contain rounded border border-slate-200 dark:border-slate-700 bg-white p-1" />
+          ) : (
+            <div className="h-14 w-24 rounded border border-dashed border-slate-300 dark:border-slate-600 flex items-center justify-center text-[10px] text-slate-400">
+              لا يوجد شعار
+            </div>
+          )}
+          <div className="flex-1 space-y-2">
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                const r = await window.api.invoke('settings:pickLogo');
+                if (r?.success) { setLogoPath(r.dataUrl); showToast('success', 'تم اختيار الشعار - اضغط حفظ'); }
+                else if (r?.message) showToast('error', r.message);
+              }}
+            >
+              اختر صورة الشعار
+            </Button>
+            {logoPath && (
+              <button type="button" onClick={() => setLogoPath('')}
+                className="block text-xs text-red-600 hover:underline">
+                إزالة الشعار
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Provenance and free text on the document. */}
+      <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
+        <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-4">محتوى المستند</h2>
+
+        <label className="flex items-start gap-2 mb-4 cursor-pointer">
+          <input type="checkbox" checked={showPrintUser}
+            onChange={(e) => setShowPrintUser(e.target.checked)} className="mt-1 rounded" />
+          <span className="text-sm text-slate-700 dark:text-slate-300">
+            طباعة اسم المستخدم الذي طبع المستند
+            <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              يظهر أسفل المستند: «تمت الطباعة بواسطة: ... » مع التاريخ والوقت.
+              مفيد عند مراجعة نزاع لمعرفة من أصدر النسخة.
+            </span>
+          </span>
+        </label>
+
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+              عبارة الشكر أسفل الفاتورة
+            </label>
+            <input type="text" value={thanksNote} onChange={(e) => setThanksNote(e.target.value)}
+              placeholder="شكراً لتعاملكم معنا"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+              شروط البيع / ملاحظات (تظهر أسفل كل فاتورة)
+            </label>
+            <textarea value={terms} onChange={(e) => setTerms(e.target.value)} rows={3}
+              placeholder="مثال: البضاعة المباعة لا تُرد ولا تُستبدل بعد ١٤ يوماً - الضمان لا يشمل الكسر أو المياه"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm resize-none" />
+          </div>
+        </div>
+      </div>
+
       {/* Paper Size */}
       <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
         <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-4">حجم الورق الافتراضي</h2>

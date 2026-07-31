@@ -75,8 +75,18 @@ if (words.length < 3 && password.length < 20) {
 
 const hash = bcrypt.hashSync(password, 12);
 
-console.log('\n=== DEVELOPER PASSWORD HASH ===\n');
-console.log('Paste this line into src/main/security/devAuth.ts:\n');
-console.log(`const DEV_PASSWORD_HASH = '${hash}';\n`);
+// Base64, because a raw bcrypt hash cannot survive .env.
+//
+// Vite loads .env through dotenv-expand, which reads `$12$abc` as a variable
+// reference and substitutes it — silently truncating `$2a$12$hUAAv...` to
+// `$2a$12`. bcrypt then rejects every password with no error anywhere.
+// Measured with this project's own Vite before choosing this encoding.
+const b64 = Buffer.from(hash, 'utf-8').toString('base64');
+
+console.log('\n=== DEVELOPER PASSWORD ===\n');
+console.log('Add this line to your .env file:\n');
+console.log(`MOBILESHOP_DEV_PASSWORD_HASH_B64=${b64}\n`);
+console.log('(base64 of the bcrypt hash — a raw hash gets mangled by the .env');
+console.log(' loader, which turns $2a$12$... into $2a$12 and breaks login.)\n');
 console.log('Store the passphrase itself in a password manager. It is not');
 console.log('recoverable from the hash, and replacing it means rebuilding.\n');

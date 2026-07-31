@@ -56,7 +56,7 @@ const env = parseEnv(fs.readFileSync(ENV_FILE, 'utf-8'));
 
 const CHECKS = [
   ['MOBILESHOP_LICENSE_PUBLIC_KEY', true, 'licence verification key (npm run license:init)'],
-  ['MOBILESHOP_DEV_PASSWORD_HASH', true, 'developer console password (npm run dev:password)'],
+  ['MOBILESHOP_DEV_PASSWORD_HASH_B64', true, 'developer console password (npm run dev:password)'],
   ['MOBILESHOP_API_BASE', false, 'Cloudflare Worker URL — licensing and remote notices'],
   ['MOBILESHOP_CLIENT_KEY', false, 'Worker client key'],
 ];
@@ -82,8 +82,33 @@ for (const [key, required, what] of CHECKS) {
     continue;
   }
 
+  // A bcrypt hash mangled by the .env loader is the failure this whole
+  // encoding exists to prevent, so it is checked rather than assumed.
+  if (key === 'MOBILESHOP_DEV_PASSWORD_HASH_B64') {
+    let decoded = '';
+    try { decoded = Buffer.from(value, 'base64').toString('utf-8').trim(); } catch { /* reported below */ }
+    if (!/^\$2[aby]\$\d{2}\$.{53}$/.test(decoded)) {
+      blocking++;
+      console.log(`  BAD       ${key}`);
+      console.log('            does not decode to a complete bcrypt hash.');
+      console.log('            Regenerate:  npm run dev:password -- "your passphrase"\n');
+      continue;
+    }
+  }
+
   const shown = value.length > 24 ? `${value.slice(0, 12)}...${value.slice(-6)}` : value;
   console.log(`  ok        ${key}  =  ${shown}\n`);
+}
+
+// A raw hash left over from the earlier instructions is silently truncated by
+// the .env loader, so it would reject every password without saying why.
+const rawHash = (env.MOBILESHOP_DEV_PASSWORD_HASH || '').trim();
+if (rawHash && !/^\$2[aby]\$\d{2}\$.{53}$/.test(rawHash)) {
+  warnings++;
+  console.log('  WARNING   MOBILESHOP_DEV_PASSWORD_HASH is set but incomplete');
+  console.log('            The .env loader expands $ signs, so a raw bcrypt hash');
+  console.log('            arrives truncated. It is ignored in favour of the B64');
+  console.log('            form above; you can delete this line.\n');
 }
 
 // The private key is what actually issues licences; losing it is unrecoverable.

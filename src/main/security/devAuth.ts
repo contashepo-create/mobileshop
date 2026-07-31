@@ -49,8 +49,57 @@ const DEV_FALLBACK_HASH = '$2a$12$roA4Cm.0DuiKYwPtxUNfSuX/Ao1ZKH2ofhjtHX3qJw83Wj
  * `git pull` fights with — or worse, a commit. Generate one with:
  *     npm run dev:password -- "several unrelated words"
  */
-const DEV_PASSWORD_HASH =
-  (process.env.MOBILESHOP_DEV_PASSWORD_HASH || '').trim() || DEV_FALLBACK_HASH;
+/**
+ * Reads the hash, preferring the base64 form.
+ *
+ * THE TRAP THIS AVOIDS
+ * --------------------
+ * A bcrypt hash looks like `$2a$12$abc...`. Vite loads .env through
+ * dotenv-expand, which treats `$12$abc` as a variable reference and silently
+ * substitutes it — turning the hash into the four characters `$2a$12`.
+ *
+ * Measured with the project's own Vite:
+ *     .env value  $2a$12$hUAAv...Q9AZsC
+ *     loadEnv()   "$2a$12"
+ *
+ * bcrypt then compares against a malformed hash and every password is wrong,
+ * with no error anywhere — exactly the "I enter my password and it is
+ * rejected" report this fixes. The licence key is unaffected because base64
+ * contains no `$`, which is why activation worked while this did not.
+ *
+ * Base64 has no `$`, so it survives expansion intact and cannot be silently
+ * corrupted. The raw form is still accepted for anyone who escaped the
+ * dollars by hand, and a value that arrives truncated is rejected rather than
+ * used, so the failure is loud instead of mysterious.
+ */
+function readDevHash(): string {
+  const b64 = (process.env.MOBILESHOP_DEV_PASSWORD_HASH_B64 || '').trim();
+  if (b64) {
+    try {
+      const decoded = Buffer.from(b64, 'base64').toString('utf-8').trim();
+      if (/^\$2[aby]\$\d{2}\$.{53}$/.test(decoded)) return decoded;
+      console.error('[Auth] MOBILESHOP_DEV_PASSWORD_HASH_B64 did not decode to a bcrypt hash');
+    } catch {
+      console.error('[Auth] MOBILESHOP_DEV_PASSWORD_HASH_B64 is not valid base64');
+    }
+  }
+
+  const raw = (process.env.MOBILESHOP_DEV_PASSWORD_HASH || '').trim();
+  if (raw) {
+    // A complete bcrypt hash is exactly 60 characters. Anything shorter has
+    // been eaten by variable expansion; using it would reject every password.
+    if (/^\$2[aby]\$\d{2}\$.{53}$/.test(raw)) return raw;
+    console.error(
+      '[Auth] MOBILESHOP_DEV_PASSWORD_HASH is truncated — the $ signs were '
+      + 'expanded by the .env loader. Use MOBILESHOP_DEV_PASSWORD_HASH_B64 instead '
+      + '(npm run dev:password prints it).',
+    );
+  }
+
+  return DEV_FALLBACK_HASH;
+}
+
+const DEV_PASSWORD_HASH = readDevHash();
 
 /** True when the build still carries the original, publicly-known password. */
 export function isDevelopmentDevPassword(): boolean {

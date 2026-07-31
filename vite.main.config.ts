@@ -25,6 +25,9 @@ export default defineConfig(({ mode }) => {
       // would silently invalidate every licence already issued.
       'process.env.MOBILESHOP_LICENSE_PUBLIC_KEY': JSON.stringify(env.MOBILESHOP_LICENSE_PUBLIC_KEY || ''),
       'process.env.MOBILESHOP_DEV_PASSWORD_HASH': JSON.stringify(env.MOBILESHOP_DEV_PASSWORD_HASH || ''),
+      // The base64 form exists because dotenv-expand mangles a bcrypt hash:
+      // `$2a$12$abc...` becomes `$2a$12`. Base64 has no `$` to expand.
+      'process.env.MOBILESHOP_DEV_PASSWORD_HASH_B64': JSON.stringify(env.MOBILESHOP_DEV_PASSWORD_HASH_B64 || ''),
     },
   };
 });

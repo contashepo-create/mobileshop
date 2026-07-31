@@ -338,6 +338,73 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
     /process\.env\.MOBILESHOP_LICENSE_PUBLIC_KEY/.test(lc));
   t('the developer hash is read from the environment',
     /process\.env\.MOBILESHOP_DEV_PASSWORD_HASH/.test(da));
+
+  // A bcrypt hash cannot survive .env in its raw form: Vite loads the file
+  // through dotenv-expand, which reads `$12$abc` as a variable reference and
+  // truncates `$2a$12$hUAAv...` to `$2a$12`. bcrypt then rejects every
+  // password with no error anywhere — reported as "the developer console
+  // refuses my password". Base64 has no `$` to expand.
+  t('the hash is accepted in a base64 form that .env cannot mangle',
+    /MOBILESHOP_DEV_PASSWORD_HASH_B64/.test(da));
+  t('a truncated raw hash is refused rather than used',
+    /\^\\\$2\[aby\]\\\$\\d\{2\}\\\$\.\{53\}\$/.test(da));
+  t('and the refusal explains why', /truncated/.test(da) && /expanded/.test(da));
+  t('the generator prints the base64 form',
+    /HASH_B64=/.test(code('scripts/dev-password.js')));
+  t('the build inlines the base64 form',
+    /MOBILESHOP_DEV_PASSWORD_HASH_B64/.test(vite));
+
+  // Behavioural, against the REAL module rather than its source text.
+  //
+  // A structural check here was not enough: the file contains the same shape
+  // test twice (once for the base64 branch, once for the raw one), so deleting
+  // the RAW guard — which is what actually lets a mangled hash through — left
+  // the regex still present and every check green. The mutant survived.
+  //
+  // Loading devAuth with a deliberately truncated value settles it: if the
+  // guard is gone, the module adopts the broken hash and stops reporting the
+  // development fallback.
+  {
+    const loader = 'data:text/javascript,' + encodeURIComponent(`
+      import { existsSync } from 'node:fs';
+      import { fileURLToPath } from 'node:url';
+      export async function resolve(s, c, n) {
+        if (s === 'bcryptjs') {
+          return { url: 'data:text/javascript,export default {compareSync:()=>false,hashSync:()=>"x"};', shortCircuit: true };
+        }
+        if (s.startsWith('.') && !/\\.[a-z]+$/.test(s)) {
+          const u = new URL(s + '.ts', c.parentURL || import.meta.url).href;
+          if (existsSync(fileURLToPath(u))) return { url: u, shortCircuit: true };
+        }
+        return n(s, c);
+      }
+    `);
+    const probe = `
+      import { register } from 'node:module';
+      register(${JSON.stringify(loader)}, import.meta.url);
+      const D = await import(${JSON.stringify(join(ROOT, 'src/main/security/devAuth.ts'))});
+      process.stdout.write(String(D.isDevelopmentDevPassword()));
+    `;
+    const run = (env) => {
+      try {
+        return execFileSync(process.execPath,
+          ['--experimental-strip-types', '--input-type=module', '--eval', probe],
+          { env: { ...process.env, ...env }, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      } catch { return 'error'; }
+    };
+
+    const cleanEnv = { MOBILESHOP_DEV_PASSWORD_HASH: '', MOBILESHOP_DEV_PASSWORD_HASH_B64: '' };
+    t('a truncated raw hash is refused, falling back rather than breaking login',
+      run({ ...cleanEnv, MOBILESHOP_DEV_PASSWORD_HASH: '$2a$12' }) === 'true');
+    t('a truncated base64 hash is refused too',
+      run({ ...cleanEnv, MOBILESHOP_DEV_PASSWORD_HASH_B64: Buffer.from('$2a$12').toString('base64') }) === 'true');
+
+    const realHash = '$2a$12$' + 'x'.repeat(53);
+    t('a complete base64 hash IS adopted',
+      run({ ...cleanEnv, MOBILESHOP_DEV_PASSWORD_HASH_B64: Buffer.from(realHash).toString('base64') }) === 'false');
+    t('a complete raw hash is still accepted for anyone who escaped the dollars',
+      run({ ...cleanEnv, MOBILESHOP_DEV_PASSWORD_HASH: realHash }) === 'false');
+  }
   t('both are inlined at build time',
     /MOBILESHOP_LICENSE_PUBLIC_KEY/.test(vite) && /MOBILESHOP_DEV_PASSWORD_HASH/.test(vite));
 

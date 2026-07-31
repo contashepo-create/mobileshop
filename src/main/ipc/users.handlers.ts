@@ -3,6 +3,13 @@ import bcrypt from 'bcryptjs';
 import { getDb } from '../database/connection';
 import { verifyDevToken } from '../security/devAuth';
 import { destroyAllSessionsForUser } from '../security/session';
+import {
+  isRecoveryConfigured, requestResetCode, verifyResetCode, verifyGrant, notifyResetDone,
+} from '../security/passwordRecovery';
+// Imported from the small shared module, NOT from license.handlers: that would
+// drag Electron's app, the licence store and the remote client into every test
+// that merely creates a user.
+import { getDeviceId } from '../security/deviceId';
 
 
 /**
@@ -41,6 +48,33 @@ function checkPassword(pw: unknown): string | null {
 }
 
 const ADMIN_ROLE_ID = 1;
+
+/**
+ * Append one row to the permanent security log.
+ *
+ * Applied to EVERY password-reset route, not just the new one. Changing who can
+ * sign the books is a security event however it was done, and a log that
+ * records only the newest mechanism would give a false picture of the older,
+ * more privileged ones.
+ *
+ * Never allowed to throw: an audit failure must not roll back a password change
+ * the user has already been told about, and must not block them from signing in.
+ */
+function recordSecurityEvent(
+  db: ReturnType<typeof getDb>,
+  eventType: string,
+  userId: number | null,
+  username: string | null,
+  detail: string,
+): void {
+  try {
+    db.prepare(
+      'INSERT INTO security_events (EventType, UserID, Username, Detail) VALUES (?, ?, ?, ?)',
+    ).run(eventType, userId, username, detail);
+  } catch (err) {
+    console.error('[security] could not record event:', err);
+  }
+}
 
 /** How many administrators would remain if `excludeUserId` stopped being one. */
 function otherActiveAdmins(db: ReturnType<typeof getDb>, excludeUserId: number): number {
@@ -211,6 +245,9 @@ export function registerUsersHandlers() {
     const hash = bcrypt.hashSync(data.newPassword, 10);
     db.prepare('UPDATE users SET PasswordHash = ? WHERE UserID = ?').run(hash, data.targetUserId);
     destroyAllSessionsForUser(data.targetUserId);
+    const target = db.prepare('SELECT Username FROM users WHERE UserID = ?').get(data.targetUserId) as any;
+    recordSecurityEvent(db, 'password_reset_by_admin', data.targetUserId, target?.Username ?? null,
+      `أعاد التعيين المستخدم رقم ${data.adminId}`);
     return { success: true, message: 'تم تغيير كلمة المرور بنجاح' };
   });
 
@@ -227,12 +264,16 @@ export function registerUsersHandlers() {
       return { success: false, message: 'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل' };
     }
     const db = getDb();
-    const user = db.prepare('SELECT UserID FROM users WHERE UserID = ?').get(data.targetUserId) as any;
+    const user = db.prepare('SELECT UserID, Username FROM users WHERE UserID = ?').get(data.targetUserId) as any;
     if (!user) return { success: false, message: 'المستخدم غير موجود' };
     const hash = bcrypt.hashSync(data.newPassword, 10);
     db.prepare('UPDATE users SET PasswordHash = ? WHERE UserID = ?').run(hash, data.targetUserId);
     // Force re-login everywhere: an old session must not survive a password reset.
     destroyAllSessionsForUser(data.targetUserId);
+    // The most privileged route of the three, so the least excusable to leave
+    // untraced: developer access resets ANY account, not just an administrator.
+    recordSecurityEvent(db, 'password_reset_by_developer', data.targetUserId, user.Username ?? null,
+      'إعادة تعيين بواسطة المطور');
     return { success: true, message: 'تم إعادة تعيين كلمة المرور بنجاح' };
   });
 
@@ -244,6 +285,115 @@ export function registerUsersHandlers() {
   ipcMain.handle('users:listBasic', async () => {
     const db = getDb();
     return db.prepare('SELECT UserID, Username FROM users WHERE IsActive = 1 ORDER BY Username ASC').all();
+  });
+
+  // ------------------------------------------------ self-service recovery
+  /**
+   * The administrators eligible for Telegram recovery.
+   *
+   * Reachable before login, so it must leak as little as possible: id and
+   * username only, exactly like `users:listBasic`, and only accounts that can
+   * actually use this route. A cashier is absent from this list on purpose —
+   * their password is reset by their administrator, which already works.
+   */
+  ipcMain.handle('users:listRecoverable', async () => {
+    const db = getDb();
+    return db.prepare(
+      'SELECT UserID, Username FROM users WHERE RoleID = ? AND IsActive = 1 ORDER BY Username ASC',
+    ).all(ADMIN_ROLE_ID);
+  });
+
+  /** True when this build can reach the recovery server at all. */
+  ipcMain.handle('recovery:isAvailable', async () => ({ available: isRecoveryConfigured() }));
+
+  /**
+   * Step 1: ask the server to send a six-digit code to the OWNER'S Telegram.
+   *
+   * The code never travels back to this machine in the response, so calling
+   * this repeatedly reveals nothing. The only defence that matters is that the
+   * message lands on the owner's phone.
+   */
+  ipcMain.handle('recovery:requestCode', async (_event, data: { userId?: unknown }) => {
+    const db = getDb();
+    const userId = Number(data?.userId);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return { success: false, message: 'اختر المستخدم أولاً' };
+    }
+    const user = db.prepare(
+      'SELECT UserID, Username, RoleID, IsActive FROM users WHERE UserID = ?',
+    ).get(userId) as any;
+
+    // Refuse anything that is not an active administrator, and say so plainly.
+    // There is no enumeration risk here: `users:listRecoverable` already told
+    // the caller which accounts exist, so a vague message would only confuse
+    // the owner without protecting anything.
+    if (!user || !user.IsActive || user.RoleID !== ADMIN_ROLE_ID) {
+      return { success: false, message: 'هذه الطريقة متاحة لحساب المدير فقط' };
+    }
+
+    return requestResetCode(getDeviceId(), user.UserID, String(user.Username || ''));
+  });
+
+  /**
+   * Step 2: exchange the typed code for a signed grant, verify that signature
+   * locally, and only then write the new password.
+   *
+   * The grant is re-checked HERE with the embedded secret. A patched renderer
+   * that invents `{ success: true }`, or a tampered network reply, gets no
+   * further than this check, because neither can produce the HMAC.
+   */
+  ipcMain.handle('recovery:resetPassword', async (
+    _event,
+    data: { userId?: unknown; code?: unknown; newPassword?: unknown },
+  ) => {
+    const db = getDb();
+    const userId = Number(data?.userId);
+    const code = String(data?.code ?? '').trim();
+    const newPassword = data?.newPassword;
+
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return { success: false, message: 'اختر المستخدم أولاً' };
+    }
+    // Validate the new password BEFORE spending the one-time code: failing
+    // afterwards would burn it and force the owner to request another.
+    const pwError = checkPassword(newPassword);
+    if (pwError) return { success: false, message: pwError };
+    if (!/^\d{6}$/.test(code)) {
+      return { success: false, message: 'الرمز يجب أن يكون ٦ أرقام' };
+    }
+
+    const user = db.prepare(
+      'SELECT UserID, Username, RoleID, IsActive FROM users WHERE UserID = ?',
+    ).get(userId) as any;
+    if (!user || !user.IsActive || user.RoleID !== ADMIN_ROLE_ID) {
+      return { success: false, message: 'هذه الطريقة متاحة لحساب المدير فقط' };
+    }
+
+    const deviceId = getDeviceId();
+    const verified = await verifyResetCode(deviceId, user.UserID, code);
+    if (!verified.success) return { success: false, message: verified.message };
+
+    // The server said yes; now prove it cryptographically before believing it.
+    if (!verifyGrant(verified.grant, deviceId, user.UserID, verified.issuedAt)) {
+      recordSecurityEvent(db, 'password_reset_rejected', user.UserID, user.Username,
+        'رفض تصريح غير صالح من الخادم');
+      return { success: false, message: 'تعذّر التحقق من التصريح - حاول مرة أخرى' };
+    }
+
+    const hash = bcrypt.hashSync(newPassword as string, 10);
+    db.prepare('UPDATE users SET PasswordHash = ? WHERE UserID = ?').run(hash, user.UserID);
+
+    // An old session must never survive a password reset.
+    destroyAllSessionsForUser(user.UserID);
+
+    // Durable local record first — it must exist even if Telegram is down.
+    recordSecurityEvent(db, 'password_reset_telegram', user.UserID, user.Username,
+      `إعادة تعيين كلمة مرور المدير عبر رمز تليجرام (الجهاز ${deviceId.slice(0, 8)}…)`);
+
+    // Then tell the owner out-of-band, so an unauthorised reset is noticed.
+    await notifyResetDone(deviceId, String(user.Username || ''));
+
+    return { success: true, message: 'تم تغيير كلمة المرور بنجاح - سجّل الدخول الآن' };
   });
 
   // Delete role (only non-system roles)

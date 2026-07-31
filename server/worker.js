@@ -138,7 +138,192 @@ async function ensureSchema(env) {
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS counters (
       name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0
     )`),
+    // One in-flight admin password reset per device.
+    //
+    // The code is NEVER returned to the caller — it is delivered only to the
+    // owner's Telegram. That is what makes requesting a reset harmless: an
+    // attacker who extracts CLIENT_KEY from the bundle can ask for a code all
+    // day and it lands on the owner's phone, not on their screen.
+    //
+    // `attempts` burns the code after too many wrong guesses, so a six-digit
+    // code is safe: it cannot be ground down.
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS password_resets (
+      device_id  TEXT PRIMARY KEY,
+      user_id    INTEGER NOT NULL,
+      username   TEXT,
+      code_hash  TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      attempts   INTEGER NOT NULL DEFAULT 0,
+      used_at    TEXT
+    )`),
+    // Request-rate ledger, so nobody can flood the owner's Telegram with
+    // reset prompts until real alerts get ignored.
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS reset_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`),
   ]);
+}
+
+// ------------------------------------------------- admin password recovery
+/**
+ * Lets the SHOP OWNER reset a forgotten administrator password without the
+ * developer, by proving control of the owner's Telegram account.
+ *
+ * Why this shape:
+ *   - the six-digit code is sent ONLY to TG_ADMIN_CHAT, never in the HTTP
+ *     response, so calling this endpoint gains an attacker nothing;
+ *   - CLIENT_KEY ships inside the app, so it authenticates "a copy of the app",
+ *     not a person — it is a spam filter here, never the security boundary;
+ *   - success returns an HMAC grant the app verifies locally, so a patched
+ *     renderer or a tampered network reply cannot fake a reset.
+ */
+const RESET_TTL_MS = 15 * 60 * 1000;      // a code lives 15 minutes
+const RESET_MAX_ATTEMPTS = 5;             // then it is burned
+const RESET_MAX_PER_HOUR = 3;             // per device, anti-flood
+const RESET_GRANT_TTL_MS = 10 * 60 * 1000;
+
+/** SHA-256 hex. The plain code is never stored, exactly like a password. */
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Signed permission to reset ONE user on ONE device, valid for ten minutes.
+ * The app re-computes this with its embedded secret before touching the
+ * database, so the decision does not rest on a boolean in a JSON body.
+ */
+async function signResetGrant(env, deviceId, userId, issuedAt) {
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(env.LICENSE_SECRET || ''),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const msg = `pwreset|${deviceId}|${userId}|${issuedAt}`;
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg));
+  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function handleResetRequest(request, env) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return json({ ok: false, error: 'unauthorised' }, 401);
+  }
+  const body = await request.json().catch(() => null);
+  const deviceId = String(body?.deviceId || '').trim().toLowerCase();
+  const userId = Number(body?.userId);
+  const username = String(body?.username || '').slice(0, 64);
+  if (deviceId.length < 8 || !Number.isInteger(userId) || userId <= 0) {
+    return json({ ok: false, error: 'bad request' }, 400);
+  }
+
+  // Anti-flood: cap requests per device per hour.
+  const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+  await env.DB.prepare('DELETE FROM reset_requests WHERE created_at < ?').bind(hourAgo).run();
+  const recent = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM reset_requests WHERE device_id = ? AND created_at >= ?',
+  ).bind(deviceId, hourAgo).first();
+  if (Number(recent?.n || 0) >= RESET_MAX_PER_HOUR) {
+    return json({ ok: false, error: 'rate_limited' }, 429);
+  }
+
+  // A fresh request always replaces any earlier code for this device.
+  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, '0');
+  const now = new Date();
+  await env.DB.prepare(`
+    INSERT INTO password_resets (device_id, user_id, username, code_hash, created_at, expires_at, attempts, used_at)
+    VALUES (?, ?, ?, ?, ?, ?, 0, NULL)
+    ON CONFLICT(device_id) DO UPDATE SET
+      user_id = excluded.user_id, username = excluded.username,
+      code_hash = excluded.code_hash, created_at = excluded.created_at,
+      expires_at = excluded.expires_at, attempts = 0, used_at = NULL
+  `).bind(
+    deviceId, userId, username, await sha256Hex(code),
+    now.toISOString(), new Date(now.getTime() + RESET_TTL_MS).toISOString(),
+  ).run();
+  await env.DB.prepare('INSERT INTO reset_requests (device_id, created_at) VALUES (?, ?)')
+    .bind(deviceId, now.toISOString()).run();
+
+  const dev = await env.DB.prepare('SELECT shop_name FROM devices WHERE device_id = ?')
+    .bind(deviceId).first();
+
+  await tg(env,
+    `🔐 <b>طلب إعادة تعيين كلمة مرور المدير</b>\n\n` +
+    `المحل: ${dev?.shop_name || '—'}\n` +
+    `المستخدم: <b>${username || userId}</b>\n\n` +
+    `الرمز: <code>${code}</code>\n` +
+    `صالح ١٥ دقيقة.\n\n` +
+    `⚠️ إن لم تكن أنت من طلبه فلا تعطِ هذا الرمز لأحد.\n` +
+    `<code>${deviceId}</code>`);
+
+  // Deliberately no code in the response.
+  return json({ ok: true, sent: true });
+}
+
+async function handleResetVerify(request, env) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return json({ ok: false, error: 'unauthorised' }, 401);
+  }
+  const body = await request.json().catch(() => null);
+  const deviceId = String(body?.deviceId || '').trim().toLowerCase();
+  const userId = Number(body?.userId);
+  const code = String(body?.code || '').trim();
+  if (deviceId.length < 8 || !Number.isInteger(userId) || !/^\d{6}$/.test(code)) {
+    return json({ ok: false, error: 'bad request' }, 400);
+  }
+
+  const row = await env.DB.prepare('SELECT * FROM password_resets WHERE device_id = ?')
+    .bind(deviceId).first();
+  if (!row) return json({ ok: false, error: 'no_request' }, 400);
+  if (row.used_at) return json({ ok: false, error: 'used' }, 400);
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    return json({ ok: false, error: 'expired' }, 400);
+  }
+  if (Number(row.attempts) >= RESET_MAX_ATTEMPTS) {
+    return json({ ok: false, error: 'too_many_attempts' }, 429);
+  }
+  // The code is bound to the user it was issued for: it cannot be redirected
+  // to a different account after the fact.
+  if (Number(row.user_id) !== userId) {
+    await env.DB.prepare('UPDATE password_resets SET attempts = attempts + 1 WHERE device_id = ?')
+      .bind(deviceId).run();
+    return json({ ok: false, error: 'bad_code' }, 400);
+  }
+  if (!safeEqual(await sha256Hex(code), String(row.code_hash))) {
+    const left = RESET_MAX_ATTEMPTS - (Number(row.attempts) + 1);
+    await env.DB.prepare('UPDATE password_resets SET attempts = attempts + 1 WHERE device_id = ?')
+      .bind(deviceId).run();
+    return json({ ok: false, error: 'bad_code', attemptsLeft: Math.max(0, left) }, 400);
+  }
+
+  // Single use: consume it before handing out the grant.
+  await env.DB.prepare('UPDATE password_resets SET used_at = ? WHERE device_id = ?')
+    .bind(new Date().toISOString(), deviceId).run();
+
+  const issuedAt = Date.now();
+  const grant = await signResetGrant(env, deviceId, userId, issuedAt);
+  return json({ ok: true, grant, issuedAt, ttlMs: RESET_GRANT_TTL_MS });
+}
+
+/** The app reports the outcome so the owner is told even if they were asleep. */
+async function handleResetDone(request, env) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return json({ ok: false, error: 'unauthorised' }, 401);
+  }
+  const body = await request.json().catch(() => null);
+  const deviceId = String(body?.deviceId || '').trim().toLowerCase();
+  const username = String(body?.username || '').slice(0, 64);
+  if (deviceId.length < 8) return json({ ok: false, error: 'bad request' }, 400);
+  const dev = await env.DB.prepare('SELECT shop_name FROM devices WHERE device_id = ?')
+    .bind(deviceId).first();
+  await tg(env,
+    `✅ <b>تم تغيير كلمة مرور المدير</b>\n\n` +
+    `المحل: ${dev?.shop_name || '—'}\n` +
+    `المستخدم: <b>${username || '—'}</b>\n` +
+    `الوقت: ${new Date().toISOString().replace('T', ' ').slice(0, 16)}\n\n` +
+    `إن لم تكن أنت، تواصل فوراً.\n<code>${deviceId}</code>`);
+  return json({ ok: true });
 }
 
 async function nextCloudSerial(env) {
@@ -787,6 +972,10 @@ export default {
           case '/config':    return await handleConfig(request, env);
           case '/message':   return await handleMessage(request, env);
           case '/telegram':  return await handleTelegram(request, env);
+          // Owner-driven admin password recovery. See handleResetRequest.
+          case '/password-reset/request': return await handleResetRequest(request, env);
+          case '/password-reset/verify':  return await handleResetVerify(request, env);
+          case '/password-reset/done':    return await handleResetDone(request, env);
         }
       }
       if (request.method === 'GET' && url.pathname === '/devices') {

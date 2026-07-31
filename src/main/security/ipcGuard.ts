@@ -52,6 +52,20 @@ const PUBLIC_CHANNELS = new Set<string>([
   'license:repairClockState',
   'users:resetByDev',
   'users:listBasic',
+  // Owner-driven admin password recovery. Necessarily reachable BEFORE login —
+  // that is the whole point: nobody can sign in. Safe to expose because the
+  // six-digit code is delivered only to the Telegram account of the shop owner
+  // and never in the response, the handlers accept administrators only, and the
+  // reset is authorised by an HMAC grant re-verified in the main process. See
+  // src/main/security/passwordRecovery.ts.
+  //
+  // NOTE: no apostrophes in this comment. verify_ipc_coverage.py reads channel
+  // names by matching single-quoted strings in this block, so a stray
+  // apostrophe pairs with a real quote and hides the entries below it.
+  'users:listRecoverable',
+  'recovery:isAvailable',
+  'recovery:requestCode',
+  'recovery:resetPassword',
 ]);
 
 /**

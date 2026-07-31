@@ -25,6 +25,18 @@ export function Login() {
   const [forgotTargetUser, setForgotTargetUser] = useState('');
   const [forgotLoading, setForgotLoading] = useState(false);
   const [usersList, setUsersList] = useState<any[]>([]);
+  // Recovery by Telegram code — the route the shop owner drives alone.
+  // `forgotMode` starts on 'self' so the owner meets the option that does not
+  // need a phone call; the developer route stays one click away for a shop
+  // with no internet.
+  const [forgotMode, setForgotMode] = useState<'self' | 'dev'>('self');
+  const [selfAvailable, setSelfAvailable] = useState(true);
+  const [selfStep, setSelfStep] = useState<1 | 2>(1);
+  const [selfAdmins, setSelfAdmins] = useState<any[]>([]);
+  const [selfUserId, setSelfUserId] = useState('');
+  const [selfCode, setSelfCode] = useState('');
+  const [selfNewPass, setSelfNewPass] = useState('');
+  const [selfNewPass2, setSelfNewPass2] = useState('');
 
   // Load saved credentials on mount
   useEffect(() => {
@@ -91,10 +103,82 @@ export function Login() {
     setForgotDevPass('');
     setForgotNewPass('');
     setForgotTargetUser('');
+    setSelfStep(1);
+    setSelfUserId('');
+    setSelfCode('');
+    setSelfNewPass('');
+    setSelfNewPass2('');
     // `users:listBasic` exposes only id + username (callable pre-login),
     // unlike `users:list` which leaks roles/employee links.
     const users = await window.api.invoke('users:listBasic');
     setUsersList(Array.isArray(users) ? users : []);
+    // Administrators only — the self-service route is not offered to a cashier,
+    // whose password their administrator already resets from the users screen.
+    const admins = await window.api.invoke('users:listRecoverable');
+    const adminList = Array.isArray(admins) ? admins : [];
+    setSelfAdmins(adminList);
+    if (adminList.length === 1) setSelfUserId(String(adminList[0].UserID));
+    // If this build has no recovery server configured, do not offer a button
+    // that can only fail — send the owner straight to the developer route.
+    const avail = await window.api.invoke('recovery:isAvailable');
+    const ok = Boolean(avail?.available) && adminList.length > 0;
+    setSelfAvailable(ok);
+    setForgotMode(ok ? 'self' : 'dev');
+  };
+
+  /** Step 1 — ask the server to send a code to the owner's Telegram. */
+  const handleSendCode = async () => {
+    if (!selfUserId) {
+      showToast('error', 'اختر حساب المدير أولاً');
+      return;
+    }
+    setForgotLoading(true);
+    const res = await window.api.invoke('recovery:requestCode', {
+      userId: parseInt(selfUserId),
+    });
+    setForgotLoading(false);
+    if (res?.success) {
+      showToast('success', res.message);
+      setSelfStep(2);
+    } else {
+      showToast('error', res?.message || 'تعذّر إرسال الرمز');
+    }
+  };
+
+  /** Step 2 — send the code and the new password together. */
+  const handleSelfReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^\d{6}$/.test(selfCode.trim())) {
+      showToast('error', 'الرمز يجب أن يكون ٦ أرقام');
+      return;
+    }
+    if (selfNewPass.length < 6) {
+      showToast('error', 'كلمة المرور الجديدة يجب أن تكون ٦ أحرف على الأقل');
+      return;
+    }
+    // Caught here rather than after the one-time code is spent: a typo in the
+    // confirmation must not burn the code and force a fresh request.
+    if (selfNewPass !== selfNewPass2) {
+      showToast('error', 'كلمتا المرور غير متطابقتين');
+      return;
+    }
+    setForgotLoading(true);
+    const res = await window.api.invoke('recovery:resetPassword', {
+      userId: parseInt(selfUserId),
+      code: selfCode.trim(),
+      newPassword: selfNewPass,
+    });
+    setForgotLoading(false);
+    if (res?.success) {
+      showToast('success', res.message);
+      setShowForgot(false);
+      // Pre-fill the username so the owner can sign in immediately.
+      const who = selfAdmins.find((u: any) => String(u.UserID) === selfUserId);
+      if (who?.Username) setUsername(who.Username);
+      setPassword('');
+    } else {
+      showToast('error', res?.message || 'تعذّر إعادة التعيين');
+    }
   };
 
   const handleForgotSubmit = async (e: React.FormEvent) => {
@@ -277,6 +361,83 @@ export function Login() {
               </div>
               <button onClick={() => setShowForgot(false)} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded"><X size={18} /></button>
             </div>
+            {/* Two routes: the owner's own Telegram (needs internet, no phone
+                call) and the developer (works offline). The self-service tab is
+                hidden entirely when this build has no recovery server. */}
+            {selfAvailable && (
+              <div className="flex gap-1 p-2 pb-0">
+                <button type="button" onClick={() => setForgotMode('self')}
+                  className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                    forgotMode === 'self'
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>
+                  برمز تليجرام
+                </button>
+                <button type="button" onClick={() => setForgotMode('dev')}
+                  className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                    forgotMode === 'dev'
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>
+                  بمساعدة المطور
+                </button>
+              </div>
+            )}
+
+            {forgotMode === 'self' && selfAvailable && (
+              <div className="p-4 space-y-3">
+                <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-2.5 text-xs text-blue-700 dark:text-blue-300">
+                  سيصل رمز مكوّن من ٦ أرقام إلى حساب <span className="font-medium">تليجرام الخاص بالمالك</span>.
+                  <div className="mt-1">لا تعطِ هذا الرمز لأي شخص مهما كان.</div>
+                </div>
+
+                {selfStep === 1 ? (
+                  <>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">حساب المدير</label>
+                      <select value={selfUserId} onChange={(e) => setSelfUserId(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm">
+                        <option value="">اختر الحساب</option>
+                        {selfAdmins.map((u: any) => <option key={u.UserID} value={u.UserID}>{u.Username}</option>)}
+                      </select>
+                    </div>
+                    <button type="button" onClick={handleSendCode} disabled={forgotLoading}
+                      className="w-full py-2 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg transition-colors disabled:opacity-50">
+                      {forgotLoading ? 'جاري الإرسال...' : 'إرسال الرمز إلى تليجرام'}
+                    </button>
+                  </>
+                ) : (
+                  <form onSubmit={handleSelfReset} className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">رمز التحقق (٦ أرقام)</label>
+                      <input type="text" inputMode="numeric" maxLength={6} value={selfCode}
+                        onChange={(e) => setSelfCode(e.target.value.replace(/\D/g, ''))}
+                        dir="ltr"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-center text-lg tracking-[0.4em]" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">كلمة المرور الجديدة</label>
+                      <input type="password" value={selfNewPass} onChange={(e) => setSelfNewPass(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">تأكيد كلمة المرور</label>
+                      <input type="password" value={selfNewPass2} onChange={(e) => setSelfNewPass2(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-sm" />
+                    </div>
+                    <button type="submit" disabled={forgotLoading}
+                      className="w-full py-2 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg transition-colors disabled:opacity-50">
+                      {forgotLoading ? 'جاري...' : 'تعيين كلمة المرور'}
+                    </button>
+                    <button type="button" onClick={() => { setSelfStep(1); setSelfCode(''); }}
+                      className="w-full text-xs text-slate-500 dark:text-slate-400 hover:text-primary-600">
+                      لم يصلني الرمز - إرسال مرة أخرى
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
+
+            {(forgotMode === 'dev' || !selfAvailable) && (
             <form onSubmit={handleForgotSubmit} className="p-4 space-y-3">
               <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-2.5 text-xs text-orange-700 dark:text-orange-300">
                 استعادة كلمة المرور تتطلب تدخل المطور. تواصل مع الدعم الفني وسيقوم هو بإدخال بياناته.
@@ -310,6 +471,7 @@ export function Login() {
                 {forgotLoading ? 'جاري...' : 'إعادة تعيين كلمة المرور'}
               </button>
             </form>
+            )}
           </div>
         </div>
       )}

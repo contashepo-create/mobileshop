@@ -4,12 +4,14 @@ import { setRemoteState, ensureRemoteTables } from '../remote/remoteStore';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { verifyDevToken } from '../security/devAuth';
 import {
   VERIFIER_SECRET, verifyCode, signCode, daysRemaining, expiryToDate, dateToExpiry,
 } from '../security/licenseCrypto';
 import { isImplausiblyFuture, businessToday } from '../../shared/businessDate';
+// One derivation of the device identity, shared with password recovery.
+import { getDeviceId } from '../security/deviceId';
+export { getDeviceId };
 
 // ===== LICENSE SYSTEM =====
 // Encrypted license management - cannot be tampered with
@@ -41,22 +43,6 @@ const TRIAL_DAYS = 7;
  */
 const CLOCK_DRIFT_TOLERANCE_MS = 6 * 60 * 60 * 1000;
 
-// Get or create unique device ID
-function getDeviceId(): string {
-  const devicePath = path.join(app.getPath('userData'), DEVICE_FILE);
-  if (fs.existsSync(devicePath)) {
-    return fs.readFileSync(devicePath, 'utf-8');
-  }
-  // Generate from machine hardware
-  const mac = Object.values(os.networkInterfaces()).flat().find(i => i && !i.internal && i.mac !== '00:00:00:00:00:00')?.mac || 'unknown';
-  const cpu = os.cpus()[0]?.model || 'unknown';
-  const hostname = os.hostname();
-  const rawId = `${mac}_${cpu}_${hostname}`;
-  const deviceId = crypto.createHash('sha256').update(rawId + SECRET_KEY).digest('hex').substring(0, 32);
-  fs.writeFileSync(devicePath, deviceId, 'utf-8');
-  fs.chmodSync(devicePath, 0o444); // Read-only
-  return deviceId;
-}
 
 // Encrypt/Decrypt functions
 function encrypt(data: any): string {

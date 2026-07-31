@@ -236,6 +236,27 @@ export function runMigrations(db: Database.Database) {
       Key   TEXT PRIMARY KEY,
       Value TEXT
     );
+
+    -- Permanent record of security-relevant events, kept SEPARATELY from the
+    -- accounting tables because it must survive anything that rewrites the
+    -- books: a fiscal-year close, a deletion, a restore of trading data.
+    --
+    -- Its first purpose is password recovery. Resetting an administrator
+    -- password changes who can sign the books, so it cannot be an untraceable
+    -- act: if it happened without the owner's knowledge, there has to be a row
+    -- that says when, for which account and by what route. Without that, an
+    -- account takeover is unprovable after the fact.
+    --
+    -- Deliberately append-only in practice: nothing in the application updates
+    -- or deletes a row here.
+    CREATE TABLE IF NOT EXISTS security_events (
+      EventID   INTEGER PRIMARY KEY AUTOINCREMENT,
+      EventType TEXT NOT NULL,
+      UserID    INTEGER,
+      Username  TEXT,
+      Detail    TEXT,
+      CreatedAt TEXT DEFAULT (datetime('now','localtime'))
+    );
   `);
 
   // =============================================

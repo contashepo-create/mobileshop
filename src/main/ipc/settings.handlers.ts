@@ -6,6 +6,9 @@ import bcrypt from 'bcryptjs';
 import { devLogin, revokeDevToken } from '../security/devAuth';
 import { getRemoteOverrides } from '../remote/remoteStore';
 import { isRemoteManaged } from '../remote/remoteConfig';
+import { requestCode, verifyCode } from '../security/confirmCode';
+import { notifyDatabaseReset, notifyDeveloperOfReset } from '../security/resetNotify';
+import { recordSecurityEvent } from '../security/securityLog';
 
 export function registerSettingsHandlers() {
   // ===== DEVELOPER AUTHENTICATION =====
@@ -211,24 +214,129 @@ export function registerSettingsHandlers() {
   });
 
   // ===== RESET DATABASE (WIPE ALL DATA) =====
-  ipcMain.handle('settings:resetDatabase', async (_event, data: { userId: number; password: string }) => {
+  // ===== DATABASE RESET =====
+  //
+  // The most destructive action in the program: it erases the entire trading
+  // history. Three independent proofs are required before a single row goes.
+  //
+  //   1. the caller's own password           — proves who is at the keyboard
+  //   2. a code on the shop's Telegram        — proves control of the owner's
+  //                                             phone, which a passer-by who
+  //                                             saw a password typed does not
+  //                                             have
+  //   3. a verified backup on disk            — proves the data is recoverable
+  //                                             BEFORE it is destroyed
+  //
+  // Steps 1 and 2 are separate IPC calls on purpose. The code is only sent
+  // after the password is verified, so an attacker cannot spam the owner's
+  // phone with reset prompts without first knowing a valid password.
+
+  /** Reads the SHOP's own Telegram bot. Never the developer's. */
+  const shopTelegram = (): { botToken: string; chatId: string } | null => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT Key, Value FROM settings WHERE Key IN ('telegram_bot_token','telegram_chat_id')",
+    ).all() as any[];
+    const map: Record<string, string> = {};
+    for (const r of rows) map[r.Key] = r.Value;
+    if (!map.telegram_bot_token || !map.telegram_chat_id) return null;
+    return { botToken: map.telegram_bot_token, chatId: map.telegram_chat_id };
+  };
+
+  const shopName = (): string => {
+    const row = getDb().prepare("SELECT Value FROM settings WHERE Key = 'company_name'").get() as any;
+    return row?.Value || '';
+  };
+
+  /** True when the shop can receive a confirmation code at all. */
+  ipcMain.handle('settings:resetIsAvailable', async () => ({
+    available: shopTelegram() !== null,
+  }));
+
+  /**
+   * Step 1 — verify the password, then send a confirmation code.
+   *
+   * The code is never returned here; it goes only to the shop's Telegram.
+   */
+  ipcMain.handle('settings:resetRequestCode', async (_event, data: { userId: number; password: string }) => {
+    const db = getDb();
+    const user = db.prepare('SELECT UserID, Username, PasswordHash FROM users WHERE UserID = ?')
+      .get(data?.userId) as any;
+    if (!user) return { success: false, message: 'المستخدم غير موجود' };
+    if (!bcrypt.compareSync(String(data?.password ?? ''), user.PasswordHash)) {
+      return { success: false, message: 'كلمة المرور غير صحيحة' };
+    }
+
+    const target = shopTelegram();
+    if (!target) {
+      return {
+        success: false,
+        message: 'لا يمكن التصفير قبل ضبط بوت تليجرام - اضبطه من الإعدادات ← النسخ الاحتياطي',
+      };
+    }
+
+    return requestCode(
+      'database_reset',
+      target,
+      Number(data.userId),
+      `\u26a0\ufe0f\u0637\u0644\u0628 \u062a\u0635\u0641\u064a\u0631 \u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a`,
+    );
+  });
+
+  /**
+   * Step 2 — password + code, snapshot, wipe, alert.
+   *
+   * Order matters and is asserted by the test suite: the backup is taken and
+   * VERIFIED readable before anything is deleted, because a snapshot nobody
+   * checked is not a safety net.
+   */
+  ipcMain.handle('settings:resetDatabase', async (_event, data: { userId: number; password: string; code?: string }) => {
     const db = getDb();
 
-    // Verify password against user record
-    const user = db.prepare('SELECT PasswordHash FROM users WHERE UserID = ?').get(data.userId) as any;
+    // Proof 1: the password, re-verified here. Step 1 is not trusted to have
+    // happened — each handler must stand on its own.
+    const user = db.prepare('SELECT UserID, Username, PasswordHash FROM users WHERE UserID = ?')
+      .get(data?.userId) as any;
     if (!user) return { success: false, message: 'المستخدم غير موجود' };
-    const valid = bcrypt.compareSync(data.password, user.PasswordHash);
-    if (!valid) return { success: false, message: 'كلمة المرور غير صحيحة' };
+    if (!bcrypt.compareSync(String(data?.password ?? ''), user.PasswordHash)) {
+      return { success: false, message: 'كلمة المرور غير صحيحة' };
+    }
 
-    // Safety net: this wipes every transactional table, so take a snapshot the
-    // user can fall back on. Without it a mis-click is unrecoverable.
+    // Proof 2: the Telegram code, bound to the user who requested it.
+    const code = String(data?.code ?? '').trim();
+    if (!/^\d{6}$/.test(code)) {
+      return { success: false, message: 'أدخل رمز التحقق المرسل على تليجرام (٦ أرقام)' };
+    }
+    const verified = verifyCode('database_reset', Number(data.userId), code);
+    if (!verified.success) {
+      recordSecurityEvent(db, 'database_reset_rejected', user.UserID, user.Username,
+        `محاولة تصفير فاشلة: ${verified.message}`);
+      return { success: false, message: verified.message };
+    }
+
+    // Proof 3: a snapshot that is proven readable before the wipe.
+    let backupPath = '';
     try {
       const backupDir = path.join(app.getPath('userData'), 'backups');
       if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await db.backup(path.join(backupDir, `before_reset_${stamp}.db`));
-    } catch (err) {
-      return { success: false, message: `تعذّر إنشاء نسخة احتياطية قبل التصفير: ${err}` };
+      backupPath = path.join(backupDir, `before_reset_${stamp}.db`);
+      await db.backup(backupPath);
+
+      // Verify it: `db.backup()` reporting success is not the same as a file
+      // that can be opened. A backup taken and never checked is exactly the
+      // backup that turns out to be unreadable on the day it is needed.
+      const stat = fs.statSync(backupPath);
+      if (stat.size < 1024) throw new Error('حجم النسخة غير معقول');
+      const header = Buffer.alloc(16);
+      const fd = fs.openSync(backupPath, 'r');
+      fs.readSync(fd, header, 0, 16, 0);
+      fs.closeSync(fd);
+      if (header.toString('utf-8', 0, 15) !== 'SQLite format 3') {
+        throw new Error('النسخة الناتجة ليست قاعدة بيانات صالحة');
+      }
+    } catch (err: any) {
+      return { success: false, message: `تعذّر إنشاء نسخة احتياطية قبل التصفير: ${err?.message || err}` };
     }
 
     // Tables to preserve (system config only)
@@ -240,22 +348,12 @@ export function registerSettingsHandlers() {
     // Foreign keys are switched off OUTSIDE the transaction, and this matters.
     //
     // `PRAGMA foreign_keys` is a NO-OP while a transaction is open — SQLite
-    // silently ignores it and returns no error. The previous version issued it
+    // silently ignores it and returns no error. A previous version issued it
     // as the first statement INSIDE `db.transaction(...)`, so enforcement
-    // stayed ON for the whole wipe.
-    //
-    // The tables are then deleted in alphabetical order, which puts `customers`
-    // before `sales`: removing a customer while a sale still references it
-    // violates the constraint, the statement throws, the transaction rolls
-    // back, and NOTHING is deleted. The screen showed
-    // "فشل تصفير قاعدة البيانات" and the database was untouched. Measured
-    // against the real schema: the reset threw SQLITE_CONSTRAINT_FOREIGNKEY and
-    // the seeded sale was still present afterwards.
-    //
-    // Ordering the deletes child-first would be fragile — it would have to be
-    // re-derived by hand every time a table is added. Turning enforcement off
-    // for the duration is what the operation actually means: every row is
-    // going, so there is no relationship left to protect.
+    // stayed ON for the whole wipe. Tables are deleted alphabetically, which
+    // reaches `customers` before `sales`; the orphaned reference threw, the
+    // transaction rolled back, and NOTHING was deleted while the screen showed
+    // "فشل تصفير قاعدة البيانات".
     const fkWasOn = db.pragma('foreign_keys', { simple: true }) === 1;
     db.pragma('foreign_keys = OFF');
     try {
@@ -276,6 +374,19 @@ export function registerSettingsHandlers() {
       if (fkWasOn) db.pragma('foreign_keys = ON');
     }
 
-    return { success: true, message: 'تم تصفير قاعدة البيانات بنجاح' };
+    // Durable local record first — it must exist even if every network is down.
+    recordSecurityEvent(db, 'database_reset', user.UserID, user.Username,
+      `تصفير قاعدة البيانات - النسخة الاحتياطية: ${path.basename(backupPath)}`);
+
+    // Then the two alerts, both best-effort: the data is already gone, so a
+    // failed notification must not report the reset itself as failed.
+    void notifyDatabaseReset(shopTelegram(), String(user.Username || ''), shopName(), backupPath);
+    void notifyDeveloperOfReset(shopName(), String(user.Username || ''));
+
+    return {
+      success: true,
+      message: `تم تصفير قاعدة البيانات - النسخة الاحتياطية محفوظة باسم ${path.basename(backupPath)}`,
+      backupPath,
+    };
   });
 }

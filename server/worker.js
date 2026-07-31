@@ -141,6 +141,45 @@ async function ensureSchema(env) {
   ]);
 }
 
+/**
+ * A customer cleared their own database.
+ *
+ * Purely a notification to the developer, so a later "I have lost all my data"
+ * support call can be answered with the date, the account and the fact that a
+ * verified backup was taken first.
+ *
+ * Carries NO business data: shop name, the username that performed it, and the
+ * time. Never a customer, a balance or an invoice. Support needs to know THAT
+ * it happened, never what was in it.
+ *
+ * This does NOT affect the licence. Clearing business data is a normal
+ * operation a shop is entitled to perform, and nothing here writes to the
+ * licences table.
+ */
+async function handleDatabaseReset(request, env) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return json({ ok: false, error: 'unauthorised' }, 401);
+  }
+  const body = await request.json().catch(() => null);
+  const deviceId = String(body?.deviceId || '').trim().toLowerCase();
+  const shop = String(body?.shopName || '').slice(0, 80);
+  const user = String(body?.username || '').slice(0, 64);
+  const at = String(body?.at || new Date().toISOString()).slice(0, 32);
+
+  const known = deviceId.length >= 8
+    ? await env.DB.prepare('SELECT shop_name FROM devices WHERE device_id = ?').bind(deviceId).first()
+    : null;
+
+  await tg(env,
+    `\u{1F5D1} <b>عميل صفّر قاعدة بياناته</b>\n\n`
+    + `المحل: ${shop || known?.shop_name || '—'}\n`
+    + `المستخدم: ${user || '—'}\n`
+    + `الوقت: ${at.replace('T', ' ').slice(0, 16)}\n`
+    + (deviceId ? `<code>${deviceId}</code>` : ''));
+
+  return json({ ok: true });
+}
+
 // ------------------------------------------------- admin password recovery
 //
 // DELIBERATELY NOT HERE.
@@ -805,6 +844,7 @@ export default {
           case '/config':    return await handleConfig(request, env);
           case '/message':   return await handleMessage(request, env);
           case '/telegram':  return await handleTelegram(request, env);
+          case '/database-reset': return await handleDatabaseReset(request, env);
         }
       }
       if (request.method === 'GET' && url.pathname === '/devices') {

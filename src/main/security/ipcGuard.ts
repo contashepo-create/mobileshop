@@ -298,6 +298,12 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'notifications:resetPrefs': 'settings.edit',
   'settings:setMany': 'settings.edit',
   'settings:resetDatabase': 'settings.edit',
+  // The two preparatory steps of the reset. Same permission as the reset
+  // itself: asking whether it is possible, and asking for the confirmation
+  // code, are both part of the destructive flow and must not be reachable by
+  // an account that could not complete it.
+  'settings:resetIsAvailable': 'settings.edit',
+  'settings:resetRequestCode': 'settings.edit',
   'users:create': 'settings.users',
   'users:update': 'settings.users',
   'users:delete': 'settings.users',

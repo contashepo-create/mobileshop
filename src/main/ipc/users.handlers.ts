@@ -4,6 +4,7 @@ import { getDb } from '../database/connection';
 import { verifyDevToken } from '../security/devAuth';
 import { destroyAllSessionsForUser } from '../security/session';
 import { requestResetCode, verifyResetCode, notifyResetDone } from '../security/passwordRecovery';
+import { recordSecurityEvent } from '../security/securityLog';
 
 
 /**
@@ -42,33 +43,6 @@ function checkPassword(pw: unknown): string | null {
 }
 
 const ADMIN_ROLE_ID = 1;
-
-/**
- * Append one row to the permanent security log.
- *
- * Applied to EVERY password-reset route, not just the new one. Changing who can
- * sign the books is a security event however it was done, and a log that
- * records only the newest mechanism would give a false picture of the older,
- * more privileged ones.
- *
- * Never allowed to throw: an audit failure must not roll back a password change
- * the user has already been told about, and must not block them from signing in.
- */
-function recordSecurityEvent(
-  db: ReturnType<typeof getDb>,
-  eventType: string,
-  userId: number | null,
-  username: string | null,
-  detail: string,
-): void {
-  try {
-    db.prepare(
-      'INSERT INTO security_events (EventType, UserID, Username, Detail) VALUES (?, ?, ?, ?)',
-    ).run(eventType, userId, username, detail);
-  } catch (err) {
-    console.error('[security] could not record event:', err);
-  }
-}
 
 /** How many administrators would remain if `excludeUserId` stopped being one. */
 function otherActiveAdmins(db: ReturnType<typeof getDb>, excludeUserId: number): number {

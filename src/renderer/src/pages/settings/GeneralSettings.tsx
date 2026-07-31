@@ -12,6 +12,13 @@ export function GeneralSettings() {
   const [resetPassword, setResetPassword] = useState('');
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
+  // Two-step reset: the password is proven first, and only then is a
+  // confirmation code sent to the shop's Telegram. Splitting it this way means
+  // nobody can spam the owner's phone with reset prompts without already
+  // knowing a valid password.
+  const [resetStep, setResetStep] = useState<1 | 2>(1);
+  const [resetCode, setResetCode] = useState('');
+  const [resetTgReady, setResetTgReady] = useState(true);
 
   useEffect(() => {
     (async () => {
@@ -184,7 +191,14 @@ export function GeneralSettings() {
       </div>
 
       <div className="flex justify-between items-center">
-        <Button variant="outline" className="!border-red-300 !text-red-600 hover:!bg-red-50 dark:!border-red-800 dark:hover:!bg-red-900/20" onClick={() => setShowResetConfirm(true)} icon={<AlertTriangle size={16} />}>
+        <Button variant="outline" className="!border-red-300 !text-red-600 hover:!bg-red-50 dark:!border-red-800 dark:hover:!bg-red-900/20" onClick={async () => {
+          setResetStep(1); setResetPassword(''); setResetCode('');
+          // Tell the owner up front if no bot is configured, rather than
+          // letting them type a password only to be refused afterwards.
+          const avail = await window.api.invoke('settings:resetIsAvailable');
+          setResetTgReady(Boolean(avail?.available));
+          setShowResetConfirm(true);
+        }} icon={<AlertTriangle size={16} />}>
           تصفير قاعدة البيانات
         </Button>
         <Button onClick={handleSave} loading={saving} icon={<Save size={16} />}>
@@ -208,44 +222,115 @@ export function GeneralSettings() {
               </p>
             </div>
             <div className="space-y-3">
-              <Input
-                label="أدخل كلمة المرور الخاصة بك للتأكيد"
-                type="password"
-                value={resetPassword}
-                onChange={(e: any) => setResetPassword(e.target.value)}
-                placeholder="كلمة المرور"
-              />
-              <div className="flex gap-2">
-                <Button
-                  variant="danger"
-                  className="flex-1"
-                  loading={resetting}
-                  disabled={!resetPassword.trim()}
-                  onClick={async () => {
-                    setResetting(true);
-                    try {
-                      const userId = localStorage.getItem('userId');
-                      const result = await window.api.invoke('settings:resetDatabase', { userId: parseInt(userId || '0'), password: resetPassword });
-                      if (result.success) {
-                        showToast('success', result.message);
-                        setShowResetConfirm(false);
-                        setResetPassword('');
-                      } else {
-                        showToast('error', result.message);
-                      }
-                    } catch {
-                      showToast('error', 'فشل تصفير قاعدة البيانات');
-                    } finally {
-                      setResetting(false);
-                    }
-                  }}
-                >
-                  تأكيد التصفير
-                </Button>
-                <Button variant="secondary" onClick={() => { setShowResetConfirm(false); setResetPassword(''); }}>
-                  إلغاء
-                </Button>
+              {!resetTgReady && (
+                <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-2.5 text-xs text-amber-700 dark:text-amber-300">
+                  ⚠️ لا يمكن التصفير قبل ضبط بوت تليجرام الخاص بالمحل.
+                  <div className="mt-1">اضبطه من: الإعدادات ← النسخ الاحتياطي.</div>
+                </div>
+              )}
+
+              <div className="bg-slate-100 dark:bg-slate-700/40 rounded-lg p-2.5 text-xs text-slate-600 dark:text-slate-300">
+                🛡 قبل الحذف يأخذ البرنامج <span className="font-bold">نسخة احتياطية</span> تلقائياً
+                ويتحقق من صلاحيتها، ويصلك <span className="font-bold">إشعار على تليجرام</span> بعد التنفيذ.
               </div>
+
+              {resetStep === 1 ? (
+                <>
+                  <Input
+                    label="أدخل كلمة المرور الخاصة بك"
+                    type="password"
+                    value={resetPassword}
+                    onChange={(e: any) => setResetPassword(e.target.value)}
+                    placeholder="كلمة المرور"
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      variant="danger"
+                      className="flex-1"
+                      loading={resetting}
+                      disabled={!resetPassword.trim()}
+                      onClick={async () => {
+                        setResetting(true);
+                        try {
+                          const userId = localStorage.getItem('userId');
+                          const result = await window.api.invoke('settings:resetRequestCode', {
+                            userId: parseInt(userId || '0'), password: resetPassword,
+                          });
+                          if (result?.success) {
+                            showToast('success', result.message);
+                            setResetStep(2);
+                          } else {
+                            showToast('error', result?.message || 'تعذّر إرسال الرمز');
+                          }
+                        } catch {
+                          showToast('error', 'تعذّر إرسال رمز التحقق');
+                        } finally {
+                          setResetting(false);
+                        }
+                      }}
+                    >
+                      إرسال رمز التأكيد
+                    </Button>
+                    <Button variant="secondary" onClick={() => {
+                      setShowResetConfirm(false); setResetPassword(''); setResetCode(''); setResetStep(1);
+                    }}>
+                      إلغاء
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-2.5 text-xs text-blue-700 dark:text-blue-300">
+                    تم إرسال رمز من ٦ أرقام إلى بوت تليجرام الخاص بالمحل. أدخله للتأكيد النهائي.
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+                      رمز التحقق
+                    </label>
+                    <input
+                      type="text" inputMode="numeric" maxLength={6} dir="ltr"
+                      value={resetCode}
+                      onChange={(e) => setResetCode(e.target.value.replace(/\D/g, ''))}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white text-center text-lg tracking-[0.4em]"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="danger"
+                      className="flex-1"
+                      loading={resetting}
+                      disabled={resetCode.length !== 6}
+                      onClick={async () => {
+                        setResetting(true);
+                        try {
+                          const userId = localStorage.getItem('userId');
+                          const result = await window.api.invoke('settings:resetDatabase', {
+                            userId: parseInt(userId || '0'), password: resetPassword, code: resetCode,
+                          });
+                          if (result?.success) {
+                            showToast('success', result.message);
+                            setShowResetConfirm(false);
+                            setResetPassword(''); setResetCode(''); setResetStep(1);
+                          } else {
+                            showToast('error', result?.message || 'تعذّر التصفير');
+                          }
+                        } catch {
+                          showToast('error', 'فشل تصفير قاعدة البيانات');
+                        } finally {
+                          setResetting(false);
+                        }
+                      }}
+                    >
+                      تأكيد التصفير نهائياً
+                    </Button>
+                    <Button variant="secondary" onClick={() => {
+                      setShowResetConfirm(false); setResetPassword(''); setResetCode(''); setResetStep(1);
+                    }}>
+                      إلغاء
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>

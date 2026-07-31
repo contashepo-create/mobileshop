@@ -262,20 +262,28 @@ console.log('\n[7] The DEVELOPER\'s bot carries no customer password traffic');
   t('the worker keeps no password-reset tables',
     !worker.includes('password_resets') && !worker.includes('reset_requests'));
 
+  // The mechanics now live in the shared confirmCode module, used by BOTH the
+  // password reset and the database reset so the two cannot drift apart in
+  // their guarantees. The properties are asserted where they are implemented.
   const recSrc = code('src/main/security/passwordRecovery.ts');
-  t('recovery never calls the developer API base', !/MOBILESHOP_API_BASE/.test(recSrc));
-  t('recovery never uses the shipped client key', !/MOBILESHOP_CLIENT_KEY/.test(recSrc));
-  t('recovery talks to Telegram directly', /api\.telegram\.org/.test(recSrc));
+  const mech = code('src/main/security/confirmCode.ts');
+  t('recovery never calls the developer API base',
+    !/MOBILESHOP_API_BASE/.test(recSrc) && !/MOBILESHOP_API_BASE/.test(mech));
+  t('recovery never uses the shipped client key',
+    !/MOBILESHOP_CLIENT_KEY/.test(recSrc) && !/MOBILESHOP_CLIENT_KEY/.test(mech));
+  t('recovery talks to Telegram directly', /api\.telegram\.org/.test(mech));
 
   const users = code('src/main/ipc/users.handlers.ts');
   t('the handler reads the SHOP bot from settings',
     /telegram_bot_token'[\s\S]{0,120}telegram_chat_id/.test(users));
   t('the code is minted with a cryptographic source, not Math.random',
-    /crypto\.randomInt/.test(recSrc) && !/Math\.random/.test(recSrc));
+    /crypto\.randomInt/.test(mech) && !/Math\.random/.test(mech));
   t('the plain code is hashed, never held in the clear',
-    /createHash\('sha256'\)/.test(recSrc));
-  t('code comparison is timing-safe', /timingSafeEqual/.test(recSrc));
-  t('a bot token can never reach a message', /function redact/.test(recSrc));
+    /createHash\('sha256'\)/.test(mech));
+  t('code comparison is timing-safe', /timingSafeEqual/.test(mech));
+  t('a bot token can never reach a message', /function redactToken/.test(mech));
+  t('a password-reset code cannot be replayed as a database wipe',
+    /pendingByPurpose/.test(mech) && /verifyCode\(\s*purpose/.test(mech.replace(/\n/g, ' ')));
 }
 
 // ---------------------------------------------------------------- 8
@@ -290,7 +298,8 @@ console.log('\n[8] Every reset leaves a permanent trace');
   t('a reset by an administrator is recorded', /recordSecurityEvent\(db, 'password_reset_by_admin'/.test(users));
   t('a reset by the developer is recorded', /recordSecurityEvent\(db, 'password_reset_by_developer'/.test(users));
   t('the audit write can never break a reset',
-    /function recordSecurityEvent[\s\S]{0,600}try \{[\s\S]{0,400}catch/.test(users));
+    /export function recordSecurityEvent[\s\S]{0,600}try \{[\s\S]{0,400}catch/
+      .test(code('src/main/security/securityLog.ts')));
 
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE security_events (

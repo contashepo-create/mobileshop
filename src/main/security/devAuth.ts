@@ -42,7 +42,20 @@ const DEV_USERNAME = 'zerocold';
  * and paste the printed line here. Aim for four or more unrelated words; the
  * generator refuses anything under twelve characters or purely numeric.
  */
-const DEV_PASSWORD_HASH = '$2a$12$roA4Cm.0DuiKYwPtxUNfSuX/Ao1ZKH2ofhjtHX3qJw83WjMBmoTK2';
+const DEV_FALLBACK_HASH = '$2a$12$roA4Cm.0DuiKYwPtxUNfSuX/Ao1ZKH2ofhjtHX3qJw83WjMBmoTK2';
+
+/**
+ * Read from .env so a real password never becomes a tracked file edit that
+ * `git pull` fights with — or worse, a commit. Generate one with:
+ *     npm run dev:password -- "several unrelated words"
+ */
+const DEV_PASSWORD_HASH =
+  (process.env.MOBILESHOP_DEV_PASSWORD_HASH || '').trim() || DEV_FALLBACK_HASH;
+
+/** True when the build still carries the original, publicly-known password. */
+export function isDevelopmentDevPassword(): boolean {
+  return DEV_PASSWORD_HASH === DEV_FALLBACK_HASH;
+}
 
 const TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_ATTEMPTS = 5;

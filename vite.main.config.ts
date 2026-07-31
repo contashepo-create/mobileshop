@@ -18,6 +18,13 @@ export default defineConfig(({ mode }) => {
     define: {
       'process.env.MOBILESHOP_API_BASE': JSON.stringify(env.MOBILESHOP_API_BASE || ''),
       'process.env.MOBILESHOP_CLIENT_KEY': JSON.stringify(env.MOBILESHOP_CLIENT_KEY || ''),
+      // Licence verification key and developer password hash.
+      //
+      // Kept in .env rather than edited into the source: a tracked file that
+      // holds production values fights every `git pull`, and a reverted edit
+      // would silently invalidate every licence already issued.
+      'process.env.MOBILESHOP_LICENSE_PUBLIC_KEY': JSON.stringify(env.MOBILESHOP_LICENSE_PUBLIC_KEY || ''),
+      'process.env.MOBILESHOP_DEV_PASSWORD_HASH': JSON.stringify(env.MOBILESHOP_DEV_PASSWORD_HASH || ''),
     },
   };
 });

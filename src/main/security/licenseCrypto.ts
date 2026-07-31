@@ -55,12 +55,38 @@ const MS_PER_DAY = 86_400_000;
  * Ed25519 PUBLIC key embedded in the application, base64 of the 32 raw bytes.
  *
  * This key can only VERIFY. It is safe to ship, safe to publish, and useless
- * for minting a licence. Generate a fresh pair with:
- *     node scripts/license-keygen.js --init
- * which writes the private key to `scripts/.license-key` (git-ignored) and
- * prints the line to paste here.
+ * for minting a licence.
+ *
+ * READ FROM .env, NOT EDITED IN PLACE.
+ * -----------------------------------
+ * The first version told the developer to paste their key over this line. That
+ * turns a tracked source file into a place where production values live, and
+ * every `git pull` then either conflicts with the edit or quietly reverts it —
+ * which would silently invalidate every licence already issued.
+ *
+ * `.env` is already git-ignored and already read at build time by
+ * vite.main.config.ts, so the key survives updates and never appears in a
+ * commit. The fallback below is the DEVELOPMENT key: usable for testing, and
+ * the shipped build refuses to start on it (see assertProductionKeys).
+ *
+ * Generate a pair with:  npm run license:init
  */
-export let LICENSE_PUBLIC_KEY = 'o3+4sp7nJmjnATFF5q5NXnLYn75kLTjKSxCYu4xfKfs=';
+const DEV_FALLBACK_PUBLIC_KEY = 'o3+4sp7nJmjnATFF5q5NXnLYn75kLTjKSxCYu4xfKfs=';
+
+export let LICENSE_PUBLIC_KEY =
+  (process.env.MOBILESHOP_LICENSE_PUBLIC_KEY || '').trim() || DEV_FALLBACK_PUBLIC_KEY;
+
+/**
+ * True when the build is still running on the development key.
+ *
+ * Shipping on it would mean every customer's licence is verifiable by a key
+ * whose private half is published in this repository's history — anyone could
+ * mint themselves a perpetual licence. Checked at start-up rather than trusted
+ * to be remembered.
+ */
+export function isDevelopmentLicenseKey(): boolean {
+  return LICENSE_PUBLIC_KEY === DEV_FALLBACK_PUBLIC_KEY;
+}
 
 /**
  * LEGACY symmetric secret, kept ONLY to honour codes issued before the move to

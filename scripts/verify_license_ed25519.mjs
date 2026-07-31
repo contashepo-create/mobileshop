@@ -301,5 +301,60 @@ console.log('\n[6] Generator, worker and app agree');
     /LICENSE_PRIVATE_KEY/.test(w) && !/env\.LICENSE_SECRET/.test(w));
 }
 
+// ---------------------------------------------------------------- 7
+console.log('\n[7] Production keys come from .env, and a dev build cannot ship');
+{
+  // Editing the key into a TRACKED source file was the first design, and it is
+  // a trap: every `git pull` either conflicts with the edit or silently
+  // reverts it, and a reverted licence key invalidates every code already
+  // issued. .env is git-ignored and already inlined at build time.
+  const lc = code('src/main/security/licenseCrypto.ts');
+  const da = code('src/main/security/devAuth.ts');
+  const vite = code('vite.main.config.ts');
+  const main = code('src/main/index.ts');
+
+  t('the licence key is read from the environment',
+    /process\.env\.MOBILESHOP_LICENSE_PUBLIC_KEY/.test(lc));
+  t('the developer hash is read from the environment',
+    /process\.env\.MOBILESHOP_DEV_PASSWORD_HASH/.test(da));
+  t('both are inlined at build time',
+    /MOBILESHOP_LICENSE_PUBLIC_KEY/.test(vite) && /MOBILESHOP_DEV_PASSWORD_HASH/.test(vite));
+
+  // A development fallback keeps local work frictionless, so it must be
+  // impossible to ship on it by accident.
+  // Asserted as three separate properties, because an earlier version only
+  // checked that the FUNCTION EXISTED. Deleting the call, or making the body
+  // return immediately, left every one of those checks green — the guard could
+  // be removed entirely and the suite would not notice.
+  const guardBody = /function assertProductionKeys\(\)[\s\S]*?\n\}/.exec(main)?.[0] || '';
+
+  t('the guard body inspects the licence key',
+    /isDevelopmentLicenseKey\(\)/.test(guardBody));
+  t('the guard body inspects the developer password',
+    /isDevelopmentDevPassword\(\)/.test(guardBody));
+  t('the guard body actually exits', /app\.exit\(1\)/.test(guardBody));
+  t('it does not bail out before checking anything',
+    !/^\s*return;\s*$/m.test(guardBody.split('problems.length === 0')[0].replace(/if \(!app\.isPackaged\) return;/, '')),
+    'an unconditional early return would disable the whole guard');
+  t('the check only applies to a packaged build',
+    /if \(!app\.isPackaged\) return;/.test(guardBody));
+
+  // It must be CALLED, not merely defined, and before the app does any work.
+  t('the guard is actually invoked at start-up',
+    /^\s*assertProductionKeys\(\);/m.test(main));
+  t('it runs before the database is opened',
+    main.indexOf('assertProductionKeys();') !== -1
+    && main.indexOf('assertProductionKeys();') < main.indexOf('Initializing database'));
+
+  // Behavioural: the detectors must actually detect.
+  t('with no environment set, the dev key is reported',
+    L.isDevelopmentLicenseKey() === true);
+
+  t('an example env file documents what is needed',
+    existsSync(join(ROOT, '.env.example')));
+  t('and .env itself is git-ignored',
+    /^\.env$/m.test(readFileSync(join(ROOT, '.gitignore'), 'utf-8')));
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

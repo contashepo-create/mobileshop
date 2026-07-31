@@ -19,6 +19,8 @@ import { registerFiscalYearHandlers } from './ipc/fiscalYear.handlers';
 import { registerReportsHandlers } from './ipc/reports.handlers';
 import { registerBackupHandlers } from './ipc/backup.handlers';
 import { sendBackupToTelegram } from './backup/telegramBackup';
+import { isDevelopmentLicenseKey } from './security/licenseCrypto';
+import { isDevelopmentDevPassword } from './security/devAuth';
 import { registerOpeningBalanceHandlers } from './ipc/openingBalance.handlers';
 import { registerStatementHandlers, registerCustomerStatementHandlers } from './ipc/statement.handlers';
 import { registerDatabaseHandlers } from './ipc/database.handlers';
@@ -111,8 +113,42 @@ const createWindow = () => {
   });
 };
 
+/**
+ * Refuse to run a PACKAGED build on the development credentials.
+ *
+ * The Ed25519 private key that matches the fallback public key is in this
+ * repository's history, and the fallback developer password is publicly known.
+ * Shipping on either means every customer can mint a perpetual licence or open
+ * the developer console.
+ *
+ * Checked at start-up because "remember to change it before building" is not a
+ * control — it is a hope. Development runs are unaffected, so nothing about
+ * the daily workflow changes.
+ */
+function assertProductionKeys(): void {
+  if (!app.isPackaged) return;
+
+  const problems: string[] = [];
+  if (isDevelopmentLicenseKey()) {
+    problems.push('• مفتاح الترخيص ما زال مفتاح التطوير (MOBILESHOP_LICENSE_PUBLIC_KEY)');
+  }
+  if (isDevelopmentDevPassword()) {
+    problems.push('• كلمة مرور المطور ما زالت الافتراضية (MOBILESHOP_DEV_PASSWORD_HASH)');
+  }
+  if (problems.length === 0) return;
+
+  dialog.showErrorBox(
+    'إعداد ناقص - لا يمكن تشغيل هذه النسخة',
+    `هذه النسخة بُنيت بمفاتيح التطوير:\n\n${problems.join('\n')}\n\n`
+    + 'ضع القيم الحقيقية في ملف .env ثم أعد البناء.\n'
+    + 'انظر .env.example',
+  );
+  app.exit(1);
+}
+
 app.whenReady().then(() => {
   try {
+    assertProductionKeys();
     console.log('[Main] Initializing database...');
     const db = getDb();
 

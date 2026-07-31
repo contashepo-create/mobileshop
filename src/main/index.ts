@@ -18,6 +18,7 @@ import { registerRentHandlers } from './ipc/rent.handlers';
 import { registerFiscalYearHandlers } from './ipc/fiscalYear.handlers';
 import { registerReportsHandlers } from './ipc/reports.handlers';
 import { registerBackupHandlers } from './ipc/backup.handlers';
+import { sendBackupToTelegram } from './backup/telegramBackup';
 import { registerOpeningBalanceHandlers } from './ipc/openingBalance.handlers';
 import { registerStatementHandlers, registerCustomerStatementHandlers } from './ipc/statement.handlers';
 import { registerDatabaseHandlers } from './ipc/database.handlers';
@@ -280,7 +281,61 @@ async function autoBackup() {
         }
       } catch { /* skip unreadable entries */ }
     }
+
+    // Off-site copy, once a day, only if the shop switched it on.
+    //
+    // Runs AFTER the local backup is safely on disk and is wrapped separately:
+    // Telegram being unreachable, rate-limiting us or rejecting an oversized
+    // file must never stop the local backup that already succeeded.
+    void sendDailyTelegramBackup(backupPath, today);
   } catch (err) {
     console.error('[Main] Auto-backup failed:', err);
+  }
+}
+
+/**
+ * Sends the day's backup to the owner's Telegram bot, at most once per day.
+ *
+ * The "already sent today" marker is stored in settings rather than inferred
+ * from the file, because `autoBackup()` runs hourly: without it the shop would
+ * receive the same database twenty-four times a day and start ignoring it.
+ */
+async function sendDailyTelegramBackup(backupPath: string, today: string) {
+  try {
+    const db = getDb();
+    const get = (key: string): string => {
+      const row = db.prepare('SELECT Value FROM settings WHERE Key = ?').get(key) as any;
+      return row?.Value ?? '';
+    };
+
+    if (get('telegram_backup_enabled') !== '1') return;
+    if (get('telegram_daily_sent') === today) return;
+
+    const botToken = get('telegram_bot_token');
+    const chatId = get('telegram_chat_id');
+    if (!botToken || !chatId) return;
+    if (!fs.existsSync(backupPath)) return;
+
+    const shop = get('company_name') || 'المحل';
+    const sizeMb = (fs.statSync(backupPath).size / 1024 / 1024).toFixed(2);
+    const result = await sendBackupToTelegram(
+      { botToken, chatId },
+      backupPath,
+      `💾 نسخة احتياطية تلقائية\n🏪 ${shop}\n📅 ${today}\n📦 ${sizeMb} ميجابايت`,
+    );
+
+    // Mark the day as done only on success, so a failure retries next hour
+    // instead of silently skipping until tomorrow.
+    if (result.success) {
+      db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)')
+        .run('telegram_daily_sent', today);
+      db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)')
+        .run('telegram_last_backup', new Date().toISOString());
+      console.log('[Main] Telegram backup sent');
+    } else {
+      console.error('[Main] Telegram backup failed:', result.message);
+    }
+  } catch (err) {
+    console.error('[Main] Telegram backup error:', err);
   }
 }

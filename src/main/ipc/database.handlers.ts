@@ -3,12 +3,20 @@ import { getDb, closeDb, getDbPath, setDbPath } from '../database/connection';
 import path from 'node:path';
 import fs from 'node:fs';
 import { businessToday } from '../../shared/businessDate';
+import {
+  testTelegram, sendBackupToTelegram, looksLikeBotToken, looksLikeChatId,
+} from '../backup/telegramBackup';
 
 /**
  * Tables that must never be exported: they contain password hashes or
  * device secrets that should not leave the application in plain CSV.
+ *
+ * `settings` is here because it holds bearer credentials — the cloud API key
+ * and the Telegram bot token. Exporting it wrote those into a plain CSV that
+ * then travels by email or USB stick. The business-relevant settings are all
+ * visible on the settings screens anyway, so nothing useful is lost.
  */
-const EXPORT_BLOCKLIST = new Set(['users', 'user_overrides']);
+const EXPORT_BLOCKLIST = new Set(['users', 'user_overrides', 'settings']);
 
 /**
  * SECURITY: `tableName` arrives from the renderer and used to be interpolated
@@ -430,6 +438,134 @@ export function registerDatabaseHandlers() {
       return { success: false, message: 'نوع الرفع غير مدعوم' };
     } catch (err: any) {
       return { success: false, message: err.message };
+    }
+  });
+
+  // ===== TELEGRAM BACKUP =====
+  /**
+   * Off-site backup to the OWNER's own Telegram bot.
+   *
+   * The automatic daily backups sit on the same disk as the database, so a dead
+   * drive or a stolen machine takes the books and every backup at once. This is
+   * the copy that survives losing the computer.
+   */
+  const telegramConfig = () => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT Key, Value FROM settings WHERE Key IN ('telegram_bot_token','telegram_chat_id','telegram_backup_enabled')",
+    ).all() as any[];
+    const map: Record<string, string> = {};
+    for (const r of rows) map[r.Key] = r.Value;
+    return {
+      botToken: map.telegram_bot_token || '',
+      chatId: map.telegram_chat_id || '',
+      enabled: map.telegram_backup_enabled === '1',
+    };
+  };
+
+  ipcMain.handle('telegram:getSettings', async () => {
+    const cfg = telegramConfig();
+    // The token itself never returns to the renderer. The screen only needs to
+    // know whether one is stored; echoing it back would put a bearer credential
+    // into the renderer's memory and into any crash dump for no benefit.
+    return {
+      hasToken: Boolean(cfg.botToken),
+      tokenHint: cfg.botToken ? `${cfg.botToken.split(':')[0]}:***` : '',
+      chatId: cfg.chatId,
+      enabled: cfg.enabled,
+    };
+  });
+
+  ipcMain.handle('telegram:saveSettings', async (_event, data: {
+    botToken?: string; chatId?: string; enabled?: boolean;
+  }) => {
+    const db = getDb();
+    const stmt = db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)');
+
+    const token = typeof data?.botToken === 'string' ? data.botToken.trim() : '';
+    const chatId = typeof data?.chatId === 'string' ? data.chatId.trim() : '';
+
+    if (token && !looksLikeBotToken(token)) {
+      return { success: false, message: 'رمز البوت غير صالح - انسخه كاملاً من BotFather' };
+    }
+    if (chatId && !looksLikeChatId(chatId)) {
+      return { success: false, message: 'معرّف المحادثة غير صالح - يجب أن يكون أرقاماً' };
+    }
+
+    const tx = db.transaction(() => {
+      // An empty token means "leave the stored one alone": the screen never
+      // receives the token back, so it cannot resend it, and treating blank as
+      // a deletion would wipe the configuration every time the owner toggled
+      // the switch.
+      if (token) stmt.run('telegram_bot_token', token);
+      if (chatId) stmt.run('telegram_chat_id', chatId);
+      stmt.run('telegram_backup_enabled', data?.enabled ? '1' : '0');
+    });
+    tx();
+    return { success: true, message: 'تم حفظ الإعدادات' };
+  });
+
+  /** Forget the credentials entirely. */
+  ipcMain.handle('telegram:clearSettings', async () => {
+    const db = getDb();
+    db.prepare(
+      "DELETE FROM settings WHERE Key IN ('telegram_bot_token','telegram_chat_id','telegram_backup_enabled')",
+    ).run();
+    return { success: true, message: 'تم حذف إعدادات تليجرام' };
+  });
+
+  ipcMain.handle('telegram:test', async (_event, data: { botToken?: string; chatId?: string }) => {
+    const stored = telegramConfig();
+    // Test what WILL be used: a token just typed on screen, or the stored one.
+    const token = (typeof data?.botToken === 'string' && data.botToken.trim())
+      ? data.botToken.trim() : stored.botToken;
+    const chatId = (typeof data?.chatId === 'string' && data.chatId.trim())
+      ? data.chatId.trim() : stored.chatId;
+    return testTelegram({ botToken: token, chatId });
+  });
+
+  /**
+   * Take a fresh backup and send it.
+   *
+   * The file is written with SQLite's own backup API, never `copyFileSync`: the
+   * database runs in WAL mode, and a plain copy of a live WAL database can be
+   * unreadable — an off-site backup that cannot be opened is worse than none,
+   * because the shop believes it is protected.
+   */
+  ipcMain.handle('telegram:sendBackup', async () => {
+    const cfg = telegramConfig();
+    if (!cfg.botToken || !cfg.chatId) {
+      return { success: false, message: 'أدخل إعدادات تليجرام أولاً' };
+    }
+
+    const db = getDb();
+    const today = businessToday();
+    const tmpPath = path.join(app.getPath('temp'), `mobile_shop_backup_${today}.db`);
+
+    try {
+      await db.backup(tmpPath);
+
+      const shopRow = db.prepare("SELECT Value FROM settings WHERE Key = 'company_name'").get() as any;
+      const shop = shopRow?.Value || 'المحل';
+      const sizeMb = (fs.statSync(tmpPath).size / 1024 / 1024).toFixed(2);
+
+      const result = await sendBackupToTelegram(
+        { botToken: cfg.botToken, chatId: cfg.chatId },
+        tmpPath,
+        `💾 نسخة احتياطية\n🏪 ${shop}\n📅 ${today}\n📦 ${sizeMb} ميجابايت`,
+      );
+
+      if (result.success) {
+        db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)')
+          .run('telegram_last_backup', new Date().toISOString());
+      }
+      return result;
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'فشل إنشاء النسخة' };
+    } finally {
+      // The temp copy is a full dump of the business; do not leave it lying in
+      // the OS temp folder whether the upload worked or not.
+      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* best effort */ }
     }
   });
 

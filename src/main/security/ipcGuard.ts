@@ -325,6 +325,14 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'db:saveCloudSettings': 'settings.edit',
   'db:testCloudConnection': 'settings.edit',
   'db:uploadToCloud': 'settings.edit',
+  // Telegram off-site backup. Reading the configuration is a view right;
+  // everything that touches the token, or ships the whole database off the
+  // premises, requires edit.
+  'telegram:getSettings': 'settings.view',
+  'telegram:saveSettings': 'settings.edit',
+  'telegram:clearSettings': 'settings.edit',
+  'telegram:test': 'settings.edit',
+  'telegram:sendBackup': 'settings.edit',
 };
 
 export class IpcAuthError extends Error {

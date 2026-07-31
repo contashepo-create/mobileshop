@@ -40,6 +40,7 @@ export function registerSettingsHandlers() {
       SELECT Key, Value FROM settings
       WHERE Key NOT LIKE 'cloud_%'
         AND Key NOT LIKE 'sync_%'
+        AND Key NOT LIKE 'telegram_%'
         AND Key NOT IN ('db_path')
     `).all() as any[];
     const settings: Record<string, string> = {};
@@ -56,8 +57,27 @@ export function registerSettingsHandlers() {
     return settings;
   });
 
+  /**
+   * Keys that must never be readable through the public settings channels.
+   *
+   * `settings:get` and `settings:getAll` are PUBLIC — they have to be, because
+   * the login screen renders the shop's branding before anyone signs in. But
+   * `settings:get` returned ANY key it was asked for by name, so an
+   * unauthenticated renderer could read `cloud_api_key`, and would have been
+   * able to read the Telegram bot token. Both are bearer credentials: holding
+   * one is the same as holding the account.
+   *
+   * `settings:getAll` filters the same families in its WHERE clause. The
+   * secrets are still reachable by the screens that own them, through the
+   * permission-gated `db:getCloudSettings` / `telegram:getSettings`.
+   */
+  const isSecretKey = (key: unknown): boolean =>
+    typeof key === 'string'
+    && (/^cloud_/.test(key) || /^sync_/.test(key) || /^telegram_/.test(key) || key === 'db_path');
+
   // Get single setting
   ipcMain.handle('settings:get', async (_event, key: string) => {
+    if (isSecretKey(key)) return null;
     const db = getDb();
     const row = db.prepare('SELECT Value FROM settings WHERE Key = ?').get(key) as any;
     return row?.Value ?? null;

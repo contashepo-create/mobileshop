@@ -113,7 +113,10 @@ if (process.argv.includes('--init')) {
   console.log('(git-ignored — back it up in a password manager, it is the only');
   console.log(' thing that can issue licences. Losing it means re-issuing all.)\n');
   console.log('Paste this line into src/main/security/licenseCrypto.ts:\n');
-  console.log(`export const LICENSE_PUBLIC_KEY = '${pub}';\n`);
+  // `let`, not `const`: licenseCrypto.ts declares it as a mutable binding so a
+  // test can swap it for a key it holds the private half of. Printing `const`
+  // here would have the developer paste a line that does not match the file.
+  console.log(`export let LICENSE_PUBLIC_KEY = '${pub}';\n`);
   console.log('The public key is safe to ship: it can verify, never sign.\n');
   process.exit(0);
 }

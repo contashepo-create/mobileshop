@@ -354,11 +354,55 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
   t('the guard body inspects the developer password',
     /isDevelopmentDevPassword\(\)/.test(guardBody));
   t('the guard body actually exits', /app\.exit\(1\)/.test(guardBody));
-  t('it does not bail out before checking anything',
-    !/^\s*return;\s*$/m.test(guardBody.split('problems.length === 0')[0].replace(/if \(!app\.isPackaged\) return;/, '')),
-    'an unconditional early return would disable the whole guard');
+  // The guard must not short-circuit before it inspects anything. Checked by
+  // ORDER rather than by looking for a bare `return`: the development branch
+  // legitimately returns early, and a naive text search cannot tell that apart
+  // from a return that disables the whole thing.
+  {
+    const iPackagedCheck = guardBody.indexOf('app.isPackaged');
+    const iFirstInspect = Math.min(
+      ...['isDevelopmentLicenseKey()', 'isDevelopmentDevPassword()']
+        .map(k => guardBody.indexOf(k)).filter(i => i >= 0),
+    );
+    const iExit = guardBody.indexOf('app.exit(1)');
+    t('the packaged path inspects the keys before it can exit',
+      iPackagedCheck >= 0 && iFirstInspect > iPackagedCheck && iExit > iFirstInspect,
+      `isPackaged@${iPackagedCheck} inspect@${iFirstInspect} exit@${iExit}`);
+
+    // The exit must be REACHABLE. Turning the early return that skips a clean
+    // build into an unconditional one leaves every check above green — the
+    // keys are still inspected, app.exit(1) is still present further down —
+    // while a development-key build ships anyway. So the only `return` allowed
+    // between the inspection and the exit is the guarded one.
+    // Measure from where the PACKAGED path begins collecting problems, not
+    // from the first inspection: the development branch above it inspects the
+    // same keys and then legitimately returns, and including that would
+    // condemn correct code.
+    //
+    // Inside that region the single allowed early exit is "no problems, carry
+    // on"; strip it, and anything still returning on its own line makes
+    // app.exit(1) unreachable while every other check stays green.
+    const iCollect = guardBody.indexOf('const problems');
+    const between = guardBody.slice(iCollect >= 0 ? iCollect : iFirstInspect, iExit)
+      .replace(/if \(problems\.length === 0\) return;/g, '');
+    const bareReturns = (between.match(/^\s*return;\s*$/gm) || []).length;
+    t('nothing unconditionally returns before the exit is reached',
+      bareReturns === 0,
+      `${bareReturns} bare return(s) would make app.exit(1) unreachable`);
+    t('the only early exit is the one taken when there are no problems',
+      /if \(problems\.length === 0\) return;/.test(guardBody));
+  }
   t('the check only applies to a packaged build',
-    /if \(!app\.isPackaged\) return;/.test(guardBody));
+    /if \(!app\.isPackaged\)/.test(guardBody) && /return;/.test(guardBody));
+
+  // Development is allowed to use the fallbacks — but not silently. Without a
+  // startup line, "my .env is loaded" and "no .env, quietly using the test
+  // key" look identical, and the only way to tell was to package a build and
+  // watch it refuse to start.
+  t('development startup says WHICH keys are in use',
+    /development \$\{which\} in use/.test(guardBody));
+  t('and confirms when the real ones are loaded',
+    /production keys loaded from \.env/.test(guardBody));
 
   // It must be CALLED, not merely defined, and before the app does any work.
   t('the guard is actually invoked at start-up',

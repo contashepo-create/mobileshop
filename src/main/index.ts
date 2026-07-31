@@ -126,7 +126,26 @@ const createWindow = () => {
  * the daily workflow changes.
  */
 function assertProductionKeys(): void {
-  if (!app.isPackaged) return;
+  // In development the fallbacks are allowed, but SILENCE about them is not.
+  //
+  // Nothing in the startup log distinguished "my .env loaded" from "no .env,
+  // quietly using the test key", so the only way to find out was to package a
+  // build and watch it refuse to start. One line removes that whole class of
+  // surprise, and names the variable to set.
+  if (!app.isPackaged) {
+    const usingDevLicence = isDevelopmentLicenseKey();
+    const usingDevPassword = isDevelopmentDevPassword();
+    if (usingDevLicence || usingDevPassword) {
+      const which = [
+        usingDevLicence ? 'licence key' : null,
+        usingDevPassword ? 'developer password' : null,
+      ].filter(Boolean).join(' and ');
+      console.log(`[Config] development ${which} in use — set it in .env before packaging`);
+    } else {
+      console.log('[Config] production keys loaded from .env');
+    }
+    return;
+  }
 
   const problems: string[] = [];
   if (isDevelopmentLicenseKey()) {

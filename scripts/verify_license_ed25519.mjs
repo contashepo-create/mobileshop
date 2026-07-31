@@ -28,6 +28,7 @@
  * Run with:  node --experimental-strip-types scripts/verify_license_ed25519.mjs
  */
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
@@ -261,7 +262,27 @@ console.log('\n[5] No signing key is present anywhere in the shipped source');
 
   t('the private key file is git-ignored',
     /scripts\/\.license-key/.test(readFileSync(join(ROOT, '.gitignore'), 'utf-8')));
-  t('the private key is not committed', !existsSync(join(ROOT, 'scripts/.license-key')));
+  // Asks git, not the filesystem.
+  //
+  // The first version checked that scripts/.license-key does not EXIST. That is
+  // the wrong question: after `npm run license:init` the file exists on every
+  // developer machine by design — it is the signing key. The check therefore
+  // failed for exactly the person who had followed the instructions correctly,
+  // while a key that WAS committed but then deleted locally would have passed.
+  //
+  // What matters is whether git tracks it.
+  {
+    let tracked = false;
+    try {
+      execFileSync('git', ['ls-files', '--error-unmatch', 'scripts/.license-key'],
+        { cwd: ROOT, stdio: 'ignore' });
+      tracked = true;
+    } catch {
+      tracked = false;   // non-zero exit means git does not know the file
+    }
+    t('the private key is not tracked by git', tracked === false,
+      tracked ? 'scripts/.license-key IS COMMITTED — remove it from the index now' : '');
+  }
 
   // The generator must never fall back to signing with a public value.
   const keygen = readFileSync(join(ROOT, 'scripts/license-keygen.js'), 'utf-8');

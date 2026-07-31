@@ -17,7 +17,8 @@
     "license:init": "node scripts/license-keygen.js --init",
     "license:new": "node scripts/license-keygen.js",
     "dev:password": "node scripts/dev-password.js",
-    "rescue:keys": "node scripts/rescue-keys.js"
+    "rescue:keys": "node scripts/rescue-keys.js",
+    "check:env": "node scripts/check-env.js"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.4.0",

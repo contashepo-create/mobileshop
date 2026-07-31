@@ -4,8 +4,10 @@
  * SECURITY NOTES
  * --------------
  * Previously the developer credentials were compared in the RENDERER
- * (`DevConsolePage.tsx`) against a base64+reverse "encryption", and the plain
- * string '014253' was compared directly inside several main-process handlers.
+ * (`DevConsolePage.tsx`) against a base64+reverse "encryption", and a short
+ * numeric password was compared as a plain string inside several main-process
+ * handlers. That original password is in the git history and must never be
+ * reused, even with a suffix — `scripts/dev-password.js` refuses it.
  * That meant:
  *   - `sessionStorage.setItem('dev_unlocked','true')` unlocked the dev console;
  *   - `grep` on the packaged .asar revealed the password instantly.

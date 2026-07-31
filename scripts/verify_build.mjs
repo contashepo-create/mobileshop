@@ -56,7 +56,7 @@ import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
+
 import { readdirSync, statSync } from 'node:fs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -81,20 +81,20 @@ console.log('='.repeat(72));
  */
 // esbuild is not a direct dependency and does not need to be: `vite` depends
 // on it (see package-lock.json -> node_modules/esbuild), so a normal
-// `npm install` always provides both the binary and the JS API.
-// MOBILESHOP_ESBUILD is an escape hatch for sandboxes where node_modules is
-// not installed; it is never needed on a developer machine.
-function findEsbuild() {
-  const candidates = [
-    join(ROOT, 'node_modules/.bin/esbuild'),
-    join(ROOT, 'node_modules/esbuild/bin/esbuild'),
-  ];
-  if (process.env.MOBILESHOP_ESBUILD) candidates.push(process.env.MOBILESHOP_ESBUILD);
-  for (const c of candidates) if (existsSync(c)) return c;
-  return null;
-}
-
-/** The JS API, needed for the bundle checks (the CLI cannot take a plugin). */
+// `npm install` always provides it.
+//
+// Only the JS API is used, never the command-line binary. The first version of
+// this gate shelled out to node_modules/.bin/esbuild with execFileSync, and
+// that was WRONG ON WINDOWS: the extensionless file there is a shell script,
+// the real Windows entry point is esbuild.cmd, and execFileSync cannot launch
+// either without a shell. Every spawn failed before esbuild ever saw the code,
+// so all 106 files were reported "broken" with an EMPTY error message while
+// section [2] — which already used the JS API — passed. A gate that blames the
+// source for its own inability to start is worse than no gate.
+//
+// The JS API locates the correct platform binary itself, so it is portable to
+// Windows, macOS and Linux alike, and it avoids spawning 106 processes.
+// MOBILESHOP_ESBUILD_API is an escape hatch for sandboxes without node_modules.
 function findEsbuildApi() {
   const candidates = [join(ROOT, 'node_modules/esbuild/lib/main.js')];
   if (process.env.MOBILESHOP_ESBUILD_API) candidates.push(process.env.MOBILESHOP_ESBUILD_API);
@@ -102,25 +102,38 @@ function findEsbuildApi() {
   return null;
 }
 
-const ESBUILD = findEsbuild();
-if (!ESBUILD) {
+const API_PATH = findEsbuildApi();
+if (!API_PATH) {
   // A missing toolchain must be LOUD. Skipping here would recreate the hole.
   console.log('\n  FAIL  esbuild is not installed — the build gate cannot run.');
   console.log('        Run `npm install` so this suite can compile the app.');
   console.log('\nRESULT: 0 passed, 1 failed');
   process.exit(1);
 }
-console.log(`\nusing esbuild: ${relative(ROOT, ESBUILD) || ESBUILD}\n`);
 
-function esbuild(args) {
-  try {
-    execFileSync(ESBUILD, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
-    return { ok: true, err: '' };
-  } catch (e) {
-    const out = `${e.stdout || ''}${e.stderr || ''}`.trim();
-    return { ok: false, err: out };
-  }
+let esb;
+try {
+  esb = await import(pathToFileURL(API_PATH).href);
+} catch (e) {
+  console.log(`\n  FAIL  esbuild could not be loaded — the build gate cannot run.`);
+  console.log(`        ${String(e.message || e).slice(0, 200)}`);
+  console.log('\nRESULT: 0 passed, 1 failed');
+  process.exit(1);
 }
+
+// Prove the toolchain actually WORKS before trusting any result it produces.
+// Without this, a broken install reports itself as broken source code.
+try {
+  await esb.transform('const x: number = 1;', { loader: 'ts' });
+} catch (e) {
+  console.log('\n  FAIL  esbuild is installed but cannot run — the build gate cannot run.');
+  console.log(`        ${String(e.message || e).split('\n')[0].slice(0, 200)}`);
+  console.log('        Try: npm rebuild esbuild   (or delete node_modules and npm install)');
+  console.log('\nRESULT: 0 passed, 1 failed');
+  process.exit(1);
+}
+
+console.log(`\nusing esbuild ${esb.version} via ${relative(ROOT, API_PATH) || API_PATH}\n`);
 
 /** First meaningful line of an esbuild diagnostic, for a readable failure. */
 const firstError = s =>
@@ -143,12 +156,32 @@ console.log(`[1] Every source file under src/ parses (${files.length} files)`);
 {
   const broken = [];
   for (const f of files) {
-    const r = esbuild([relative(ROOT, f), '--outfile=/dev/null', '--log-limit=1']);
-    if (!r.ok) broken.push(`${relative(ROOT, f)}: ${firstError(r.err)}`);
+    const rel = relative(ROOT, f).replace(/\\/g, '/');
+    try {
+      await esb.transform(readFileSync(f, 'utf-8'), {
+        loader: f.endsWith('.tsx') ? 'tsx' : 'ts',
+        sourcefile: rel,
+      });
+    } catch (e) {
+      const msg = (e.errors || [])
+        .map(x => `${x.text}${x.location ? ` (line ${x.location.line})` : ''}`)
+        .join('; ') || String(e.message || e).split('\n')[0];
+      broken.push(`${rel}: ${msg.slice(0, 120)}`);
+    }
+  }
+
+  // Report EVERY broken file, not a truncated sample. The first version printed
+  // only `broken.slice(0, 4)`, so a toolchain fault that failed all 106 files
+  // looked like four unrelated database files were corrupt — it hid both the
+  // scale of the problem and its real cause.
+  if (broken.length) {
+    console.log(`        ${broken.length} of ${files.length} file(s) failed to parse:`);
+    for (const b of broken.slice(0, 10)) console.log(`          - ${b}`);
+    if (broken.length > 10) console.log(`          ... and ${broken.length - 10} more`);
   }
   t('every .ts/.tsx file compiles',
     broken.length === 0,
-    broken.slice(0, 4).join(' | '));
+    broken.length ? `${broken.length} file(s) — listed above` : '');
 }
 
 // ---------------------------------------------------------------- 2
@@ -159,11 +192,8 @@ console.log('\n[2] The real entry points bundle, the way electron-forge builds t
   // does not exist still "bundles". A deliberately broken local import was not
   // caught. Only BARE specifiers (real npm packages) may be externalised, so
   // that every one of OUR OWN files must genuinely resolve.
-  const apiPath = findEsbuildApi();
-  if (!apiPath) {
-    t('esbuild JS API available for bundle checks', false, 'esbuild/lib/main.js not found');
-  } else {
-    const { build } = await import(pathToFileURL(apiPath).href);
+  {
+    const { build } = esb;
 
     /** Externalise npm packages only; our own files must resolve for real. */
     const externalBarePackages = {

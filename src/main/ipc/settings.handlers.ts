@@ -237,18 +237,45 @@ export function registerSettingsHandlers() {
     // Get all user tables
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as any[];
 
-    // Delete from all tables except system ones (disabling FK for cross-ref safety)
-    const tx = db.transaction(() => {
-      db.exec('PRAGMA foreign_keys = OFF');
-      for (const t of tables) {
-        if (!systemTables.includes(t.name)) {
-          db.exec(`DELETE FROM "${t.name}"`);
+    // Foreign keys are switched off OUTSIDE the transaction, and this matters.
+    //
+    // `PRAGMA foreign_keys` is a NO-OP while a transaction is open — SQLite
+    // silently ignores it and returns no error. The previous version issued it
+    // as the first statement INSIDE `db.transaction(...)`, so enforcement
+    // stayed ON for the whole wipe.
+    //
+    // The tables are then deleted in alphabetical order, which puts `customers`
+    // before `sales`: removing a customer while a sale still references it
+    // violates the constraint, the statement throws, the transaction rolls
+    // back, and NOTHING is deleted. The screen showed
+    // "فشل تصفير قاعدة البيانات" and the database was untouched. Measured
+    // against the real schema: the reset threw SQLITE_CONSTRAINT_FOREIGNKEY and
+    // the seeded sale was still present afterwards.
+    //
+    // Ordering the deletes child-first would be fragile — it would have to be
+    // re-derived by hand every time a table is added. Turning enforcement off
+    // for the duration is what the operation actually means: every row is
+    // going, so there is no relationship left to protect.
+    const fkWasOn = db.pragma('foreign_keys', { simple: true }) === 1;
+    db.pragma('foreign_keys = OFF');
+    try {
+      // Still one transaction: a failure part-way must not leave the shop with
+      // half its history deleted.
+      db.transaction(() => {
+        for (const t of tables) {
+          if (!systemTables.includes(t.name)) {
+            db.exec(`DELETE FROM "${t.name}"`);
+          }
         }
-      }
-      db.exec('PRAGMA foreign_keys = ON');
-    });
+      })();
+    } catch (err: any) {
+      return { success: false, message: `تعذّر تصفير قاعدة البيانات: ${err?.message || err}` };
+    } finally {
+      // Restore enforcement whatever happened. Leaving it off would let every
+      // later screen write orphaned rows into a database that looks healthy.
+      if (fkWasOn) db.pragma('foreign_keys = ON');
+    }
 
-    tx();
     return { success: true, message: 'تم تصفير قاعدة البيانات بنجاح' };
   });
 }

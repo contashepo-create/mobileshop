@@ -9,6 +9,7 @@ import {
   VERIFIER_SECRET, verifyCode, signCode, daysRemaining, expiryToDate, dateToExpiry,
 } from '../security/licenseCrypto';
 import { isImplausiblyFuture, businessToday } from '../../shared/businessDate';
+import { readTrialAnchor, writeTrialAnchor, healTrialAnchor } from '../security/trialAnchor';
 // One derivation of the device identity, shared with password recovery.
 import { getDeviceId } from '../security/deviceId';
 export { getDeviceId };
@@ -136,8 +137,35 @@ export function registerLicenseHandlers() {
 
       if (!fs.existsSync(trialPath)) {
         // trial.dat missing — was it deleted after being used?
-        if (fs.existsSync(lastAccessPath)) {
-          // App ran before but trial.dat is gone → trial was deleted to restart
+        //
+        // Two independent witnesses, because they live in different places.
+        // `lastaccess.dat` sits beside trial.dat in userData, so deleting that
+        // ONE folder used to erase the evidence and the thing it testified
+        // about together, handing out an unlimited supply of fresh trials.
+        // The anchor is written outside the application's folder entirely.
+        const anchorStart = readTrialAnchor(deviceId);
+        if (fs.existsSync(lastAccessPath) || anchorStart) {
+          // If the anchor survived, restore the ORIGINAL start date rather than
+          // simply refusing: a shop whose folder was cleared by an over-eager
+          // "cleanup" tool keeps whatever days it had genuinely left.
+          if (anchorStart) {
+            const trialHash = crypto.createHash('sha256')
+              .update(deviceId + anchorStart + SECRET_KEY + 'TRIAL')
+              .digest('hex');
+            try {
+              fs.writeFileSync(trialPath, encrypt({ deviceId, startDate: anchorStart, hash: trialHash }), 'utf-8');
+              fs.writeFileSync(lastAccessPath, new Date().toISOString(), 'utf-8');
+            } catch { /* read-only fs — fall through to the refusal below */ }
+            const usedDays = Math.floor((Date.now() - new Date(anchorStart).getTime()) / 86_400_000);
+            const left = TRIAL_DAYS - usedDays;
+            if (left > 0) {
+              healTrialAnchor(deviceId, anchorStart);
+              return {
+                status: 'trial', deviceId, remainingDays: left,
+                message: `فترة تجريبية - متبقي ${left} يوم`,
+              };
+            }
+          }
           return {
             status: 'trial_expired',
             deviceId,
@@ -152,6 +180,9 @@ export function registerLicenseHandlers() {
         const trial = { deviceId, startDate: now, hash: trialHash };
         fs.writeFileSync(trialPath, encrypt(trial), 'utf-8');
         fs.writeFileSync(lastAccessPath, now, 'utf-8');
+        // Plant the evidence outside userData so this cannot be replayed by
+        // deleting the application folder.
+        writeTrialAnchor(deviceId, now);
         return {
           status: 'trial',
           deviceId,
@@ -196,6 +227,9 @@ export function registerLicenseHandlers() {
         }
       }
       fs.writeFileSync(lastAccessPath, now.toISOString(), 'utf-8');
+      // Re-plant any anchor copy that has gone missing, so removing two of
+      // three achieves nothing beyond the next start-up.
+      healTrialAnchor(deviceId, trial.startDate);
 
       // Calculate remaining trial days
       const elapsedTrialDays = Math.floor((now.getTime() - trialStart.getTime()) / (1000 * 60 * 60 * 24));

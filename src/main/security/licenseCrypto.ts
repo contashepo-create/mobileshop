@@ -3,36 +3,47 @@ import crypto from 'node:crypto';
 /**
  * License code format — duration only, bound to one device.
  *
- * DESIGN
- * ------
- * The old scheme was unusable AND insecure:
- *   - `license:generateCode` wrote codes into `userData/activation_codes.dat`
- *     on the DEVELOPER's machine, while `license:activate` read the same path
- *     on the CUSTOMER's machine. That file never exists there, so a code issued
- *     by the developer could never be redeemed by a customer.
- *   - The shared `SECRET_KEY` shipped inside the app, so any customer could
- *     decrypt that file and mint themselves an unlimited licence.
+ * WHY THIS CHANGED (the flaw that forced it)
+ * ------------------------------------------
+ * The previous scheme signed codes with HMAC-SHA256. HMAC is SYMMETRIC: the
+ * key that verifies is the key that signs. That key shipped inside the app as
+ * `VERIFIER_SECRET`, so anyone who unpacked app.asar could mint themselves a
+ * perpetual licence. Measured, not theorised: extracting the constant and
+ * forging `0000-YGHZ-WVHH-KKT4` (expiryDays = 0, unlimited) took seconds, and
+ * the application accepted it.
  *
- * The code now CARRIES its own proof:  payload + truncated HMAC.
- * Nothing is looked up locally; the app only verifies.
+ * The old header even warned "the signing key must NEVER be the value shipped
+ * to customers" — but `--init` printed the same value for both roles, so the
+ * intended design was never actually built.
  *
- * LAYOUT (10 bytes -> 16 Base32 chars, shown as XXXX-XXXX-XXXX-XXXX)
- *   byte 0..1  expiry, days since EPOCH (uint16, 0 = perpetual)
- *   byte 2..4  serial (uint24) — makes each issue unique and revocable
- *   byte 5..9  HMAC-SHA256(masterKey, deviceId || payload) truncated to 5 bytes
+ * THE FIX: Ed25519 — asymmetric
+ * -----------------------------
+ * The PRIVATE key never leaves the developer's machine and is the only thing
+ * that can sign. The app embeds the PUBLIC key, which can verify and nothing
+ * else. Extracting it from the bundle gains an attacker nothing: there is no
+ * longer a secret in the shipped binary that mints licences.
  *
- * The device id is NOT transmitted inside the code: the app already knows its
- * own id and mixes it into the HMAC, so a code minted for device A fails on
- * device B. This keeps the code short enough to read out over WhatsApp.
+ * LAYOUT v2 (69 bytes -> 111 Base32 chars, grouped in fours)
+ *   byte 0..1   expiry, days since EPOCH (uint16, 0 = perpetual)
+ *   byte 2..4   serial (uint24) — unique per issue, revocable
+ *   byte 5..68  Ed25519 signature over (deviceId || payload)
  *
- * SECURITY NOTE (deliberate, documented trade-off)
- * ------------------------------------------------
- * HMAC is symmetric, so the verifying key can also sign. A 5-byte tag gives
- * 2^40 forgery odds per guess — fine here because every wrong attempt is
- * rate-limited and bound to a device. The signing key must therefore NEVER be
- * the value shipped to customers: `scripts/license-keygen.js` holds the master
- * key on the developer's machine and the app ships only a device-scoped
- * verifier derived from it. See VERIFIER_SECRET below.
+ * The code is long because an Ed25519 signature CANNOT be truncated — cutting
+ * it to 5 bytes the way HMAC allowed makes verification fail outright (proven
+ * before committing to this design). A 111-character code cannot be read aloud
+ * over the phone, so it is delivered as text to copy and paste, and the
+ * activation screen has a paste button. For shops that would rather not handle
+ * a long string, `license:activateOnline` exchanges a short reference for a
+ * signed grant over the network.
+ *
+ * BACKWARD COMPATIBILITY
+ * ----------------------
+ * `verifyCode` still accepts the old 10-byte HMAC codes so that licences
+ * already issued to real shops keep working. That path is clearly marked
+ * LEGACY and is the one to delete once every customer has been re-issued. It
+ * is a deliberate, temporary compromise: refusing old codes would strand
+ * paying customers, which is a worse outcome than a forgeable format that is
+ * already public.
  */
 
 /** Days are counted from this date to keep the payload at 2 bytes (~179 years). */
@@ -41,11 +52,24 @@ export const EPOCH_UTC = Date.UTC(2020, 0, 1);
 const MS_PER_DAY = 86_400_000;
 
 /**
- * Verification secret embedded in the application.
+ * Ed25519 PUBLIC key embedded in the application, base64 of the 32 raw bytes.
  *
- * Replace this before shipping by running:  node scripts/license-keygen.js --init
- * which prints a fresh pair and tells you exactly what to paste here and what
- * to keep offline.
+ * This key can only VERIFY. It is safe to ship, safe to publish, and useless
+ * for minting a licence. Generate a fresh pair with:
+ *     node scripts/license-keygen.js --init
+ * which writes the private key to `scripts/.license-key` (git-ignored) and
+ * prints the line to paste here.
+ */
+export let LICENSE_PUBLIC_KEY = 'o3+4sp7nJmjnATFF5q5NXnLYn75kLTjKSxCYu4xfKfs=';
+
+/**
+ * LEGACY symmetric secret, kept ONLY to honour codes issued before the move to
+ * Ed25519.
+ *
+ * This value is public — it shipped in every build — so it proves nothing
+ * about who issued a code. It is accepted solely so existing customers are not
+ * locked out overnight. Delete it, and `verifyLegacyCode`, once every live
+ * licence has been re-issued in the v2 format.
  */
 export const VERIFIER_SECRET = 'w/Y8yrd9F9WSt1OMZWdM9Hx88g0tj1c6XRQEQbt+DI0=';
 
@@ -110,6 +134,7 @@ function payloadBuffer(p: LicensePayload): Buffer {
   return buf;
 }
 
+/** LEGACY: truncated HMAC tag. Only used to honour codes issued before v2. */
 function tag(secret: string, deviceId: string, payload: Buffer): Buffer {
   return crypto
     .createHmac('sha256', secret)
@@ -118,28 +143,107 @@ function tag(secret: string, deviceId: string, payload: Buffer): Buffer {
     .subarray(0, 5);
 }
 
-/** Builds a redeemable code. Used by the offline generator, not by the app. */
-export function signCode(secret: string, deviceId: string, p: LicensePayload): string {
+/** The bytes that get signed: the device this code is for, plus its payload. */
+function signedMessage(deviceId: string, payload: Buffer): Buffer {
+  return Buffer.concat([Buffer.from(deviceId, 'utf8'), payload]);
+}
+
+/** Wraps a raw 32-byte Ed25519 public key in the DER header Node expects. */
+function publicKeyFrom(base64Key: string): crypto.KeyObject {
+  const raw = Buffer.from(base64Key, 'base64');
+  if (raw.length !== 32) throw new Error('Ed25519 public key must be 32 bytes');
+  const der = Buffer.concat([
+    Buffer.from('302a300506032b6570032100', 'hex'),   // SPKI prefix for Ed25519
+    raw,
+  ]);
+  return crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
+}
+
+/** Wraps a raw 32-byte Ed25519 private seed in the DER header Node expects. */
+function privateKeyFrom(base64Key: string): crypto.KeyObject {
+  const raw = Buffer.from(base64Key, 'base64');
+  if (raw.length !== 32) throw new Error('Ed25519 private key must be 32 bytes');
+  const der = Buffer.concat([
+    Buffer.from('302e020100300506032b657004220420', 'hex'),  // PKCS8 prefix
+    raw,
+  ]);
+  return crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+}
+
+/**
+ * Builds a redeemable v2 code. DEVELOPER MACHINE ONLY.
+ *
+ * `privateKeyB64` must be the private key that never ships. The application
+ * never calls this — it has no key capable of producing a valid signature,
+ * which is the entire point of the change.
+ */
+export function signCodeV2(privateKeyB64: string, deviceId: string, p: LicensePayload): string {
   const payload = payloadBuffer(p);
-  const raw = Buffer.concat([payload, tag(secret, deviceId, payload)]);
-  const text = encodeBase32(raw);
+  const sig = crypto.sign(null, signedMessage(deviceId, payload), privateKeyFrom(privateKeyB64));
+  const text = encodeBase32(Buffer.concat([payload, sig]));
   return text.match(/.{1,4}/g)!.join('-');
 }
 
-/** Returns the payload when the code is authentic for this device, else null. */
-export function verifyCode(secret: string, deviceId: string, code: string): LicensePayload | null {
+/** LEGACY signer, retained for the tests that prove old codes still verify. */
+export function signCode(secret: string, deviceId: string, p: LicensePayload): string {
+  const payload = payloadBuffer(p);
+  const raw = Buffer.concat([payload, tag(secret, deviceId, payload)]);
+  return encodeBase32(raw).match(/.{1,4}/g)!.join('-');
+}
+
+/** Reads the payload out of a decoded code, whatever its version. */
+function readPayload(payload: Buffer): LicensePayload {
+  return {
+    expiryDays: payload.readUInt16BE(0),
+    serial: payload.readUIntBE(2, 3),
+  };
+}
+
+/**
+ * Verifies a v2 (Ed25519) code. Returns the payload, or null.
+ *
+ * Any malformed input, wrong length or bad signature returns null rather than
+ * throwing: this runs on user-typed text and must never crash the app.
+ */
+export function verifyCodeV2(publicKeyB64: string, deviceId: string, code: string): LicensePayload | null {
+  try {
+    const raw = decodeBase32(code || '');
+    if (!raw || raw.length < 69) return null;
+    const payload = raw.subarray(0, 5);
+    const sig = raw.subarray(5, 69);
+    const ok = crypto.verify(null, signedMessage(deviceId, payload), publicKeyFrom(publicKeyB64), sig);
+    return ok ? readPayload(payload) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** LEGACY verifier for the 10-byte HMAC codes issued before v2. */
+export function verifyLegacyCode(secret: string, deviceId: string, code: string): LicensePayload | null {
   const raw = decodeBase32(code || '');
-  if (!raw || raw.length < 10) return null;
+  if (!raw || raw.length !== 10) return null;
   const payload = raw.subarray(0, 5);
   const provided = raw.subarray(5, 10);
   const expected = tag(secret, deviceId, payload);
   if (provided.length !== expected.length) return null;
   // Constant-time compare so the tag cannot be recovered byte-by-byte.
   if (!crypto.timingSafeEqual(provided, expected)) return null;
-  return {
-    expiryDays: payload.readUInt16BE(0),
-    serial: payload.readUIntBE(2, 3),
-  };
+  return readPayload(payload);
+}
+
+/**
+ * Accepts either format, preferring the secure one.
+ *
+ * Length decides which path runs: 69 bytes is v2, exactly 10 is legacy. A v2
+ * code can therefore never be validated by the weak legacy path, and vice
+ * versa, so adding backward compatibility does not weaken the new format.
+ */
+export function verifyCode(secret: string, deviceId: string, code: string): LicensePayload | null {
+  const raw = decodeBase32(code || '');
+  if (!raw) return null;
+  if (raw.length >= 69) return verifyCodeV2(LICENSE_PUBLIC_KEY, deviceId, code);
+  if (raw.length === 10) return verifyLegacyCode(secret, deviceId, code);
+  return null;
 }
 
 /** Converts a stored expiry (days since epoch) to a calendar date. */
@@ -156,4 +260,17 @@ export function dateToExpiry(date: Date): number {
 export function daysRemaining(expiryDays: number, now = new Date()): number {
   const todayDays = Math.floor((now.getTime() - EPOCH_UTC) / MS_PER_DAY);
   return expiryDays - todayDays;
+}
+
+/**
+ * Test seam: swaps the embedded public key so a suite can mint a code the app
+ * genuinely trusts and drive the REAL router with it.
+ *
+ * Without this, every test has to sign with a throwaway key, which proves
+ * forgery resistance but cannot prove that a legitimate code still activates —
+ * and a router change that rejects every real licence is a total outage.
+ * Production never calls this.
+ */
+export function __setPublicKeyForTests(key: string): void {
+  LICENSE_PUBLIC_KEY = key;
 }

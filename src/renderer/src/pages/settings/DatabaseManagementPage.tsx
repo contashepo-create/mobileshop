@@ -323,9 +323,24 @@ export function DatabaseManagementPage() {
               <Cloud size={20} className="text-purple-600" />
               <h2 className="text-lg font-semibold text-slate-800 dark:text-white">النسخ السحابي</h2>
             </div>
-            <p className="text-sm text-slate-500 dark:text-slate-500 dark:text-slate-400 mb-4">
+            <p className="text-sm text-slate-500 dark:text-slate-500 dark:text-slate-400 mb-3">
               ارفع نسخة احتياطية من قاعدة البيانات إلى خدمة سحابية. يدعم Supabase، WebDAV، أو أي خادم مخصص.
             </p>
+
+            {/* This is a ONE-WAY upload, not synchronisation. Saying so plainly
+                because assuming otherwise loses data: an owner who believes two
+                machines are kept in step will work on both, and the next upload
+                silently overwrites whichever one uploaded last. */}
+            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 mb-4 text-xs text-amber-800 dark:text-amber-300">
+              <div className="font-bold mb-1">⚠️ هذه نسخة احتياطية باتجاه واحد — وليست مزامنة</div>
+              الرفع ينسخ قاعدتك إلى السحابة فقط. <span className="font-bold">لا يوجد تنزيل ولا دمج</span>،
+              ولا تتم مزامنة جهازين معاً.
+              <div className="mt-1">
+                لو عملت على جهازين، فكل جهاز له بياناته المنفصلة، وآخر رفع
+                <span className="font-bold"> يستبدل </span> ما قبله. للعمل من أكثر من جهاز
+                استخدم <span className="font-bold">قاعدة بيانات على مجلد شبكة</span> من تبويب «الشبكة».
+              </div>
+            </div>
 
             <div className="space-y-4">
               <Select label="نوع الخدمة السحابية" value={cloudType} onChange={(e) => setCloudType(e.target.value)}>

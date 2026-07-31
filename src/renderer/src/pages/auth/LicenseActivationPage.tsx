@@ -180,19 +180,41 @@ export function LicenseActivationPage() {
         {/* Step 3 — enter the code */}
         <Step number={3} title="أدخل كود التفعيل" />
         <div className="space-y-2">
-          <Input
-            label=""
+          {/* A v2 (Ed25519) code is ~138 characters — an Ed25519 signature
+              cannot be truncated the way the old HMAC tag was, so the code
+              carries all 64 signature bytes. It is far too long to read out
+              over the phone or to fit a centred single-line box, so it is a
+              textarea with a paste button. Short legacy codes still fit. */}
+          <textarea
             value={code}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
               setCode(e.target.value.toUpperCase());
               setError('');
             }}
-            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
-              if (e.key === 'Enter') void handleActivate();
+            onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+              // Enter submits; Shift+Enter is left alone so a pasted code that
+              // arrived with line breaks can still be edited.
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleActivate(); }
             }}
-            placeholder="XXXX-XXXX-XXXX-XXXX"
-            className="font-mono tracking-wider text-center"
+            rows={3}
+            dir="ltr"
+            placeholder="الصق كود التفعيل هنا"
+            className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white font-mono text-xs break-all resize-none"
           />
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const text = await navigator.clipboard.readText();
+                if (text) { setCode(text.trim().toUpperCase()); setError(''); }
+              } catch {
+                setError('تعذّر القراءة من الحافظة - الصق الكود يدوياً');
+              }
+            }}
+            className="w-full py-1.5 text-xs rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+          >
+            📋 لصق الكود من الحافظة
+          </button>
 
           {error && (
             <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-2.5 flex items-start gap-2">

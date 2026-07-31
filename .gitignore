@@ -20,6 +20,9 @@ __pycache__/
 *.pyc
 
 # Developer-only licensing material — must never be committed
+# Ed25519 PRIVATE licence key — the only thing that can mint a licence.
+# Committing it would undo the whole point of asymmetric signing.
+scripts/.license-key
 scripts/.license-secret
 scripts/issued-licenses.json
 

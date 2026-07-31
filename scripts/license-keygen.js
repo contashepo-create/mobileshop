@@ -27,7 +27,8 @@ const crypto = require('node:crypto');
 const EPOCH_UTC = Date.UTC(2020, 0, 1);
 const MS_PER_DAY = 86_400_000;
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-const SECRET_FILE = path.join(__dirname, '.license-secret');
+const SECRET_FILE = path.join(__dirname, '.license-secret');   // LEGACY (HMAC)
+const KEY_FILE = path.join(__dirname, '.license-key');         // Ed25519 private key
 const LEDGER_FILE = path.join(__dirname, 'issued-licenses.json');
 
 function encodeBase32(buf) {
@@ -41,22 +42,35 @@ function encodeBase32(buf) {
   return out;
 }
 
-function signCode(secret, deviceId, expiryDays, serial) {
+/**
+ * Signs a v2 code with the Ed25519 PRIVATE key.
+ *
+ * The key is wrapped in the PKCS8 DER header Node requires, so only the raw
+ * 32 bytes need storing.
+ */
+function signCodeV2(privateKeyB64, deviceId, expiryDays, serial) {
   const payload = Buffer.alloc(5);
   payload.writeUInt16BE(expiryDays & 0xffff, 0);
   payload.writeUIntBE(serial & 0xffffff, 2, 3);
-  const tag = crypto.createHmac('sha256', secret)
-    .update(Buffer.concat([Buffer.from(deviceId, 'utf8'), payload]))
-    .digest().subarray(0, 5);
-  return encodeBase32(Buffer.concat([payload, tag])).match(/.{1,4}/g).join('-');
+  const raw = Buffer.from(privateKeyB64, 'base64');
+  if (raw.length !== 32) {
+    console.error('Private key must be 32 raw bytes. Run --init to make one.');
+    process.exit(1);
+  }
+  const key = crypto.createPrivateKey({
+    key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), raw]),
+    format: 'der', type: 'pkcs8',
+  });
+  const sig = crypto.sign(null, Buffer.concat([Buffer.from(deviceId, 'utf8'), payload]), key);
+  return encodeBase32(Buffer.concat([payload, sig])).match(/.{1,4}/g).join('-');
 }
 
-function loadSecret() {
-  if (process.env.LICENSE_SECRET) return process.env.LICENSE_SECRET.trim();
-  if (fs.existsSync(SECRET_FILE)) return fs.readFileSync(SECRET_FILE, 'utf-8').trim();
-  console.error('No master secret found.\n' +
+function loadPrivateKey() {
+  if (process.env.LICENSE_PRIVATE_KEY) return process.env.LICENSE_PRIVATE_KEY.trim();
+  if (fs.existsSync(KEY_FILE)) return fs.readFileSync(KEY_FILE, 'utf-8').trim();
+  console.error('No private key found.\n' +
     '  Run:  node scripts/license-keygen.js --init\n' +
-    '  Or set the LICENSE_SECRET environment variable.');
+    '  Or set the LICENSE_PRIVATE_KEY environment variable.');
   process.exit(1);
 }
 
@@ -81,16 +95,26 @@ function record(ledger, entry) {
 
 // ---------------------------------------------------------------- --init
 if (process.argv.includes('--init')) {
-  const secret = crypto.randomBytes(32).toString('base64');
-  fs.writeFileSync(SECRET_FILE, secret, 'utf-8');
-  try { fs.chmodSync(SECRET_FILE, 0o600); } catch { /* windows */ }
-  console.log('\n=== MASTER SECRET GENERATED ===\n');
-  console.log('Saved to:', SECRET_FILE);
-  console.log('(this path is git-ignored — back it up in a password manager)\n');
+  // Ed25519, not a shared secret.
+  //
+  // The old --init printed ONE value to be used both for signing here and for
+  // verifying inside the app. That is what made every shipped build capable of
+  // minting its own perpetual licence. The private key below never leaves this
+  // machine; only the public key is pasted into the source.
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const pub = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
+  const prv = privateKey.export({ type: 'pkcs8', format: 'der' }).subarray(-32).toString('base64');
+
+  fs.writeFileSync(KEY_FILE, prv, 'utf-8');
+  try { fs.chmodSync(KEY_FILE, 0o600); } catch { /* windows */ }
+
+  console.log('\n=== Ed25519 LICENCE KEY PAIR GENERATED ===\n');
+  console.log('PRIVATE key saved to:', KEY_FILE);
+  console.log('(git-ignored — back it up in a password manager, it is the only');
+  console.log(' thing that can issue licences. Losing it means re-issuing all.)\n');
   console.log('Paste this line into src/main/security/licenseCrypto.ts:\n');
-  console.log(`export const VERIFIER_SECRET = '${secret}';\n`);
-  console.log('WARNING: the app can only verify codes signed with this exact');
-  console.log('secret. If you change it, previously issued codes stop working.\n');
+  console.log(`export const LICENSE_PUBLIC_KEY = '${pub}';\n`);
+  console.log('The public key is safe to ship: it can verify, never sign.\n');
   process.exit(0);
 }
 
@@ -134,9 +158,9 @@ if (until) {
 
 if (expiryDays > 0xffff) { console.error('Expiry too far in the future (max ~179 years).'); process.exit(1); }
 
-const secret = loadSecret();
+const privateKey = loadPrivateKey();
 const { serial, ledger } = nextSerial();
-const code = signCode(secret, device, expiryDays, serial);
+const code = signCodeV2(privateKey, device, expiryDays, serial);
 const expLabel = expiryDays === 0 ? 'غير محدود' : new Date(EPOCH_UTC + expiryDays * MS_PER_DAY).toISOString().slice(0, 10);
 
 record(ledger, {

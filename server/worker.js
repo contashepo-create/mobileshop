@@ -12,7 +12,7 @@
  * Required secrets (never commit these):
  *   npx wrangler secret put ADMIN_KEY      # your laptop / bot -> full access
  *   npx wrangler secret put CLIENT_KEY     # shipped in the app -> heartbeat only
- *   npx wrangler secret put LICENSE_SECRET # same value as the app's VERIFIER_SECRET
+ *   npx wrangler secret put LICENSE_PRIVATE_KEY # Ed25519 private key (base64, 32 bytes)
  *   npx wrangler secret put TG_BOT_TOKEN   # from @BotFather
  *   npx wrangler secret put TG_ADMIN_CHAT  # your numeric Telegram chat id
  */
@@ -46,14 +46,35 @@ async function hmac5(secret, deviceId, payload) {
   return new Uint8Array(sig).slice(0, 5);
 }
 
-async function signCode(secret, deviceId, expiryDays, serial) {
+/**
+ * Signs a v2 activation code with the Ed25519 PRIVATE key.
+ *
+ * `LICENSE_PRIVATE_KEY` is a Worker SECRET (base64 of the raw 32 bytes) and is
+ * the only thing in the system that can mint a licence. It replaces the old
+ * shared LICENSE_SECRET, which was also embedded in every shipped app and
+ * therefore let any customer forge a perpetual licence.
+ *
+ * Set it once with:
+ *   npx wrangler secret put LICENSE_PRIVATE_KEY
+ */
+async function signCode(privateKeyB64, deviceId, expiryDays, serial) {
   const payload = new Uint8Array(5);
   new DataView(payload.buffer).setUint16(0, expiryDays & 0xffff);
   payload[2] = (serial >> 16) & 0xff;
   payload[3] = (serial >> 8) & 0xff;
   payload[4] = serial & 0xff;
-  const tag = await hmac5(secret, deviceId, payload);
-  return encodeBase32(new Uint8Array([...payload, ...tag])).match(/.{1,4}/g).join('-');
+
+  const raw = Uint8Array.from(atob(String(privateKeyB64 || '')), c => c.charCodeAt(0));
+  if (raw.length !== 32) throw new Error('LICENSE_PRIVATE_KEY must be 32 raw bytes (base64)');
+  // Wrap the seed in the PKCS8 header WebCrypto expects for Ed25519.
+  const pkcs8 = new Uint8Array([
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
+    0x04, 0x22, 0x04, 0x20, ...raw,
+  ]);
+  const key = await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign']);
+  const msg = new Uint8Array([...new TextEncoder().encode(deviceId), ...payload]);
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, key, msg));
+  return encodeBase32(new Uint8Array([...payload, ...sig])).match(/.{1,4}/g).join('-');
 }
 
 const todayDays = () => Math.floor((Date.now() - EPOCH_UTC) / MS_PER_DAY);
@@ -308,7 +329,7 @@ async function handleIssue(request, env) {
   if (expiryDays > 0xffff) return json({ ok: false, error: 'duration too long' }, 400);
 
   const serial = await nextCloudSerial(env);
-  const code = await signCode(env.LICENSE_SECRET, deviceId, expiryDays, serial);
+  const code = await signCode(env.LICENSE_PRIVATE_KEY, deviceId, expiryDays, serial);
   const expiry = expiryDays === 0 ? 'غير محدود' : daysToDate(expiryDays);
 
   await env.DB.prepare(`
@@ -544,7 +565,7 @@ async function issueAndShow(env, messageId, deviceId, days) {
   if (expiryDays > 0xffff) return edit(env, messageId, 'المدة طويلة جداً.', backTo('main'));
 
   const serial = await nextCloudSerial(env);
-  const code = await signCode(env.LICENSE_SECRET, deviceId, expiryDays, serial);
+  const code = await signCode(env.LICENSE_PRIVATE_KEY, deviceId, expiryDays, serial);
   const expiry = expiryDays === 0 ? 'غير محدود' : daysToDate(expiryDays);
 
   await env.DB.prepare(`INSERT INTO licenses (serial, device_id, code, expiry_days, issued_at, issued_by, note)

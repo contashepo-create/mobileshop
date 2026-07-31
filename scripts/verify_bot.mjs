@@ -69,6 +69,11 @@ const buttons = msg => (msg?.body?.reply_markup?.inline_keyboard || []).flat();
 const dataOf = msg => buttons(msg).map(b => b.callback_data);
 
 // ---------------------------------------------------------------- load worker
+/** Throwaway signing key: the bot must be able to mint a real v2 code. */
+const TEST_PRIVATE_KEY = (await import('node:crypto'))
+  .generateKeyPairSync('ed25519').privateKey
+  .export({ type: 'pkcs8', format: 'der' }).subarray(-32).toString('base64');
+
 const src = readFileSync(join(ROOT, 'server/worker.js'), 'utf-8');
 const mod = await import(`data:text/javascript;base64,${Buffer.from(src).toString('base64')}`);
 const worker = mod.default;
@@ -77,7 +82,9 @@ const env = {
   DB: makeDB(),
   ADMIN_KEY: 'admin-key',
   CLIENT_KEY: 'client-key',
-  LICENSE_SECRET: 'test-secret',
+  // Ed25519 private key (base64 of 32 raw bytes). The worker now signs with
+  // asymmetric crypto, so a plain string secret would fail at importKey.
+  LICENSE_PRIVATE_KEY: TEST_PRIVATE_KEY,
   TG_BOT_TOKEN: 'token',
   TG_ADMIN_CHAT: '7232305465',
 };
@@ -132,8 +139,9 @@ console.log('\n[2] Guided flow: tap → paste id → pick duration → code');
   await tap('dur:365');
   const forward = sent.find(s => s.method === 'sendMessage' && /كود التفعيل الخاص بك/.test(s.body.text || ''));
   check('sends a ready-to-forward message', !!forward);
-  const code = (forward?.body?.text || '').match(/<code>([0-9A-Z-]{19})<\/code>/)?.[1];
-  check('code is 19 chars (XXXX-XXXX-XXXX-XXXX)', !!code, code || 'not found');
+  const code = (forward?.body?.text || '').match(/<code>([0-9A-Z-]{100,})<\/code>/)?.[1];
+  check('code is a full Ed25519 code (an Ed25519 signature cannot be truncated)',
+    !!code && code.replace(/-/g, '').length === 111, code ? `${code.length} chars` : 'not found');
   check('confirmation is shown in the panel', /تم إنشاء الكود/.test(lastOf('editMessageText')?.body?.text || ''));
 }
 

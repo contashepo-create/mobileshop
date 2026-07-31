@@ -26,7 +26,20 @@ import bcrypt from 'bcryptjs';
 
 const DEV_USERNAME = 'zerocold';
 
-/** bcrypt(cost 12) of the developer password. Never store the plaintext. */
+/**
+ * bcrypt(cost 12) of the developer password. Never store the plaintext.
+ *
+ * SECURITY: this hash SHIPS in every build, so its strength is entirely the
+ * strength of the password behind it. The original was six digits — a keyspace
+ * of one million, which bcrypt at cost 12 grinds through offline in minutes on
+ * an ordinary laptop. Rate limiting protects the LIVE dialog; it does nothing
+ * once the hash has been extracted from app.asar.
+ *
+ * Replace it with a long passphrase:
+ *     node scripts/dev-password.js "your new long passphrase"
+ * and paste the printed line here. Aim for four or more unrelated words; the
+ * generator refuses anything under twelve characters or purely numeric.
+ */
 const DEV_PASSWORD_HASH = '$2a$12$roA4Cm.0DuiKYwPtxUNfSuX/Ao1ZKH2ofhjtHX3qJw83WjMBmoTK2';
 
 const TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutes

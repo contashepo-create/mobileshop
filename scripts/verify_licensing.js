@@ -170,9 +170,15 @@ console.log('\n[8] The generator and the app agree');
   const gen = fs.readFileSync(path.join(__dirname, 'license-keygen.js'), 'utf-8');
   check('generator uses the same epoch', gen.includes('Date.UTC(2020, 0, 1)'));
   check('generator uses the same alphabet', gen.includes(ALPHABET));
-  check('generator truncates the HMAC to 5 bytes', /subarray\(0, 5\)/.test(gen));
-  check('secret file is git-ignored',
-    fs.readFileSync(path.join(__dirname, '../.gitignore'), 'utf-8').includes('scripts/.license-secret'));
+  // The generator no longer uses HMAC at all: signing moved to Ed25519 so the
+  // shipped app cannot mint its own licences. The forgery-resistance checks
+  // live in verify_license_ed25519.mjs, which drives the REAL module rather
+  // than a local reimplementation — this file's copy of the crypto is why the
+  // original flaw went unnoticed for so long.
+  check('generator signs with Ed25519, not a shared secret',
+    /signCodeV2/.test(gen) && /createPrivateKey/.test(gen) && !/createHmac/.test(gen));
+  check('the private key file is git-ignored',
+    fs.readFileSync(path.join(__dirname, '../.gitignore'), 'utf-8').includes('scripts/.license-key'));
 }
 
 console.log('\n[9] Contact links are well-formed');

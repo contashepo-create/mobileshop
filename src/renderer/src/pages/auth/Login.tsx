@@ -386,7 +386,8 @@ export function Login() {
             {forgotMode === 'self' && selfAvailable && (
               <div className="p-4 space-y-3">
                 <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-2.5 text-xs text-blue-700 dark:text-blue-300">
-                  سيصل رمز مكوّن من ٦ أرقام إلى حساب <span className="font-medium">تليجرام الخاص بالمالك</span>.
+                  سيصل رمز مكوّن من ٦ أرقام إلى <span className="font-medium">بوت تليجرام الخاص بالمحل</span>
+                  {' '}(المضبوط في الإعدادات ← النسخ الاحتياطي).
                   <div className="mt-1">لا تعطِ هذا الرمز لأي شخص مهما كان.</div>
                 </div>
 
@@ -442,6 +443,12 @@ export function Login() {
               <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-2.5 text-xs text-orange-700 dark:text-orange-300">
                 استعادة كلمة المرور تتطلب تدخل المطور. تواصل مع الدعم الفني وسيقوم هو بإدخال بياناته.
                 <div className="mt-1 font-medium">لا تشارك بيانات دخولك مع أي شخص.</div>
+                {!selfAvailable && (
+                  <div className="mt-2 pt-2 border-t border-orange-200 dark:border-orange-800">
+                    💡 لتستعيد كلمة المرور بنفسك مستقبلاً دون انتظار الدعم، اضبط بوت تليجرام الخاص
+                    بمحلك من: الإعدادات ← النسخ الاحتياطي.
+                  </div>
+                )}
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">اسم مستخدم المطور</label>

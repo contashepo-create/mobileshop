@@ -3,13 +3,7 @@ import bcrypt from 'bcryptjs';
 import { getDb } from '../database/connection';
 import { verifyDevToken } from '../security/devAuth';
 import { destroyAllSessionsForUser } from '../security/session';
-import {
-  isRecoveryConfigured, requestResetCode, verifyResetCode, verifyGrant, notifyResetDone,
-} from '../security/passwordRecovery';
-// Imported from the small shared module, NOT from license.handlers: that would
-// drag Electron's app, the licence store and the remote client into every test
-// that merely creates a user.
-import { getDeviceId } from '../security/deviceId';
+import { requestResetCode, verifyResetCode, notifyResetDone } from '../security/passwordRecovery';
 
 
 /**
@@ -303,15 +297,39 @@ export function registerUsersHandlers() {
     ).all(ADMIN_ROLE_ID);
   });
 
-  /** True when this build can reach the recovery server at all. */
-  ipcMain.handle('recovery:isAvailable', async () => ({ available: isRecoveryConfigured() }));
+  /**
+   * Reads the SHOP's own Telegram bot from settings.
+   *
+   * This is the CUSTOMER's bot, configured in Settings -> Backup. The
+   * developer's bot lives in the Cloudflare Worker's secrets and is never
+   * consulted here: a customer's password reset must not travel through the
+   * developer's phone, which is exactly the support call this feature removes.
+   */
+  const shopTelegram = (): { botToken: string; chatId: string } | null => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT Key, Value FROM settings WHERE Key IN ('telegram_bot_token','telegram_chat_id')",
+    ).all() as any[];
+    const map: Record<string, string> = {};
+    for (const r of rows) map[r.Key] = r.Value;
+    if (!map.telegram_bot_token || !map.telegram_chat_id) return null;
+    return { botToken: map.telegram_bot_token, chatId: map.telegram_chat_id };
+  };
+
+  const shopName = (): string => {
+    const row = getDb().prepare("SELECT Value FROM settings WHERE Key = 'company_name'").get() as any;
+    return row?.Value || '';
+  };
+
+  /** True when the shop has configured a bot that can carry the code. */
+  ipcMain.handle('recovery:isAvailable', async () => ({ available: shopTelegram() !== null }));
 
   /**
-   * Step 1: ask the server to send a six-digit code to the OWNER'S Telegram.
+   * Step 1: send a six-digit code to the SHOP OWNER's own Telegram.
    *
-   * The code never travels back to this machine in the response, so calling
-   * this repeatedly reveals nothing. The only defence that matters is that the
-   * message lands on the owner's phone.
+   * The code is generated and delivered entirely on this machine. It is never
+   * returned to the renderer, so pressing this button at the keyboard reveals
+   * nothing — the only copy arrives on the owner's phone.
    */
   ipcMain.handle('recovery:requestCode', async (_event, data: { userId?: unknown }) => {
     const db = getDb();
@@ -323,24 +341,22 @@ export function registerUsersHandlers() {
       'SELECT UserID, Username, RoleID, IsActive FROM users WHERE UserID = ?',
     ).get(userId) as any;
 
-    // Refuse anything that is not an active administrator, and say so plainly.
-    // There is no enumeration risk here: `users:listRecoverable` already told
-    // the caller which accounts exist, so a vague message would only confuse
-    // the owner without protecting anything.
+    // Administrators only. A cashier who forgets their password is reset by
+    // their administrator from the users screen, which already works and needs
+    // no new trust. There is no enumeration risk in saying so plainly:
+    // `users:listRecoverable` already told the caller which accounts exist.
     if (!user || !user.IsActive || user.RoleID !== ADMIN_ROLE_ID) {
       return { success: false, message: 'هذه الطريقة متاحة لحساب المدير فقط' };
     }
 
-    return requestResetCode(getDeviceId(), user.UserID, String(user.Username || ''));
+    return requestResetCode(shopTelegram(), user.UserID, String(user.Username || ''), shopName());
   });
 
   /**
-   * Step 2: exchange the typed code for a signed grant, verify that signature
-   * locally, and only then write the new password.
+   * Step 2: check the typed code, then write the new password.
    *
-   * The grant is re-checked HERE with the embedded secret. A patched renderer
-   * that invents `{ success: true }`, or a tampered network reply, gets no
-   * further than this check, because neither can produce the HMAC.
+   * Verification happens in the MAIN process against state the renderer cannot
+   * see or reach, so a patched screen cannot invent a success.
    */
   ipcMain.handle('recovery:resetPassword', async (
     _event,
@@ -369,15 +385,11 @@ export function registerUsersHandlers() {
       return { success: false, message: 'هذه الطريقة متاحة لحساب المدير فقط' };
     }
 
-    const deviceId = getDeviceId();
-    const verified = await verifyResetCode(deviceId, user.UserID, code);
-    if (!verified.success) return { success: false, message: verified.message };
-
-    // The server said yes; now prove it cryptographically before believing it.
-    if (!verifyGrant(verified.grant, deviceId, user.UserID, verified.issuedAt)) {
+    const verified = verifyResetCode(user.UserID, code);
+    if (!verified.success) {
       recordSecurityEvent(db, 'password_reset_rejected', user.UserID, user.Username,
-        'رفض تصريح غير صالح من الخادم');
-      return { success: false, message: 'تعذّر التحقق من التصريح - حاول مرة أخرى' };
+        `محاولة فاشلة: ${verified.message}`);
+      return { success: false, message: verified.message };
     }
 
     const hash = bcrypt.hashSync(newPassword as string, 10);
@@ -388,10 +400,10 @@ export function registerUsersHandlers() {
 
     // Durable local record first — it must exist even if Telegram is down.
     recordSecurityEvent(db, 'password_reset_telegram', user.UserID, user.Username,
-      `إعادة تعيين كلمة مرور المدير عبر رمز تليجرام (الجهاز ${deviceId.slice(0, 8)}…)`);
+      'إعادة تعيين كلمة مرور المدير عبر رمز تليجرام');
 
     // Then tell the owner out-of-band, so an unauthorised reset is noticed.
-    await notifyResetDone(deviceId, String(user.Username || ''));
+    await notifyResetDone(shopTelegram(), String(user.Username || ''), shopName());
 
     return { success: true, message: 'تم تغيير كلمة المرور بنجاح - سجّل الدخول الآن' };
   });

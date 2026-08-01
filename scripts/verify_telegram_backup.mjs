@@ -59,7 +59,11 @@ console.log('='.repeat(72));
 console.log('OFF-SITE BACKUP TO TELEGRAM');
 console.log('='.repeat(72));
 
-const REAL_TOKEN = '8877684899:AAHTZfkM_MPlD2ZiR1CJ8qiKRXzFrHnRmdo';
+// A SYNTHETIC token. It is shaped exactly like a Telegram one so it passes
+// looksLikeBotToken() and exercises the redaction regex, but it belongs to no
+// bot. A working credential must never sit in the repository: every network
+// call in this suite is stubbed, so nothing here needs a real one.
+const FAKE_TOKEN = '1234567890:AAFakeTokenForTestsOnly_NotARealBot00';
 
 // ---------------------------------------------------------------- 1
 console.log('\n[1] The bot token cannot leak through the PUBLIC settings channels');
@@ -90,7 +94,7 @@ console.log('\n[1] The bot token cannot leak through the PUBLIC settings channel
   db.exec('CREATE TABLE settings (Key TEXT PRIMARY KEY, Value TEXT)');
   const ins = db.prepare('INSERT INTO settings (Key, Value) VALUES (?, ?)');
   ins.run('company_name', 'محل محمد');
-  ins.run('telegram_bot_token', REAL_TOKEN);
+  ins.run('telegram_bot_token', FAKE_TOKEN);
   ins.run('telegram_chat_id', '7232305465');
   ins.run('cloud_api_key', 'secret-cloud-key');
 
@@ -100,7 +104,7 @@ console.log('\n[1] The bot token cannot leak through the PUBLIC settings channel
       AND Key NOT LIKE 'telegram_%' AND Key NOT IN ('db_path')
   `).all();
   const dump = JSON.stringify(visible);
-  t('a real token is absent from what getAll returns', !dump.includes(REAL_TOKEN), dump.slice(0, 80));
+  t('a real token is absent from what getAll returns', !dump.includes(FAKE_TOKEN), dump.slice(0, 80));
   t('the cloud key is absent too', !dump.includes('secret-cloud-key'));
   t('ordinary settings still come through', dump.includes('company_name'));
 }
@@ -132,12 +136,12 @@ console.log('\n[3] A token never reaches a message, a log or the renderer');
   const tg = await import('../src/main/backup/telegramBackup.ts');
 
   t('redactToken removes a bare token',
-    !tg.redactToken(`failed with ${REAL_TOKEN}`, REAL_TOKEN).includes(REAL_TOKEN));
+    !tg.redactToken(`failed with ${FAKE_TOKEN}`, FAKE_TOKEN).includes(FAKE_TOKEN));
   t('redactToken removes a token embedded in an api.telegram.org URL',
-    !tg.redactToken(`https://api.telegram.org/bot${REAL_TOKEN}/sendDocument 404`, '')
-      .includes(REAL_TOKEN));
+    !tg.redactToken(`https://api.telegram.org/bot${FAKE_TOKEN}/sendDocument 404`, '')
+      .includes(FAKE_TOKEN));
   t('redaction leaves the useful part of the message',
-    tg.redactToken(`failed with ${REAL_TOKEN}`, REAL_TOKEN).includes('failed with'));
+    tg.redactToken(`failed with ${FAKE_TOKEN}`, FAKE_TOKEN).includes('failed with'));
 
   // Redaction runs inside CATCH blocks, on values that are not guaranteed to
   // be strings: `String(err?.message || err)` yields a string, but callers
@@ -149,15 +153,15 @@ console.log('\n[3] A token never reaches a message, a log or the renderer');
   // object all throw unguarded, and all return a string guarded.
   for (const [label, value] of [
     ['undefined', undefined], ['null', null], ['a number', 42],
-    ['an Error object', new Error(`boom ${REAL_TOKEN}`)], ['a plain object', {}],
+    ['an Error object', new Error(`boom ${FAKE_TOKEN}`)], ['a plain object', {}],
   ]) {
     let out, threw = null;
-    try { out = tg.redactToken(value, REAL_TOKEN); }
+    try { out = tg.redactToken(value, FAKE_TOKEN); }
     catch (err) { threw = `${err?.constructor?.name}: ${err?.message}`; }
     t(`redactToken survives ${label} instead of throwing`,
       threw === null && typeof out === 'string', threw ?? `returned ${typeof out}`);
     if (threw === null) {
-      t(`  ...and still hides the token in ${label}`, !String(out).includes(REAL_TOKEN));
+      t(`  ...and still hides the token in ${label}`, !String(out).includes(FAKE_TOKEN));
     }
   }
 
@@ -168,7 +172,7 @@ console.log('\n[3] A token never reaches a message, a log or the renderer');
   // owner is shown the literal word "undefined" in the middle of an Arabic
   // sentence instead of "سبب غير معروف".
   for (const [label, value] of [['undefined', undefined], ['null', null]]) {
-    const out = tg.redactToken(value, REAL_TOKEN);
+    const out = tg.redactToken(value, FAKE_TOKEN);
     t(`${label} redacts to an EMPTY string so the Arabic fallback fires`,
       out === '', JSON.stringify(out));
     t(`  ...so the user never sees the word "${label}" in the message`,
@@ -198,16 +202,16 @@ console.log('\n[3] A token never reaches a message, a log or the renderer');
         ? { json: async () => ({ ok: true, result: { username: 'shopbot' } }) }
         : { json: async () => ({
             ok: false,
-            description: `Internal Server Error at https://api.telegram.org/bot${REAL_TOKEN}/sendMessage`,
+            description: `Internal Server Error at https://api.telegram.org/bot${FAKE_TOKEN}/sendMessage`,
           }) }
     );
     try {
-      const r = await tg.testTelegram({ botToken: REAL_TOKEN, chatId: '7232305465' });
+      const r = await tg.testTelegram({ botToken: FAKE_TOKEN, chatId: '7232305465' });
       const msg = String(r?.message ?? '');
       t('an internal redactToken call site actually resolves at runtime',
         msg.includes('تعذّر الإرسال'), msg);
       t('and the token it scrubs never reaches the user',
-        msg.length > 0 && !msg.includes(REAL_TOKEN), msg);
+        msg.length > 0 && !msg.includes(FAKE_TOKEN), msg);
     } catch (err) {
       t('an internal redactToken call site actually resolves at runtime',
         false, `${err?.constructor?.name}: ${err?.message}`);
@@ -233,9 +237,9 @@ console.log('\n[4] Malformed credentials are refused before any network call');
 {
   const tg = await import('../src/main/backup/telegramBackup.ts');
 
-  t('a real-shaped token is accepted', tg.looksLikeBotToken(REAL_TOKEN) === true);
+  t('a real-shaped token is accepted', tg.looksLikeBotToken(FAKE_TOKEN) === true);
   for (const bad of ['', 'abc', '123:short', 'nocolon', null, undefined, 12345,
-                     ':AAHTZfkM_MPlD2ZiR1CJ8qiKRXzFrHnRmdo']) {
+                     ':AAFakeTokenForTestsOnly_NotARealBot00']) {
     if (tg.looksLikeBotToken(bad) !== false) {
       t(`token ${JSON.stringify(bad)} rejected`, false);
     }
@@ -288,7 +292,7 @@ console.log('\n[5] Telegram\'s 50 MB ceiling is enforced before uploading');
     globalThis.fetch = () => { throw new Error('NETWORK REACHED'); };
     try {
       const r = await tg.sendBackupToTelegram(
-        { botToken: REAL_TOKEN, chatId: '7232305465' }, big, 'caption');
+        { botToken: FAKE_TOKEN, chatId: '7232305465' }, big, 'caption');
       t('an oversized database is refused without uploading',
         r.success === false && !/NETWORK REACHED/.test(r.message), r.message);
       t('and the message explains the limit in Arabic, with a way out',
@@ -298,7 +302,7 @@ console.log('\n[5] Telegram\'s 50 MB ceiling is enforced before uploading');
     }
 
     const missing = await tg.sendBackupToTelegram(
-      { botToken: REAL_TOKEN, chatId: '7232305465' }, join(dir, 'nothere.db'), 'c');
+      { botToken: FAKE_TOKEN, chatId: '7232305465' }, join(dir, 'nothere.db'), 'c');
     t('a missing backup file is reported, not thrown', missing.success === false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -319,7 +323,7 @@ console.log('\n[6] A failed upload never harms the local backup');
     globalThis.fetch = async () => ({ json: async () => ({ ok: false, description: 'Bad Request' }) });
     try {
       const r = await tg.sendBackupToTelegram(
-        { botToken: REAL_TOKEN, chatId: '7232305465' }, file, 'c');
+        { botToken: FAKE_TOKEN, chatId: '7232305465' }, file, 'c');
       t('a rejected upload reports failure', r.success === false, r.message);
       t('the local backup file is untouched', readFileSync(file).equals(before));
     } finally {
@@ -331,7 +335,7 @@ console.log('\n[6] A failed upload never harms the local backup');
     globalThis.fetch = async () => { throw new Error('socket hang up'); };
     try {
       const r = await tg.sendBackupToTelegram(
-        { botToken: REAL_TOKEN, chatId: '7232305465' }, file, 'c');
+        { botToken: FAKE_TOKEN, chatId: '7232305465' }, file, 'c');
       t('a network error is caught and reported', r.success === false && /فشل الرفع/.test(r.message));
       t('the local backup survives that too', readFileSync(file).equals(before));
     } finally {
@@ -370,7 +374,7 @@ console.log('\n[7] The automatic send is once a day, and only when enabled');
   const set = (k, v) => db.prepare('INSERT OR REPLACE INTO settings (Key,Value) VALUES (?,?)').run(k, v);
   const get = k => (db.prepare('SELECT Value FROM settings WHERE Key = ?').get(k) || {}).Value ?? '';
   set('telegram_backup_enabled', '1');
-  set('telegram_bot_token', REAL_TOKEN);
+  set('telegram_bot_token', FAKE_TOKEN);
   set('telegram_chat_id', '7232305465');
 
   let sends = 0;

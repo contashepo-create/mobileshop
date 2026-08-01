@@ -58,7 +58,7 @@ console.log('='.repeat(72));
 
 const P = await import('../src/main/security/phoneVerify.ts');
 
-const BOT = { botToken: '8877684899:AAHTZfkM_MPlD2ZiR1CJ8qiKRXzFrHnRmdo', chatId: '7232305465' };
+const BOT = { botToken: '1234567890:AAFakeTokenForTestsOnly_NotARealBot00', chatId: '7232305465' };
 
 // ---------------------------------------------------------------- 1
 console.log('\n[1] Only the sender OWN contact is accepted');

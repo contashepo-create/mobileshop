@@ -73,7 +73,7 @@ console.log('='.repeat(72));
 
 const rec = await import('../src/main/security/passwordRecovery.ts');
 
-const SHOP_BOT = { botToken: '8877684899:AAHTZfkM_MPlD2ZiR1CJ8qiKRXzFrHnRmdo', chatId: '7232305465' };
+const SHOP_BOT = { botToken: '1234567890:AAFakeTokenForTestsOnly_NotARealBot00', chatId: '7232305465' };
 const DEV_CHAT = '999888777';   // stands in for the developer's TG_ADMIN_CHAT
 
 /** Captures every Telegram call so the destination can be asserted. */

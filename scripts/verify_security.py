@@ -164,6 +164,57 @@ check("restore validates the file header", 'SQLite format 3' in bak)
 check("startup backup uses backup API", 'await db.backup(' in idx)
 check("cleanup only removes its own files", 'auto_backup_' in idx and 'test(file)' in idx)
 
+# 13 — no live credential is committed anywhere in the repository
+print("\n[13] No working credential is committed")
+# The developer's REAL Telegram bot token sat in four verify_*.mjs files. The
+# network is stubbed in every one of them, so the token was never used to
+# authenticate — it was only ever a realistically shaped string. That makes it
+# pure downside: anyone with read access to the repository, now or in any
+# clone, backup or future fork, could drive the bot that carries reset codes
+# and off-site backups.
+#
+# A real bot token is <digits>:<35+ chars>. A synthetic one is indistinguishable
+# by pattern, so the pattern alone cannot be the test. Instead: the ONLY tokens
+# allowed to appear are ones that announce themselves as fake.
+TOKEN_RE = re.compile(r'\b\d{6,}:[A-Za-z0-9_-]{30,}\b')
+ALLOWED_MARKERS = ('Fake', 'fake', 'EXAMPLE', 'example', 'SECRET', 'xxx', 'XXX')
+SKIP_DIRS = {'.git', 'node_modules', 'dist', 'out', 'build', '.venv', '__pycache__'}
+
+leaks = []
+for dirpath, dirs, files in os.walk(ROOT):
+    dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+    for fn in files:
+        if not fn.endswith(('.ts', '.tsx', '.js', '.mjs', '.cjs', '.json',
+                            '.md', '.py', '.yml', '.yaml', '.txt')):
+            continue
+        path = os.path.join(dirpath, fn)
+        try:
+            body = open(path, encoding='utf-8').read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for match in TOKEN_RE.findall(body):
+            secret = match.split(':', 1)[1]
+            if not any(m in secret for m in ALLOWED_MARKERS):
+                leaks.append(f"{os.path.relpath(path, ROOT)}: {match[:14]}...")
+
+check("no bot-token-shaped literal that is not marked fake",
+      not leaks, f"found {leaks[:4]}")
+
+# The specific token that was committed must never come back, even renamed.
+BURNED = 'AAHTZfkM' + '_MPlD2ZiR1CJ8qiKRXzFrHnRmdo'
+burned_hits = []
+for dirpath, dirs, files in os.walk(ROOT):
+    dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+    for fn in files:
+        path = os.path.join(dirpath, fn)
+        try:
+            if BURNED in open(path, encoding='utf-8').read():
+                burned_hits.append(os.path.relpath(path, ROOT))
+        except (UnicodeDecodeError, OSError):
+            continue
+check("the previously committed bot token is gone from the tree",
+      not burned_hits, f"still in {burned_hits}")
+
 print("\n" + "=" * 68)
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
 print("=" * 68)

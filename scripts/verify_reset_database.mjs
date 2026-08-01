@@ -348,7 +348,7 @@ console.log('\n[7b] A code minted for one purpose cannot authorise the other');
   // entire business instead. The two flows share one implementation, so this
   // has to be proven, not assumed.
   const cc = await import('../src/main/security/confirmCode.ts');
-  const BOT = { botToken: '8877684899:AAHTZfkM_MPlD2ZiR1CJ8qiKRXzFrHnRmdo', chatId: '7232305465' };
+  const BOT = { botToken: '1234567890:AAFakeTokenForTestsOnly_NotARealBot00', chatId: '7232305465' };
 
   const realFetch = globalThis.fetch;
   const sent = [];

@@ -67,6 +67,9 @@ const PUBLIC_CHANNELS = new Set<string>([
   // when there is no session. It proves an administrator password inside the
   // handler. (No apostrophes here: verify_ipc_coverage.py reads channel names
   // by matching single-quoted strings, so a stray one hides the entries below.)
+  // Phone confirmation runs during first-run setup, before any user exists.
+  // It only talks to the shop own bot and returns a yes or no.
+  'phone:verify',
   'db:exportForOwner',
   'users:listRecoverable',
   'recovery:isAvailable',

@@ -7,6 +7,7 @@ import { devLogin, revokeDevToken } from '../security/devAuth';
 import { getRemoteOverrides } from '../remote/remoteStore';
 import { isRemoteManaged } from '../remote/remoteConfig';
 import { requestCode, verifyCode } from '../security/confirmCode';
+import { verifyPhoneViaTelegram } from '../security/phoneVerify';
 import { validateRegistration } from '../../shared/registration';
 import { notifyDeveloperOfRegistration } from '../security/resetNotify';
 import { notifyDatabaseReset, notifyDeveloperOfReset } from '../security/resetNotify';
@@ -349,6 +350,32 @@ export function registerSettingsHandlers() {
     } catch (err: any) {
       return { success: false, message: `تعذّر قراءة الصورة: ${err?.message || err}` };
     }
+  });
+
+  /**
+   * Confirm the shop's phone number through its own Telegram bot.
+   *
+   * Reachable during first-run setup, so it cannot require a session. It sends
+   * nothing anywhere except the shop's own bot, and it only ever reports
+   * whether the number the shop typed was confirmed.
+   */
+  ipcMain.handle('phone:verify', async (_event, data: { phone?: unknown }) => {
+    const target = shopTelegram();
+    if (!target) {
+      return {
+        success: false,
+        message: 'لتأكيد الرقم اضبط بوت تليجرام أولاً من الإعدادات ← النسخ الاحتياطي',
+      };
+    }
+    const result = await verifyPhoneViaTelegram(target, String(data?.phone ?? ''));
+    if (result.success) {
+      const db = getDb();
+      db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)')
+        .run('phone_verified', result.phone || '');
+      db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)')
+        .run('phone_verified_at', new Date().toISOString());
+    }
+    return result;
   });
 
   ipcMain.handle('settings:resetIsAvailable', async () => ({

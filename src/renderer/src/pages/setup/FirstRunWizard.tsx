@@ -27,6 +27,10 @@ export function FirstRunWizard() {
   // Per-field messages from the shared validator, so the owner sees every
   // problem at once instead of discovering them one submit at a time.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // Phone confirmation via the shop's own Telegram bot. Optional: a shop with
+  // no bot configured must still be able to finish setting up.
+  const [phoneVerified, setPhoneVerified] = useState(false);
+  const [phoneBusy, setPhoneBusy] = useState(false);
 
   const [customer, setCustomer] = useState({
     name: '',
@@ -139,8 +143,27 @@ export function FirstRunWizard() {
                <Input label="اسم صاحب المحل" value={company.ownerName} onChange={(e) => setCompany({...company, ownerName: e.target.value})} />
                {fieldErrors.ownerName && <p className="text-[11px] text-red-600 -mt-2">{fieldErrors.ownerName}</p>}
                <div className="grid grid-cols-2 gap-3">
-                 <div><Input label="الهاتف" value={company.phone} onChange={(e) => setCompany({...company, phone: e.target.value})} />
-                 {fieldErrors.phone && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.phone}</p>}</div>
+                 <div>
+                   <Input label="الهاتف" value={company.phone}
+                     onChange={(e) => { setCompany({...company, phone: e.target.value}); setPhoneVerified(false); }} />
+                   {fieldErrors.phone && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.phone}</p>}
+                   {phoneVerified ? (
+                     <p className="text-[11px] text-green-600 mt-1">✅ تم تأكيد الرقم عبر تليجرام</p>
+                   ) : (
+                     <button type="button" disabled={phoneBusy || !company.phone}
+                       onClick={async () => {
+                         setPhoneBusy(true);
+                         showToast('info', 'افتح تليجرام واضغط زر «مشاركة رقمي»');
+                         const r = await window.api.invoke('phone:verify', { phone: company.phone });
+                         setPhoneBusy(false);
+                         if (r?.success) { setPhoneVerified(true); showToast('success', r.message); }
+                         else showToast('error', r?.message || 'تعذّر التأكيد');
+                       }}
+                       className="text-[11px] text-primary-600 hover:underline mt-1 disabled:opacity-50">
+                       {phoneBusy ? 'في انتظار الضغط على الزر في تليجرام...' : '📱 تأكيد الرقم عبر تليجرام (اختياري)'}
+                     </button>
+                   )}
+                 </div>
                  <div><Input label="البريد الإلكتروني" type="email" value={company.email} onChange={(e) => setCompany({...company, email: e.target.value})} />
                  {fieldErrors.email && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.email}</p>}</div>
                </div>

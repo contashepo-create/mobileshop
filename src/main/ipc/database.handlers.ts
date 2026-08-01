@@ -1,5 +1,5 @@
 import { ipcMain, dialog, app } from 'electron';
-import { getDb, closeDb, getDbPath, setDbPath } from '../database/connection';
+import { getDb, getDbPath, setDbPath } from '../database/connection';
 import path from 'node:path';
 import fs from 'node:fs';
 import { businessToday } from '../../shared/businessDate';

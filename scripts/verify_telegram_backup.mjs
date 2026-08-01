@@ -75,8 +75,15 @@ console.log('\n[1] The bot token cannot leak through the PUBLIC settings channel
   // settings:get is ALSO public and takes an arbitrary key name.
   t('settings:get refuses secret keys by name',
     /isSecretKey[\s\S]{0,400}telegram_[\s\S]{0,200}settings:get[\s\S]{0,200}isSecretKey\(key\)\) return null/.test(s));
-  t('the secret-key filter covers cloud, sync, telegram and db_path',
-    /isSecretKey[\s\S]{0,300}cloud_[\s\S]{0,120}sync_[\s\S]{0,120}telegram_[\s\S]{0,120}db_path/.test(s));
+  // db_path moved into PRIVATE_KEYS when the owner personal fields were added,
+  // so the filter is now "the three prefixes, plus a named list". Asserted
+  // that way rather than by the old flat ordering, which failed on code that
+  // had become stricter rather than looser.
+  t('the secret-key filter still covers the cloud, sync and telegram prefixes',
+    /isSecretKey[\s\S]{0,300}cloud_[\s\S]{0,120}sync_[\s\S]{0,120}telegram_/.test(s));
+  t('and db_path is still refused, via the private-key list',
+    /PRIVATE_KEYS = new Set\(\[[\s\S]{0,200}'db_path'/.test(s)
+    && /PRIVATE_KEYS\.has\(key\)/.test(s));
 
   // Behavioural: the exact WHERE clause the handler uses must hide the token.
   const db = new DatabaseSync(':memory:');
@@ -131,6 +138,84 @@ console.log('\n[3] A token never reaches a message, a log or the renderer');
       .includes(REAL_TOKEN));
   t('redaction leaves the useful part of the message',
     tg.redactToken(`failed with ${REAL_TOKEN}`, REAL_TOKEN).includes('failed with'));
+
+  // Redaction runs inside CATCH blocks, on values that are not guaranteed to
+  // be strings: `String(err?.message || err)` yields a string, but callers
+  // elsewhere pass the raw error, and an Error with an empty message falls
+  // back to the object itself. Without the `typeof text === 'string'` guard
+  // every one of these throws TypeError (`.split is not a function`) — from
+  // the very handler that exists to report a failure, turning a reportable
+  // error into a crash. Measured: undefined, null, 42, an Error and a plain
+  // object all throw unguarded, and all return a string guarded.
+  for (const [label, value] of [
+    ['undefined', undefined], ['null', null], ['a number', 42],
+    ['an Error object', new Error(`boom ${REAL_TOKEN}`)], ['a plain object', {}],
+  ]) {
+    let out, threw = null;
+    try { out = tg.redactToken(value, REAL_TOKEN); }
+    catch (err) { threw = `${err?.constructor?.name}: ${err?.message}`; }
+    t(`redactToken survives ${label} instead of throwing`,
+      threw === null && typeof out === 'string', threw ?? `returned ${typeof out}`);
+    if (threw === null) {
+      t(`  ...and still hides the token in ${label}`, !String(out).includes(REAL_TOKEN));
+    }
+  }
+
+  // `String(text ?? '')` and `String(text)` differ for exactly the two values
+  // that reach here most often from a catch block. The caller composes
+  // `تعذّر الإرسال: ${redactToken(why, token) || 'سبب غير معروف'}`, and that
+  // fallback only fires on an EMPTY string. Drop the `?? ''` and the shop
+  // owner is shown the literal word "undefined" in the middle of an Arabic
+  // sentence instead of "سبب غير معروف".
+  for (const [label, value] of [['undefined', undefined], ['null', null]]) {
+    const out = tg.redactToken(value, REAL_TOKEN);
+    t(`${label} redacts to an EMPTY string so the Arabic fallback fires`,
+      out === '', JSON.stringify(out));
+    t(`  ...so the user never sees the word "${label}" in the message`,
+      !(`تعذّر الإرسال: ${out || 'سبب غير معروف'}`).includes(String(label)));
+  }
+
+  // The three checks above call the EXPORTED binding. That is not the same as
+  // proving the module's own internal call sites resolve.
+  //
+  // This module used to carry its own copy of redactToken; the copy was
+  // removed in favour of the one in confirmCode. The obvious way to write that
+  // — `export { redactToken } from '../security/confirmCode'` — re-exports the
+  // name WITHOUT binding it locally, so `tg.redactToken(...)` keeps working
+  // while every internal `redactToken(...)` inside this file throws
+  // "ReferenceError: redactToken is not defined". The export test passes and
+  // the feature is broken. The correct form is a real import plus a separate
+  // export, and the only way to tell the two apart is to RUN a path that calls
+  // the function internally.
+  //
+  // getMe must succeed and sendMessage must fail with a reason that is neither
+  // "chat not found" nor "bot was blocked" — that is the one branch that
+  // redacts.
+  {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => (
+      String(url).includes('/getMe')
+        ? { json: async () => ({ ok: true, result: { username: 'shopbot' } }) }
+        : { json: async () => ({
+            ok: false,
+            description: `Internal Server Error at https://api.telegram.org/bot${REAL_TOKEN}/sendMessage`,
+          }) }
+    );
+    try {
+      const r = await tg.testTelegram({ botToken: REAL_TOKEN, chatId: '7232305465' });
+      const msg = String(r?.message ?? '');
+      t('an internal redactToken call site actually resolves at runtime',
+        msg.includes('تعذّر الإرسال'), msg);
+      t('and the token it scrubs never reaches the user',
+        msg.length > 0 && !msg.includes(REAL_TOKEN), msg);
+    } catch (err) {
+      t('an internal redactToken call site actually resolves at runtime',
+        false, `${err?.constructor?.name}: ${err?.message}`);
+      t('and the token it scrubs never reaches the user', false, 'threw before returning');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
 
   const d = code('src/main/ipc/database.handlers.ts');
   t('telegram:getSettings does not return the token to the renderer',

@@ -88,20 +88,16 @@ export function looksLikeChatId(chatId: unknown): boolean {
 /**
  * Never let a token reach a log file or an error shown on screen.
  *
- * Telegram echoes the request URL in some failures, and the URL contains the
- * token. Any message this module surfaces is passed through here first.
+ * Re-exported from confirmCode rather than copied. There were two identical
+ * implementations of this, and the earlier bug in this very one — returning
+ * the text untouched when the token was empty, so a Telegram error carrying
+ * the full `https://api.telegram.org/bot<TOKEN>/...` URL printed verbatim — is
+ * precisely what a second copy invites. One implementation cannot drift from
+ * itself.
  */
-export function redactToken(text: string, token: string): string {
-  // The URL pattern is scrubbed UNCONDITIONALLY. An earlier version returned
-  // `text` untouched when `token` was empty, which is exactly the case that
-  // matters: a caller that has not resolved the token yet, or reports an error
-  // from a different code path, would then print the full
-  // `https://api.telegram.org/bot<TOKEN>/...` that Telegram echoes back.
-  let out = typeof text === 'string' ? text : String(text ?? '');
-  if (token) out = out.split(token).join('***');
-  out = out.replace(/bot\d{6,}:[A-Za-z0-9_-]{30,}/g, 'bot***');
-  return out;
-}
+import { redactToken } from '../security/confirmCode';
+
+export { redactToken };
 
 async function callTelegram(
   token: string, method: string, body: FormData | string, isJson: boolean, timeoutMs: number,

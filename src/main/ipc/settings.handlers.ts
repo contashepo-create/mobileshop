@@ -47,7 +47,16 @@ export function registerSettingsHandlers() {
       WHERE Key NOT LIKE 'cloud_%'
         AND Key NOT LIKE 'sync_%'
         AND Key NOT LIKE 'telegram_%'
-        AND Key NOT IN ('db_path')
+        AND Key NOT IN (
+          'db_path',
+          -- Personal data about the owner, added with the registration fields.
+          -- This channel is PUBLIC: it must answer before anyone logs in so the
+          -- login screen can render the shop branding. Returning a date of
+          -- birth and a verified phone number to an unauthenticated caller is
+          -- a privacy leak, and none of it is needed to draw that screen.
+          'owner_birth_date', 'phone_verified', 'phone_verified_at',
+          'registration_consent', 'registered_at'
+        )
     `).all() as any[];
     const settings: Record<string, string> = {};
     for (const row of rows) {
@@ -77,9 +86,16 @@ export function registerSettingsHandlers() {
    * secrets are still reachable by the screens that own them, through the
    * permission-gated `db:getCloudSettings` / `telegram:getSettings`.
    */
+  const PRIVATE_KEYS = new Set([
+    'db_path',
+    'owner_birth_date', 'phone_verified', 'phone_verified_at',
+    'registration_consent', 'registered_at',
+  ]);
+
   const isSecretKey = (key: unknown): boolean =>
     typeof key === 'string'
-    && (/^cloud_/.test(key) || /^sync_/.test(key) || /^telegram_/.test(key) || key === 'db_path');
+    && (/^cloud_/.test(key) || /^sync_/.test(key) || /^telegram_/.test(key)
+        || PRIVATE_KEYS.has(key));
 
   // Get single setting
   ipcMain.handle('settings:get', async (_event, key: string) => {

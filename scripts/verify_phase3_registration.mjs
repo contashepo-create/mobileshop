@@ -14,6 +14,7 @@
  *
  * Run with:  node --experimental-strip-types scripts/verify_phase3_registration.mjs
  */
+import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -158,6 +159,69 @@ console.log('\n[3] Personal data leaves the machine only with consent');
   t('it is time-limited', /notifyDeveloperOfRegistration[\s\S]{0,600}AbortController/.test(n));
   t('it does nothing when no server is configured',
     /notifyDeveloperOfRegistration[\s\S]{0,400}if \(!API_BASE \|\| !CLIENT_KEY\) return;/.test(n));
+}
+
+// ---------------------------------------------------------------- 3b
+console.log('\n[3b] Personal data is not readable before login');
+{
+  // `settings:getAll` and `settings:get` are PUBLIC — they must answer before
+  // anyone signs in so the login screen can draw the shop branding. Adding the
+  // registration fields quietly put a date of birth and a verified phone
+  // number on that public surface. Neither is needed to render a logo.
+  const s = code('src/main/ipc/settings.handlers.ts');
+
+  // Matched inside the NOT IN list itself rather than with a fixed-width
+  // window: the list carries explanatory SQL comments, which pushed the keys
+  // past a 400-character lookahead and failed on correct code.
+  {
+    const notIn = /NOT IN \(([\s\S]*?)\)/.exec(s)?.[1] || '';
+    for (const key of ['owner_birth_date', 'phone_verified', 'phone_verified_at',
+                       'registration_consent', 'registered_at']) {
+      t(`${key} is excluded from the public settings read`, notIn.includes(`'${key}'`));
+    }
+  }
+  t('the single-key reader blocks them too',
+    /PRIVATE_KEYS = new Set\(\[[\s\S]{0,300}'owner_birth_date'/.test(s)
+    && /PRIVATE_KEYS\.has\(key\)/.test(s));
+
+  // Behavioural: run the real WHERE clause and confirm what escapes.
+  //
+  // The clause is LIFTED OUT OF THE HANDLER SOURCE rather than retyped here.
+  // A copy in the test proves only that the copy is correct: someone could
+  // delete `owner_birth_date` from the handler and this section would still
+  // pass, because it would be exercising the test's own string. Extracting it
+  // means the assertions below run against whatever the handler actually ships.
+  const whereMatch = /SELECT Key, Value FROM settings\s*\n([\s\S]*?)`\)\.all\(\)/.exec(s);
+  t('the public settings query can be located in the handler', !!whereMatch);
+  const realWhere = whereMatch ? whereMatch[1] : "WHERE 1=1";
+
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE settings (Key TEXT PRIMARY KEY, Value TEXT)');
+  const ins = db.prepare('INSERT INTO settings (Key,Value) VALUES (?,?)');
+  ins.run('company_name', 'محل محمد');
+  ins.run('logo_path', 'data:image/png;base64,AAA');
+  ins.run('owner_birth_date', '1990-05-20');
+  ins.run('phone_verified', '201012345678');
+  ins.run('phone_verified_at', '2026-07-31T10:00:00Z');
+  ins.run('registration_consent', '1');
+  ins.run('registered_at', '2026-07-30T09:00:00Z');
+  ins.run('telegram_bot_token', '8877684899:SECRET');
+
+  const visible = JSON.stringify(db.prepare(`
+    SELECT Key, Value FROM settings
+    ${realWhere}
+  `).all());
+
+  t('a date of birth does not reach an unauthenticated caller',
+    !visible.includes('1990-05-20'));
+  t('a verified phone number does not either', !visible.includes('201012345678'));
+  t('nor the moment it was verified', !visible.includes('2026-07-31T10:00:00Z'));
+  t('nor whether the owner consented to data sharing',
+    !visible.includes('registration_consent'));
+  t('nor when the shop registered', !visible.includes('2026-07-30T09:00:00Z'));
+  t('the bot token still does not', !visible.includes('8877684899:SECRET'));
+  t('but the branding the login screen needs still comes through',
+    visible.includes('محل محمد') && visible.includes('data:image/png'));
 }
 
 // ---------------------------------------------------------------- 4

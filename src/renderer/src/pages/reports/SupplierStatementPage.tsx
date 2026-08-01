@@ -7,6 +7,7 @@ import { Modal } from '../../components/ui/Modal';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { asRows } from '../../lib/ipc';
+import { escapeHtml as esc, safeNumber } from '../../../../shared/escapeHtml';
 
 export function SupplierStatementPage() {
   const { showToast } = useToastStore();
@@ -167,9 +168,9 @@ export function SupplierStatementPage() {
         th { background: #f1f5f9; font-weight: 600; }
         .items-table { margin-top: 20px; }
       </style></head><body>
-      <h2>${title}</h2>
-      <table>${fields.map(f => `<tr><td style="width:30%;font-weight:600;background:#f8fafc">${f.label}</td><td>${String(f.value ?? '—')}</td></tr>`).join('')}</table>
-      ${data.items?.length ? `<h3 style="margin-top:20px">الأصناف</h3><table class="items-table"><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr>${data.items.map((item: any) => `<tr><td>${item.ItemName || item.Description || '—'}</td><td>${item.Quantity ?? '—'}</td><td>${(item.UnitPrice ?? item.UnitCost ?? item.Amount ?? '—')?.toFixed?.(2) ?? '—'}</td><td>${item.Total?.toFixed?.(2) ?? '—'}</td></tr>`).join('')}</table>` : ''}
+      <h2>${esc(title)}</h2>
+      <table>${fields.map(f => `<tr><td style="width:30%;font-weight:600;background:#f8fafc">${esc(f.label)}</td><td>${esc(f.value ?? '—')}</td></tr>`).join('')}</table>
+      ${data.items?.length ? `<h3 style="margin-top:20px">الأصناف</h3><table class="items-table"><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr>${data.items.map((item: any) => `<tr><td>${esc(item.ItemName || item.Description || '—')}</td><td>${esc(item.Quantity ?? '—')}</td><td>${item.UnitPrice ?? item.UnitCost ?? item.Amount ? safeNumber(item.UnitPrice ?? item.UnitCost ?? item.Amount) : '—'}</td><td>${item.Total != null ? safeNumber(item.Total) : '—'}</td></tr>`).join('')}</table>` : ''}
       <p style="margin-top:30px;text-align:center;font-size:12px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:10px">تمت الطباعة من نظام المحمول</p>
       <script>window.print();window.onafterprint=()=>window.close();<\/script>
       </body></html>`;
@@ -192,13 +193,13 @@ export function SupplierStatementPage() {
     const rows = data.operations.map((op: any) => {
       const info = opTypeLabels[op.OpType] || { label: op.OpType, variant: 'gray' };
       return `<tr>
-        <td style="text-align:center">${op.Date || ''}</td>
-        <td style="text-align:center">${info.label}</td>
-        <td style="text-align:center">${op.RefNumber || ''}</td>
-        <td>${op.Description || ''}</td>
-        <td style="text-align:center;color:#16a34a;font-weight:600">${op.Credit ? op.Credit.toFixed(2) : '—'}</td>
-        <td style="text-align:center;color:#dc2626;font-weight:600">${op.Debit ? op.Debit.toFixed(2) : '—'}</td>
-        <td style="text-align:center;font-weight:700">${Math.abs(op.Balance).toFixed(2)}</td>
+        <td style="text-align:center">${esc(op.Date || '')}</td>
+        <td style="text-align:center">${esc(info.label)}</td>
+        <td style="text-align:center">${esc(op.RefNumber || '')}</td>
+        <td>${esc(op.Description || '')}</td>
+        <td style="text-align:center;color:#16a34a;font-weight:600">${op.Credit ? safeNumber(op.Credit) : '—'}</td>
+        <td style="text-align:center;color:#dc2626;font-weight:600">${op.Debit ? safeNumber(op.Debit) : '—'}</td>
+        <td style="text-align:center;font-weight:700">${safeNumber(Math.abs(op.Balance))}</td>
       </tr>`;
     }).join('');
     const netBal = data.totals?.netBalance || 0;
@@ -232,28 +233,28 @@ export function SupplierStatementPage() {
     <div class="sheet">
       <div class="report-header">
         <h1>كشف حساب مورد</h1>
-        <div class="company">${(window as any).__settings?.company_name || ''}</div>
+        <div class="company">${esc((window as any).__settings?.company_name || '')}</div>
         <div class="sub">تاريخ الطباعة: ${new Date().toLocaleDateString('ar-EG-u-ca-islamic')} | ${new Date().toLocaleDateString('ar-EG')}</div>
       </div>
       <div class="party-box">
-        <div><div class="label">اسم المورد</div><div class="value">${supplier.Name}</div></div>
-        <div><div class="label">الهاتف</div><div class="value">${supplier.Phone || '—'}</div></div>
-        <div><div class="label">العنوان</div><div class="value">${supplier.Address || '—'}</div></div>
+        <div><div class="label">اسم المورد</div><div class="value">${esc(supplier.Name)}</div></div>
+        <div><div class="label">الهاتف</div><div class="value">${esc(supplier.Phone || '—')}</div></div>
+        <div><div class="label">العنوان</div><div class="value">${esc(supplier.Address || '—')}</div></div>
         <div><div class="label">الرصيد الافتتاحي</div><div class="value">0.00</div></div>
       </div>
       <table>
         <tr><th width="12%">التاريخ</th><th width="12%">النوع</th><th width="12%">المرجع</th><th>البيان</th><th width="13%">مستحق للمورد</th><th width="13%">مدفوع/مرتجع</th><th width="13%">الرصيد</th></tr>
         ${rows}
         <tr class="totals-row"><td colspan="4" style="text-align:left;font-weight:700">الإجمالي</td>
-          <td style="text-align:center;color:#dc2626">${(data.totals?.totalCredit || 0).toFixed(2)}</td>
-          <td style="text-align:center;color:#16a34a">${(data.totals?.totalDebit || 0).toFixed(2)}</td>
-          <td style="text-align:center">${Math.abs(netBal).toFixed(2)} ${netBal >= 0 ? '(للمورد)' : '(لنا)'}</td>
+          <td style="text-align:center;color:#dc2626">${safeNumber(data.totals?.totalCredit || 0)}</td>
+          <td style="text-align:center;color:#16a34a">${safeNumber(data.totals?.totalDebit || 0)}</td>
+          <td style="text-align:center">${safeNumber(Math.abs(netBal))} ${netBal >= 0 ? '(للمورد)' : '(لنا)'}</td>
         </tr>
       </table>
       <div class="summary">
-        <div class="summary-item"><span style="font-size:11px;color:#dc2626">إجمالي المستحق</span><div class="num" style="color:#dc2626">${(data.totals?.totalCredit || 0).toFixed(2)}</div></div>
-        <div class="summary-item"><span style="font-size:11px;color:#16a34a">إجمالي المدفوع</span><div class="num" style="color:#16a34a">${(data.totals?.totalDebit || 0).toFixed(2)}</div></div>
-        <div class="summary-item"><span style="font-size:11px">الرصيد النهائي</span><div class="num" style="color:${netBal > 0 ? '#dc2626' : netBal < 0 ? '#16a34a' : '#1e293b'}">${Math.abs(netBal).toFixed(2)}</div></div>
+        <div class="summary-item"><span style="font-size:11px;color:#dc2626">إجمالي المستحق</span><div class="num" style="color:#dc2626">${safeNumber(data.totals?.totalCredit || 0)}</div></div>
+        <div class="summary-item"><span style="font-size:11px;color:#16a34a">إجمالي المدفوع</span><div class="num" style="color:#16a34a">${safeNumber(data.totals?.totalDebit || 0)}</div></div>
+        <div class="summary-item"><span style="font-size:11px">الرصيد النهائي</span><div class="num" style="color:${netBal > 0 ? '#dc2626' : netBal < 0 ? '#16a34a' : '#1e293b'}">${safeNumber(Math.abs(netBal))}</div></div>
       </div>
       <div class="signatures">
         <div class="sig-box"><div class="line">إدارة المحل</div></div>

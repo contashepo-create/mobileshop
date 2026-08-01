@@ -7,6 +7,7 @@ import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage, asRows } from '../../lib/ipc';
+import { escapeHtml as esc, safeNumber } from '../../../../shared/escapeHtml';
 
 export function AssetsPage() {
   const { showToast } = useToastStore();
@@ -58,13 +59,13 @@ export function AssetsPage() {
     if (!printWindow) return;
     const rows = statementData.operations.map((op: any) => {
       return `<tr>
-        <td style="text-align:center">${op.Date}</td>
-        <td style="text-align:center">${op.OpLabel}</td>
-        <td>${op.Party || '\u2014'}</td>
-        <td style="text-align:center">${op.RefNumber || ''}</td>
-        <td style="text-align:center;color:#16a34a;font-weight:600">${op.InAmount > 0 ? op.InAmount.toFixed(2) : '\u2014'}</td>
-        <td style="text-align:center;color:#dc2626;font-weight:600">${op.OutAmount > 0 ? op.OutAmount.toFixed(2) : '\u2014'}</td>
-        <td style="text-align:center;font-weight:700">${op.Balance.toFixed(2)}</td>
+        <td style="text-align:center">${esc(op.Date)}</td>
+        <td style="text-align:center">${esc(op.OpLabel)}</td>
+        <td>${esc(op.Party || '\u2014')}</td>
+        <td style="text-align:center">${esc(op.RefNumber || '')}</td>
+        <td style="text-align:center;color:#16a34a;font-weight:600">${op.InAmount > 0 ? safeNumber(op.InAmount) : '\u2014'}</td>
+        <td style="text-align:center;color:#dc2626;font-weight:600">${op.OutAmount > 0 ? safeNumber(op.OutAmount) : '\u2014'}</td>
+        <td style="text-align:center;font-weight:700">${safeNumber(op.Balance)}</td>
       </tr>`;
     }).join('');
     const html = ['<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8">',
@@ -97,34 +98,34 @@ export function AssetsPage() {
       '<div class="sheet">',
       '<div class="report-header">',
       '<h1>\u0643\u0634\u0641 \u062d\u0633\u0627\u0628 \u062e\u0632\u064a\u0646\u0629/\u0628\u0646\u0643</h1>',
-      '<div class="company">' + ((window as any).__settings?.company_name || '') + '<\/div>',
+      '<div class="company">' + esc((window as any).__settings?.company_name || '') + '<\/div>',
       '<div class="sub">\u062A\u0627\u0631\u064A\u062E \u0627\u0644\u0637\u0628\u0627\u0639\u0629: ' + new Date().toLocaleDateString('ar-EG-u-ca-islamic') + ' | ' + new Date().toLocaleDateString('ar-EG') + '<\/div>',
       '<\/div>',
       '<div class="party-box">',
-      '<div><div class="label">\u0627\u0633\u0645 \u0627\u0644\u062D\u0633\u0627\u0628<\/div><div class="value">' + statementAccount.AccountName + '<\/div><\/div>',
+      '<div><div class="label">\u0627\u0633\u0645 \u0627\u0644\u062D\u0633\u0627\u0628<\/div><div class="value">' + esc(statementAccount.AccountName) + '<\/div><\/div>',
       '<div><div class="label">\u0627\u0644\u0646\u0648\u0639<\/div><div class="value">' + (statementAccount.AccountType === 'safe' ? '\u062E\u0632\u0646\u0629' : '\u0628\u0646\u0643') + '<\/div><\/div>',
-      '<div><div class="label">\u0631\u0642\u0645 \u0627\u0644\u062D\u0633\u0627\u0628<\/div><div class="value">' + (statementAccount.AccountNumber || '\u2014') + '<\/div><\/div>',
-      '<div><div class="label">\u0627\u0644\u0631\u0635\u064A\u062F \u0627\u0644\u062D\u0627\u0644\u064A<\/div><div class="value">' + (statementAccount.Balance?.toFixed(2) || '0.00') + '<\/div><\/div>',
+      '<div><div class="label">\u0631\u0642\u0645 \u0627\u0644\u062D\u0633\u0627\u0628<\/div><div class="value">' + esc(statementAccount.AccountNumber || '\u2014') + '<\/div><\/div>',
+      '<div><div class="label">\u0627\u0644\u0631\u0635\u064A\u062F \u0627\u0644\u062D\u0627\u0644\u064A<\/div><div class="value">' + safeNumber(statementAccount.Balance ?? 0) + '<\/div><\/div>',
       '<\/div>',
       '<table>',
       '<tr><th width="12%">\u0627\u0644\u062A\u0627\u0631\u064A\u062E<\/th><th width="15%">\u0627\u0644\u0646\u0648\u0639<\/th><th>\u0627\u0644\u0637\u0631\u0641<\/th><th width="10%">\u0627\u0644\u0645\u0631\u062C\u0639<\/th><th width="13%">\u0648\u0627\u0631\u062F<\/th><th width="13%">\u0645\u0646\u0635\u0631\u0641<\/th><th width="13%">\u0627\u0644\u0631\u0635\u064A\u062F<\/th><\/tr>',
       rows,
       '<tr class="totals-row"><td colspan="4" style="text-align:left;font-weight:700">\u0627\u0644\u0625\u062C\u0645\u0627\u0644\u064A<\/td>',
-      '<td style="text-align:center;color:#16a34a">' + (statementData.totalIn || 0).toFixed(2) + '<\/td>',
-      '<td style="text-align:center;color:#dc2626">' + (statementData.totalOut || 0).toFixed(2) + '<\/td>',
-      '<td style="text-align:center">' + (statementData.netChange || 0).toFixed(2) + '<\/td><\/tr>',
+      '<td style="text-align:center;color:#16a34a">' + safeNumber(statementData.totalIn || 0) + '<\/td>',
+      '<td style="text-align:center;color:#dc2626">' + safeNumber(statementData.totalOut || 0) + '<\/td>',
+      '<td style="text-align:center">' + safeNumber(statementData.netChange || 0) + '<\/td><\/tr>',
       '<\/table>',
       '<div class="summary">',
-      '<div class="summary-item"><span style="font-size:11px;color:#16a34a">\u0625\u062C\u0645\u0627\u0644\u064A \u0627\u0644\u0648\u0627\u0631\u062F<\/span><div class="num" style="color:#16a34a">' + (statementData.totalIn || 0).toFixed(2) + '<\/div><\/div>',
-      '<div class="summary-item"><span style="font-size:11px;color:#dc2626">\u0625\u062C\u0645\u0627\u0644\u064A \u0627\u0644\u0645\u0646\u0635\u0631\u0641<\/span><div class="num" style="color:#dc2626">' + (statementData.totalOut || 0).toFixed(2) + '<\/div><\/div>',
-      '<div class="summary-item"><span style="font-size:11px">\u0635\u0627\u0641\u064A \u0627\u0644\u062D\u0631\u0643\u0629<\/span><div class="num" style="color:' + ((statementData.netChange || 0) >= 0 ? '#16a34a' : '#dc2626') + '">' + (statementData.netChange || 0).toFixed(2) + '<\/div><\/div>',
+      '<div class="summary-item"><span style="font-size:11px;color:#16a34a">\u0625\u062C\u0645\u0627\u0644\u064A \u0627\u0644\u0648\u0627\u0631\u062F<\/span><div class="num" style="color:#16a34a">' + safeNumber(statementData.totalIn || 0) + '<\/div><\/div>',
+      '<div class="summary-item"><span style="font-size:11px;color:#dc2626">\u0625\u062C\u0645\u0627\u0644\u064A \u0627\u0644\u0645\u0646\u0635\u0631\u0641<\/span><div class="num" style="color:#dc2626">' + safeNumber(statementData.totalOut || 0) + '<\/div><\/div>',
+      '<div class="summary-item"><span style="font-size:11px">\u0635\u0627\u0641\u064A \u0627\u0644\u062D\u0631\u0643\u0629<\/span><div class="num" style="color:' + ((statementData.netChange || 0) >= 0 ? '#16a34a' : '#dc2626') + '">' + safeNumber(statementData.netChange || 0) + '<\/div><\/div>',
       '<\/div>',
       '<div class="signatures">',
       '<div class="sig-box"><div class="line">\u0625\u062F\u0627\u0631\u0629 \u0627\u0644\u0645\u062D\u0644<\/div><\/div>',
       '<div class="sig-box"><div class="line">\u0627\u0644\u0645\u062D\u0627\u0633\u0628<\/div><\/div>',
       '<div class="sig-box"><div class="line">\u0635\u0627\u062D\u0628 \u0627\u0644\u062D\u0633\u0627\u0628<\/div><\/div>',
       '<\/div>',
-      '<div class="footer">\u0647\u0630\u0627 \u0627\u0644\u0643\u0634\u0641 \u0645\u0639\u062A\u0645\u062F \u0648\u0645\u0639\u062A\u0628\u0631 \u2014 ' + ((window as any).__settings?.company_name || '\u0646\u0638\u0627\u0645 \u0627\u0644\u0645\u062D\u0645\u0648\u0644') + '<\/div>',
+      '<div class="footer">\u0647\u0630\u0627 \u0627\u0644\u0643\u0634\u0641 \u0645\u0639\u062A\u0645\u062F \u0648\u0645\u0639\u062A\u0628\u0631 \u2014 ' + esc((window as any).__settings?.company_name || '\u0646\u0638\u0627\u0645 \u0627\u0644\u0645\u062D\u0645\u0648\u0644') + '<\/div>',
       '<\/div>',
       "<script>window.print();window.onafterprint=()=>window.close();<\/script>",
       '<\/body><\/html>',

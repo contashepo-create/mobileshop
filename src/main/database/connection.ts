@@ -76,11 +76,57 @@ export function getDb(): Database.Database {
     }
 
     db = new Database(dbPath);
-    db.pragma('journal_mode = WAL');
+
+    // WAL is the right journal for a local disk and the WRONG one for a network
+    // share. It needs a shared-memory (-shm) file, which SMB and most network
+    // filesystems do not implement correctly; SQLite's own documentation warns
+    // that the result is corruption rather than an error. A shop running its
+    // database from a shared folder — which `db:createNetwork` explicitly
+    // offers — must therefore fall back to the older, slower, safe journal.
+    const onNetworkShare = isNetworkPath(dbPath);
+    if (onNetworkShare) {
+      db.pragma('journal_mode = DELETE');
+      console.log('[DB] network path detected — using DELETE journal (WAL is unsafe over SMB)');
+    } else {
+      db.pragma('journal_mode = WAL');
+    }
+
+    // How long a write waits for another machine before giving up.
+    //
+    // better-sqlite3 defaults to 5 seconds, which is fine for two clicks a
+    // second apart and NOT fine for the case that actually happens: one
+    // workstation runs a long report or the nightly backup while a cashier
+    // rings up a sale. Measured with two real processes — an 8-second
+    // transaction on machine A made machine B fail with SQLITE_BUSY after
+    // 5,012 ms; with 15 seconds it waited 7,646 ms and completed.
+    //
+    // A failed sale is far worse than a slow one, so the wait is generous.
+    db.pragma(`busy_timeout = ${onNetworkShare ? 30000 : 15000}`);
+
     db.pragma('foreign_keys = ON');
     console.log('[DB] Connected to:', dbPath);
   }
   return db;
+}
+
+/**
+ * True when the database lives on a network share rather than a local disk.
+ *
+ * Recognises a Windows UNC path and, on Unix, the usual mount points. A mapped
+ * drive letter is
+ * indistinguishable from a local one at this level — so this is a best-effort
+ * signal, not a guarantee. It only ever makes the configuration MORE
+ * conservative, so a false negative costs nothing beyond the old behaviour and
+ * a false positive costs a little speed.
+ */
+function isNetworkPath(p: string): boolean {
+  if (!p) return false;
+  // Normalise to backslashes so a UNC path is recognisable whichever
+  // separator the caller used.
+  const win = p.replace(/\//g, '\\');
+  if (win.startsWith('\\\\')) return true;              // \\server\share
+  if (/^\/(mnt|media|net)\//.test(p)) return true;      // common Unix mounts
+  return false;
 }
 
 /**

@@ -273,9 +273,29 @@ export function DatabaseManagementPage() {
               <Network size={20} className="text-blue-600" />
               <h2 className="text-lg font-semibold text-slate-800 dark:text-white">مشاركة قاعدة البيانات على شبكة محلية</h2>
             </div>
-            <p className="text-sm text-slate-500 dark:text-slate-500 dark:text-slate-400 mb-4">
+            <p className="text-sm text-slate-500 dark:text-slate-500 dark:text-slate-400 mb-3">
               شارك قاعدة البيانات بين عدة أجهزة على نفس الشبكة. ضع ملف قاعدة البيانات في مجلد مشترك على الشبكة.
             </p>
+
+            {/* Honest about the trade-off. SQLite over SMB is workable for a
+                small shop and genuinely risky if the network is unreliable, and
+                the owner is the only one who can weigh that. */}
+            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 mb-4 text-xs text-amber-800 dark:text-amber-300">
+              <div className="font-bold mb-1">⚠️ اقرأ قبل التفعيل</div>
+              <ul className="space-y-1 list-disc pr-4">
+                <li>جهاز واحد فقط يكتب في اللحظة الواحدة — الباقون ينتظرون ثوانٍ (هذا طبيعي).</li>
+                <li>
+                  <span className="font-bold">لا تفصل الكهرباء أو الشبكة</span> أثناء حفظ فاتورة —
+                  الانقطاع أثناء الكتابة على مجلد شبكة قد يتلف الملف.
+                </li>
+                <li>يجب أن يبقى الجهاز المُضيف للمجلد <span className="font-bold">شغّالاً</span> طوال العمل.</li>
+                <li>خذ <span className="font-bold">نسخة احتياطية يومية</span> — هذه أهم من أي إعداد آخر.</li>
+              </ul>
+              <div className="mt-2 pt-2 border-t border-amber-200 dark:border-amber-800">
+                يضبط البرنامج نفسه تلقائياً عند اكتشاف مسار شبكة: يستخدم نمط حفظ آمن
+                على الشبكة، ويطيل مهلة الانتظار حتى ٣٠ ثانية بدل الفشل الفوري.
+              </div>
+            </div>
 
             <div className="space-y-4">
               <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3 text-sm text-blue-700 dark:text-blue-300">

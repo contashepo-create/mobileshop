@@ -256,16 +256,35 @@ console.log('\n[5] The printed document is genuinely configurable');
   for (const c of ['index', 'qty', 'price', 'total', 'imei']) {
     t(`the ${c} column can be hidden`, new RegExp(`print_col_${c}`).test(ui) );
   }
-  t('the invoice honours the column switches',
-    /col\('index'\)/.test(p) && /col\('qty'\)/.test(p) && /col\('total'\)/.test(p));
+  // Asserted BEHAVIOURALLY, against the resolver the printer actually uses.
+  // This used to match the literal text `col('index')`, which was the old
+  // hand-written per-column implementation. That implementation was replaced
+  // by an ordered column list (so a shop can MOVE a column, not only hide it)
+  // and the check failed on code that had become more capable, not less — a
+  // structural check pinned to one implementation cannot tell those apart.
+  {
+    const P = await import('../src/shared/printProfile.ts');
+    const hidden = P.resolveProfile(
+      { print_col_index: '0', print_col_qty: '0', print_col_total: '0' }, 'sale');
+    const visible = P.visibleColumns(hidden);
+    t('the invoice honours the column switches',
+      !visible.includes('index') && !visible.includes('qty') && !visible.includes('total'),
+      visible.join(','));
+  }
 
   // A blank or absurd value must not produce an unprintable page.
   t('values are clamped to a sane range',
     /Math\.min\(max, Math\.max\(min, raw\)\)/.test(p));
   t('a non-numeric setting falls back to the default',
     /if \(!Number\.isFinite\(raw\)\) return fallback;/.test(p));
-  t('absent settings keep the previous behaviour',
-    /companyInfo\[`print_col_\$\{key\}`\] !== '0'/.test(p));
+  // Same reasoning: prove the RULE, not the line of code that implemented it.
+  // A column nobody has ever switched off must still print.
+  {
+    const P = await import('../src/shared/printProfile.ts');
+    const untouched = P.resolveProfile({}, 'sale');
+    t('absent settings keep the previous behaviour',
+      P.COLUMN_KEYS.every((k) => untouched.columns[k] === true));
+  }
 }
 
 // ---------------------------------------------------------------- 6

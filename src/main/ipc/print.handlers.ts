@@ -1,6 +1,10 @@
 import { ipcMain, BrowserWindow } from 'electron';
 import { getSession } from '../security/session';
 import { businessToday } from '../../shared/businessDate';
+import {
+  DOCUMENT_TYPES, COLUMN_LABELS, resolveProfile, visibleColumns,
+  type DocumentType, type ColumnKey,
+} from '../../shared/printProfile';
 
 /**
  * SECURITY: every value that reaches the invoice HTML is attacker-controllable
@@ -49,6 +53,21 @@ export function registerPrintHandlers() {
     try { return getSession(event.sender.id)?.username || ''; } catch { return ''; }
   };
 
+  /**
+   * The profile the WINDOW must agree with.
+   *
+   * `generateInvoiceHTML` resolves this too, but the two handlers also need it
+   * before the HTML exists -- to size the preview window and to choose the
+   * page size and copy count for the printer. Resolving it in one place means
+   * the sheet and the document it carries can never be decided by different
+   * values.
+   */
+  const profileFor = (data: any) => {
+    const type = (DOCUMENT_TYPES as readonly string[]).includes(data?.type)
+      ? (data.type as DocumentType) : 'sale';
+    return resolveProfile(data?.companyInfo, type);
+  };
+
   ipcMain.handle('print:preview', async (event, data: {
     type: string;
     paperSize: string;
@@ -56,10 +75,11 @@ export function registerPrintHandlers() {
     companyInfo: any;
     invoiceData: any;
   }) => {
+    const profile = profileFor(data);
     const html = generateInvoiceHTML({ ...data, printedBy: printingUser(event) }, false);
 
     const previewWindow = new BrowserWindow({
-      width: data.paperSize === 'A4' ? 820 : 420,
+      width: profile.paper === 'A4' || profile.paper === 'A5' ? 820 : 420,
       height: 750,
       title: 'معاينة الفاتورة',
       webPreferences: {
@@ -83,10 +103,11 @@ export function registerPrintHandlers() {
     companyInfo: any;
     invoiceData: any;
   }) => {
+    const profile = profileFor(data);
     const html = generateInvoiceHTML({ ...data, printedBy: printingUser(event) }, false);
 
     const printWindow = new BrowserWindow({
-      width: data.paperSize === 'A4' ? 820 : 420,
+      width: profile.paper === 'A4' || profile.paper === 'A5' ? 820 : 420,
       height: 750,
       title: 'طباعة الفاتورة',
       webPreferences: {
@@ -106,7 +127,13 @@ export function registerPrintHandlers() {
           silent: false,
           printBackground: true,
           margins: { marginType: 'custom', top: 0, bottom: 0, left: 0, right: 0 },
-          pageSize: getPageSize(data.paperSize),
+          // The page size comes from the RESOLVED profile, not from the
+          // payload. Passing `data.paperSize` here while the HTML was built at
+          // the profile's size printed an 80mm document onto an A4 sheet
+          // whenever the two disagreed — the body and the paper have to be
+          // decided by the same value.
+          pageSize: getPageSize(profile.paper),
+          copies: profile.copies,
         }, () => {});
       }, 500);
     });
@@ -124,7 +151,27 @@ function getPageSize(paperSize: string) {
 }
 
 function generateInvoiceHTML(data: any, autoPrint: boolean): string {
-  const { type, paperSize, template, companyInfo, invoiceData } = data;
+  const { type, companyInfo, invoiceData } = data;
+
+  /**
+   * The effective settings for THIS KIND of document.
+   *
+   * Resolved here, in the main process, from the stored settings — not taken
+   * from the payload. The renderer still sends `paperSize` and `template`
+   * (every existing caller does), but a renderer can be modified, and the
+   * document a shop gets must be the one the shop configured. The payload is
+   * accepted only as a fallback for a caller that has not been migrated.
+   *
+   * `resolveProfile` answers per-document value -> existing global value ->
+   * default, so a shop that never opens the new screen keeps exactly the
+   * document it had before this change.
+   */
+  const docType: DocumentType =
+    (DOCUMENT_TYPES as readonly string[]).includes(type) ? type : 'sale';
+  const profile = resolveProfile(companyInfo, docType);
+  const paperSize = profile.paper || data.paperSize;
+  const template = profile.template || data.template;
+
   // Supplied by the caller (the renderer knows who is signed in). Falls back to
   // a blank rather than guessing, so the line is never misleading.
   const printedBy = (data as any).printedBy || companyInfo.printed_by || '';
@@ -161,8 +208,61 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       ? "Arial, Helvetica, sans-serif"
       : "'Cairo', 'Segoe UI', Tahoma, sans-serif";
 
-  /** Column visibility. Absent means shown, matching the previous behaviour. */
-  const col = (key: string): boolean => companyInfo[`print_col_${key}`] !== '0';
+  /**
+   * The item table, built from the resolved profile.
+   *
+   * Columns used to be emitted in a fixed order with a per-column on/off flag
+   * spliced into the markup by hand, which meant "hide a column" and "move a
+   * column" were two unrelated problems and only the first was solvable. Both
+   * now come from the same ordered list, so a shop can put the total first, or
+   * drop the index entirely, without the header and the body ever
+   * disagreeing — they are generated from one array.
+   */
+  const cols = visibleColumns(profile);
+
+  const cellFor = (key: ColumnKey, item: any, i: number): string => {
+    switch (key) {
+      case 'index': return `<td class="center">${i + 1}</td>`;
+      case 'name': {
+        const name = esc(item.ItemName || item.Description || item.IMEI || item.ServiceName || '—');
+        // The IMEI rides under the name only when it has no column of its own;
+        // otherwise it would be printed twice.
+        const inlineImei = !cols.includes('imei') && item.IMEI
+          ? `<br/><small class="imei">${esc(item.IMEI)}</small>` : '';
+        return `<td>${name}${inlineImei}</td>`;
+      }
+      case 'qty': return `<td class="center">${esc(item.Quantity ?? 1)}</td>`;
+      case 'price': return `<td class="center">${num(item.UnitPrice ?? item.UnitCost)}</td>`;
+      case 'total': return `<td class="center bold">${num(
+        item.Total ?? ((Number(item.Quantity) || 0) * (Number(item.UnitPrice ?? item.UnitCost) || 0)),
+      )}</td>`;
+      case 'imei': return `<td class="center">${esc(item.IMEI || '—')}</td>`;
+      default: return '';
+    }
+  };
+
+  const itemsTable = (items: any[]): string => `
+      <table class="items-table">
+        <thead><tr>${cols.map(k => `<th>${esc(COLUMN_LABELS[k])}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${(items || []).map((item: any, i: number) =>
+            `<tr>${cols.map(k => cellFor(k, item, i)).join('')}</tr>`).join('')}
+        </tbody>
+      </table>
+    `;
+
+  /** The money block. Shared by sales, purchases and maintenance. */
+  const totalsBlock = (d: any): string => `
+      <div class="totals">
+        <div class="total-row"><span>الإجمالي الفرعي:</span><span>${num(d.subtotal)}</span></div>
+        ${d.discount > 0 ? `<div class="total-row"><span>الخصم:</span><span>${num(d.discount)}</span></div>` : ''}
+        ${d.taxAmount > 0 ? `<div class="total-row"><span>الضريبة (${esc(d.taxRate || 0)}%):</span><span>${num(d.taxAmount)}</span></div>` : ''}
+        <div class="total-row grand"><span>الإجمالي:</span><span>${num(d.totalAmount)} ${esc(companyInfo.currency || 'ج.م')}</span></div>
+        <div class="total-row paid"><span>المدفوع:</span><span>${num(d.paidAmount)}</span></div>
+        ${d.remaining > 0 ? `<div class="total-row remaining"><span>المتبقي:</span><span>${num(d.remaining)}</span></div>` : ''}
+      </div>
+      ${d.notes || d.Notes ? `<div class="invoice-notes">ملاحظات: ${esc(d.notes || d.Notes)}</div>` : ''}
+    `;
 
   const titles: any = {
     sale: 'فاتورة مبيعات', purchase: 'فاتورة مشتريات',
@@ -187,43 +287,13 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
   let itemsHTML = '';
   let totalsHTML = '';
 
-  if (type === 'sale' && invoiceData) {
-    // Columns are individually switchable. A 58mm thermal roll cannot fit four
-    // columns legibly, and a shop that sells one-off items has no use for a
-    // quantity column that always reads 1 — both used to be unavoidable.
-    itemsHTML = `
-      <table class="items-table">
-        <thead><tr>
-          ${col('index') ? '<th>#</th>' : ''}
-          <th>الصنف</th>
-          ${col('qty') ? '<th>كمية</th>' : ''}
-          ${col('price') ? '<th>سعر</th>' : ''}
-          ${col('total') ? '<th>إجمالي</th>' : ''}
-        </tr></thead>
-        <tbody>
-          ${(invoiceData.items || []).map((item: any, i: number) => `
-            <tr>
-              ${col('index') ? `<td class="center">${i + 1}</td>` : ''}
-              <td>${esc(item.ItemName || item.IMEI || item.ServiceName || '—')}${col('imei') && item.IMEI ? `<br/><small class="imei">${esc(item.IMEI)}</small>` : ''}</td>
-              ${col('qty') ? `<td class="center">${esc(item.Quantity)}</td>` : ''}
-              ${col('price') ? `<td class="center">${num(item.UnitPrice)}</td>` : ''}
-              ${col('total') ? `<td class="center bold">${num((Number(item.Quantity) || 0) * (Number(item.UnitPrice) || 0))}</td>` : ''}
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    `;
-    totalsHTML = `
-      <div class="totals">
-        <div class="total-row"><span>الإجمالي الفرعي:</span><span>${num(invoiceData.subtotal)}</span></div>
-        ${invoiceData.discount > 0 ? `<div class="total-row"><span>الخصم:</span><span>${num(invoiceData.discount)}</span></div>` : ''}
-        ${invoiceData.taxAmount > 0 ? `<div class="total-row"><span>الضريبة (${esc(invoiceData.taxRate || 0)}%):</span><span>${num(invoiceData.taxAmount)}</span></div>` : ''}
-        <div class="total-row grand"><span>الإجمالي:</span><span>${num(invoiceData.totalAmount)} ${esc(companyInfo.currency || 'ج.م')}</span></div>
-        <div class="total-row paid"><span>المدفوع:</span><span>${num(invoiceData.paidAmount)}</span></div>
-        ${invoiceData.remaining > 0 ? `<div class="total-row remaining"><span>المتبقي:</span><span>${num(invoiceData.remaining)}</span></div>` : ''}
-      </div>
-      ${invoiceData.notes || invoiceData.Notes ? `<div class="invoice-notes">ملاحظات: ${esc(invoiceData.notes || invoiceData.Notes)}</div>` : ''}
-    `;
+  // A sale and a purchase are the same shape of document -- a list of lines and
+  // a money block -- so they share one branch. `purchase` previously had a
+  // TITLE but no body: printing one produced a header, an empty table and no
+  // totals at all. Same for `statement`.
+  if ((type === 'sale' || type === 'purchase') && invoiceData) {
+    itemsHTML = itemsTable(invoiceData.items);
+    totalsHTML = totalsBlock(invoiceData);
   } else if ((type === 'voucher_receipt' || type === 'voucher_payment') && invoiceData) {
     itemsHTML = `
       <div class="voucher-box">
@@ -241,19 +311,25 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
         ${invoiceData.ticketNumber ? `<div class="device-row"><span class="device-label">تذكرة:</span><span>${esc(invoiceData.ticketNumber)}</span></div>` : ''}
       </div>
     ` : '';
+    itemsHTML = deviceSection + itemsTable(invoiceData.items);
+    totalsHTML = totalsBlock(invoiceData);
+  } else if (type === 'statement' && invoiceData) {
+    // A statement is a running ledger, not an invoice: it has no subtotal or
+    // amount paid, and its closing balance is the only figure that matters.
+    // It had a title and nothing else before.
     itemsHTML = `
-      ${deviceSection}
       <table class="items-table">
         <thead><tr>
-          <th>البيان</th><th>كمية</th><th>سعر</th><th>إجمالي</th>
+          <th>التاريخ</th><th>البيان</th><th>مدين</th><th>دائن</th><th>الرصيد</th>
         </tr></thead>
         <tbody>
-          ${(invoiceData.items || []).map((item: any) => `
+          ${(invoiceData.items || []).map((row: any) => `
             <tr>
-              <td>${esc(item.Description || item.ItemName || '—')}</td>
-              <td class="center">${esc(item.Quantity ?? 1)}</td>
-              <td class="center">${num(item.UnitPrice)}</td>
-              <td class="center bold">${num(item.Total ?? ((Number(item.Quantity) || 0) * (Number(item.UnitPrice) || 0)))}</td>
+              <td class="center">${esc(row.Date || row.date || '')}</td>
+              <td>${esc(row.Description || row.description || '—')}</td>
+              <td class="center">${row.Debit ? num(row.Debit) : '—'}</td>
+              <td class="center">${row.Credit ? num(row.Credit) : '—'}</td>
+              <td class="center bold">${num(row.Balance)}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -261,13 +337,10 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
     `;
     totalsHTML = `
       <div class="totals">
-        <div class="total-row"><span>الإجمالي الفرعي:</span><span>${num(invoiceData.subtotal)}</span></div>
-        ${invoiceData.discount > 0 ? `<div class="total-row"><span>الخصم:</span><span>${num(invoiceData.discount)}</span></div>` : ''}
-        <div class="total-row grand"><span>الإجمالي:</span><span>${num(invoiceData.totalAmount)} ${esc(companyInfo.currency || 'ج.م')}</span></div>
-        <div class="total-row paid"><span>المدفوع:</span><span>${num(invoiceData.paidAmount)}</span></div>
-        ${invoiceData.remaining > 0 ? `<div class="total-row remaining"><span>المتبقي:</span><span>${num(invoiceData.remaining)}</span></div>` : ''}
+        <div class="total-row"><span>إجمالي المدين:</span><span>${num(invoiceData.totalDebit)}</span></div>
+        <div class="total-row"><span>إجمالي الدائن:</span><span>${num(invoiceData.totalCredit)}</span></div>
+        <div class="total-row grand"><span>الرصيد:</span><span>${num(invoiceData.netBalance)} ${esc(companyInfo.currency || 'ج.م')}</span></div>
       </div>
-      ${invoiceData.notes || invoiceData.Notes ? `<div class="invoice-notes">ملاحظات: ${esc(invoiceData.notes || invoiceData.Notes)}</div>` : ''}
     `;
   }
 
@@ -297,6 +370,10 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
                       font-size: 9px; color: #666; text-align: center; }
         .terms { margin-top: 6px; font-size: 9px; color: #555; text-align: center;
                  white-space: pre-line; }
+        .doc-header-text { margin: 4px 0; font-size: 10px; color: #444; text-align: center;
+                           white-space: pre-line; }
+        .doc-footer-text { margin-top: 6px; font-size: 9px; color: #555; text-align: center;
+                           white-space: pre-line; }
         .company-name { font-size: ${isThermal ? '14px' : '20px'}; font-weight: bold; }
         .info-line { font-size: 11px; color: #666; }
         .divider { border: none; border-top: 1px dashed #ccc; margin: 5px 0; }
@@ -329,6 +406,15 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
     <body>
       ${header}
       <div class="invoice-title">${esc(titles[type] || 'فاتورة')}</div>
+      ${/*
+         Free text the shop can put on THIS KIND of document only.
+         A sales invoice may need a returns policy, a purchase invoice an
+         internal reference, a voucher nothing at all. One shared block could
+         not say different things on different documents.
+         `white-space: pre-line` so a typed line break survives; escaped, so
+         the text cannot become markup.
+      */ ''}
+      ${profile.headerText ? `<div class="doc-header-text">${esc(profile.headerText)}</div>` : ''}
       <div class="invoice-meta">
         <span>رقم: ${esc(invoiceData?.saleNumber || invoiceData?.purchaseNumber || invoiceData?.ticketNumber || invoiceData?.voucherNumber || '—')}</span>
         <span>التاريخ: ${esc(invoiceData?.date || invoiceData?.Date || businessToday())}</span>
@@ -338,6 +424,7 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       ${totalsHTML}
       <div class="thank-you">${esc(companyInfo.invoice_thanks_note || 'شكراً لتعاملكم معنا')}</div>
       ${companyInfo.invoice_terms ? `<div class="terms">${esc(companyInfo.invoice_terms)}</div>` : ''}
+      ${profile.footerText ? `<div class="doc-footer-text">${esc(profile.footerText)}</div>` : ''}
       <div class="footer">
         ${companyInfo.owner_name ? `المالك: ${esc(companyInfo.owner_name)} | ` : ''}
         ${companyInfo.phone ? `هاتف: ${esc(companyInfo.phone)}` : ''}

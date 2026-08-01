@@ -1,5 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Save } from 'lucide-react';
+import { Save, ArrowUp, ArrowDown } from 'lucide-react';
+import {
+  DOCUMENT_TYPES, DOCUMENT_LABELS, COLUMN_KEYS, COLUMN_LABELS,
+  MANDATORY_COLUMNS, resolveProfile, profileKeys,
+  type DocumentType, type ColumnKey, type PrintProfile,
+} from '../../../../shared/printProfile';
 import { Button } from '../../components/ui/Button';
 import { useToastStore } from '../../components/ui/Toast';
 
@@ -39,6 +44,17 @@ export function PrintSettings() {
     index: true, qty: true, price: true, total: true, imei: true,
   });
 
+  /**
+   * Per-document overrides.
+   *
+   * `docType` is which document the panel below is editing; `profiles` holds
+   * the resolved settings for every type. They are resolved from the SAME
+   * module the printer uses, so what this screen shows is what will print.
+   */
+  const [docType, setDocType] = useState<DocumentType>('sale');
+  const [profiles, setProfiles] = useState<Record<string, PrintProfile>>({});
+  const [rawSettings, setRawSettings] = useState<Record<string, string>>({});
+
   useEffect(() => {
     (async () => {
       const settings = await window.api.invoke('settings:getAll');
@@ -62,6 +78,10 @@ export function PrintSettings() {
         total: settings.print_col_total !== '0',
         imei: settings.print_col_imei !== '0',
       });
+      setRawSettings(settings);
+      const resolved: Record<string, PrintProfile> = {};
+      for (const t of DOCUMENT_TYPES) resolved[t] = resolveProfile(settings, t);
+      setProfiles(resolved);
     })();
   }, []);
 
@@ -85,9 +105,75 @@ export function PrintSettings() {
       print_col_price: cols.price ? '1' : '0',
       print_col_total: cols.total ? '1' : '0',
       print_col_imei: cols.imei ? '1' : '0',
+      ...perDocumentPayload(),
     });
     showToast('success', 'تم حفظ إعدادات الطباعة');
   };
+
+  /**
+   * Flattens the per-document profiles back into settings keys.
+   *
+   * Written as an explicit list from `profileKeys` rather than by spreading
+   * whatever happens to be on the object: the settings table is shared with
+   * accounting and security values, and a screen that writes arbitrary keys
+   * into it is a way to overwrite one by accident.
+   */
+  const perDocumentPayload = (): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const t of DOCUMENT_TYPES) {
+      const pf = profiles[t];
+      if (!pf) continue;
+      out[`print_doc_${t}_template`] = pf.template;
+      out[`print_doc_${t}_paper`] = pf.paper;
+      out[`print_doc_${t}_copies`] = String(pf.copies);
+      out[`print_doc_${t}_order`] = pf.order.join(',');
+      out[`print_doc_${t}_header`] = pf.headerText;
+      out[`print_doc_${t}_footer`] = pf.footerText;
+      out[`print_doc_${t}_qr`] = pf.showQr ? '1' : '0';
+      for (const k of COLUMN_KEYS) out[`print_doc_${t}_col_${k}`] = pf.columns[k] ? '1' : '0';
+    }
+    return out;
+  };
+
+  /** Updates one field of the document currently being edited. */
+  const patchProfile = (patch: Partial<PrintProfile>) =>
+    setProfiles((prev) => ({ ...prev, [docType]: { ...prev[docType], ...patch } }));
+
+  /** Moves a column up or down in the print order. */
+  const moveColumn = (key: ColumnKey, delta: number) => {
+    const pf = profiles[docType];
+    if (!pf) return;
+    const order = [...pf.order];
+    const i = order.indexOf(key);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= order.length) return;
+    [order[i], order[j]] = [order[j], order[i]];
+    patchProfile({ order });
+  };
+
+  /**
+   * Restores this document to following the global settings.
+   *
+   * Writing empty strings makes `resolveProfile` fall through to the global
+   * value again, which is exactly what "no override" means. Deleting the rows
+   * would work too, but `settings:setMany` only upserts, and an empty string
+   * is already treated as absent by the resolver.
+   */
+  const clearOverrides = async () => {
+    const cleared: Record<string, string> = {};
+    for (const k of profileKeys(docType)) cleared[k] = '';
+    await window.api.invoke('settings:setMany', cleared);
+    const settings = await window.api.invoke('settings:getAll');
+    setRawSettings(settings);
+    const resolved: Record<string, PrintProfile> = {};
+    for (const t of DOCUMENT_TYPES) resolved[t] = resolveProfile(settings, t);
+    setProfiles(resolved);
+    showToast('success', `أُعيد ${DOCUMENT_LABELS[docType]} إلى الإعدادات العامة`);
+  };
+
+  /** True when this document has at least one stored override of its own. */
+  const hasOverrides = (t: DocumentType): boolean =>
+    profileKeys(t).some((k) => String(rawSettings[k] ?? '').trim() !== '');
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -194,6 +280,125 @@ export function PrintSettings() {
             </label>
           ))}
         </div>
+      </div>
+
+      {/* Per-document overrides. Everything above is GLOBAL; this panel lets one
+          kind of document differ. A sales invoice goes to the customer on a
+          thermal roll, a purchase invoice is an internal A4 record, and a
+          receipt voucher has no line items at all — one shared answer was
+          wrong for all but one of them. */}
+      <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
+        <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-2">إعدادات كل مستند على حدة</h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+          اختر نوع المستند ثم عدّل ما يخصه. أي إعداد لا تغيّره هنا يتبع الإعدادات العامة أعلاه تلقائياً.
+        </p>
+
+        <div className="flex flex-wrap gap-2 mb-4">
+          {DOCUMENT_TYPES.map((t) => (
+            <button key={t} type="button" onClick={() => setDocType(t)}
+              className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                docType === t
+                  ? 'bg-primary-600 text-white border-primary-600'
+                  : 'bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-600'
+              }`}>
+              {DOCUMENT_LABELS[t]}
+              {hasOverrides(t) && <span className="mr-1 text-[10px]">●</span>}
+            </button>
+          ))}
+        </div>
+
+        {profiles[docType] && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">القالب</label>
+                <select value={profiles[docType].template}
+                  onChange={(e) => patchProfile({ template: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-sm">
+                  {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">حجم الورق</label>
+                <select value={profiles[docType].paper}
+                  onChange={(e) => patchProfile({ paper: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-sm">
+                  {paperSizes.map((ps) => <option key={ps.value} value={ps.value}>{ps.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">عدد النسخ</label>
+                <input type="number" min={1} max={5} dir="ltr"
+                  value={profiles[docType].copies}
+                  onChange={(e) => patchProfile({ copies: Math.min(5, Math.max(1, parseInt(e.target.value) || 1)) })}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-sm" />
+              </div>
+            </div>
+
+            {/* Column ORDER and visibility together. They were two separate
+                problems before and only visibility was solvable. */}
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-2">
+                ترتيب الأعمدة وإظهارها — الأعلى يُطبع أولاً (من اليمين)
+              </label>
+              <div className="space-y-1">
+                {profiles[docType].order.map((key, idx) => {
+                  const required = MANDATORY_COLUMNS.includes(key);
+                  return (
+                    <div key={key}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-600">
+                      <span className="text-xs text-slate-400 w-4">{idx + 1}</span>
+                      <input type="checkbox" checked={profiles[docType].columns[key] || required}
+                        disabled={required}
+                        onChange={(e) => patchProfile({
+                          columns: { ...profiles[docType].columns, [key]: e.target.checked },
+                        })}
+                        className="rounded disabled:opacity-50" />
+                      <span className="flex-1 text-sm text-slate-700 dark:text-slate-200">
+                        {COLUMN_LABELS[key]}
+                        {required && <span className="text-[10px] text-slate-400 mr-2">(إجباري)</span>}
+                      </span>
+                      <button type="button" onClick={() => moveColumn(key, -1)} disabled={idx === 0}
+                        className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-600 disabled:opacity-30"
+                        title="لأعلى"><ArrowUp size={14} /></button>
+                      <button type="button" onClick={() => moveColumn(key, 1)}
+                        disabled={idx === profiles[docType].order.length - 1}
+                        className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-600 disabled:opacity-30"
+                        title="لأسفل"><ArrowDown size={14} /></button>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                اسم الصنف إجباري — فاتورة تقول &quot;٢ × ١٥٠&quot; دون ذكر الصنف ليست مستنداً يُعتد به.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+                  نص أعلى المستند (خاص بهذا النوع)
+                </label>
+                <textarea rows={2} value={profiles[docType].headerText}
+                  onChange={(e) => patchProfile({ headerText: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+                  نص أسفل المستند (خاص بهذا النوع)
+                </label>
+                <textarea rows={2} value={profiles[docType].footerText}
+                  onChange={(e) => patchProfile({ footerText: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-sm" />
+              </div>
+            </div>
+
+            <button type="button" onClick={clearOverrides}
+              className="text-xs text-red-600 hover:underline">
+              إلغاء تخصيص {DOCUMENT_LABELS[docType]} والعودة للإعدادات العامة
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Provenance and free text on the document. */}

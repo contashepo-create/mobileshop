@@ -3,6 +3,7 @@ import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { useEffect } from 'react';
 import { useThemeStore } from '../../stores/theme.store';
+import { ErrorBoundary } from '../shared/ErrorBoundary';
 
 export function MainLayout() {
   const { initTheme } = useThemeStore();
@@ -17,7 +18,13 @@ export function MainLayout() {
       <div className="flex-1 flex flex-col overflow-hidden">
         <Header />
         <main className="flex-1 overflow-auto p-6">
-          <Outlet />
+          {/* Wrapping the OUTLET rather than the whole layout is deliberate: a
+              screen that throws is contained, and the sidebar and header stay
+              alive so the shop can walk to another section instead of
+              restarting the application. */}
+          <ErrorBoundary area="الصفحة">
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

@@ -160,13 +160,21 @@ export function moveCash(
   amount: number,
   cashAccountId?: number | null,
   paymentMethodId?: number | null,
-  // REQUIRED, with no default. Every call site states +1 or -1 explicitly, so
-  // a default was unused — mutation testing proved it equivalent by flipping
-  // it with no observable effect. An unused default on a function that moves
-  // money is a trap for the next caller, who would inherit a direction nobody
-  // chose. Making it required means the direction is always a decision.
-  direction: 1 | -1,
+  // A default is REQUIRED here by the language, not by preference: a
+  // parameter with no default cannot follow optional ones (TS1016), and the
+  // two account ids above are both optional. I removed the default last time
+  // to force every caller to state a direction, and shipped a file that does
+  // not compile — the safety I wanted has to come from a check that runs.
+  //
+  // So: the default is +1 (a payment), and the guard below refuses anything
+  // that is not exactly +1 or -1. A caller that omits it gets the ordinary
+  // direction; a caller that passes nonsense is stopped rather than silently
+  // multiplying money by a number nobody intended.
+  direction: 1 | -1 = 1,
 ): void {
+  if (direction !== 1 && direction !== -1) {
+    throw new Error(`moveCash: direction must be +1 or -1, received ${String(direction)}`);
+  }
   // An expense contract takes money OUT; an income contract brings it in.
   const sign = (rentType === 'expense' ? -1 : 1) * direction;
   const delta = sign * amount;

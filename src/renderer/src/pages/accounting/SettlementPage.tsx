@@ -218,7 +218,7 @@ export function SettlementPage() {
                 { key: 'ActualBalance', title: 'الفعلي', render: (r) => <span className="text-slate-600 dark:text-slate-300">{r.ActualBalance?.toFixed(2)}</span> },
                 { key: 'Difference', title: 'الفرق', render: (r) => <Badge variant={r.Difference > 0 ? 'green' : 'red'}>{r.Difference > 0 ? '+' : ''}{r.Difference?.toFixed(2)}</Badge> },
               ]}
-              data={asRows(detailsModal.details)}
+              data={asRows<Record<string, any>>(detailsModal.details)}
               keyField="DetailID"
               emptyMessage="لا توجد تفاصيل"
             />

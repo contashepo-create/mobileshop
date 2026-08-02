@@ -131,6 +131,39 @@ export function registerOpeningBalanceHandlers() {
     employees: { id: number; balance: number }[];
   }) => {
     const db = getDb();
+
+    // Validated BEFORE anything is written.
+    //
+    // The single-record handlers above all run `checkAmount`; this one wrote
+    // whatever it was handed. Measured against a real database: -99999 was
+    // stored verbatim, and NaN silently became NULL — which is worse, because
+    // a null balance is not a number the reports can even add up.
+    //
+    // Cash boxes and wallets cannot hold less than nothing. Customer,
+    // supplier and employee balances CAN legitimately be negative — that is
+    // the shop owing them — so those are only checked for being real numbers.
+    const problems: string[] = [];
+    for (const [rows, label, allowNegative] of [
+      [data.cashAccounts, 'رصيد الخزينة', false],
+      [data.paymentMethods, 'رصيد وسيلة الدفع', false],
+      [data.customers, 'رصيد العميل', true],
+      [data.suppliers, 'رصيد المورد', true],
+      [data.employees, 'رصيد الموظف', true],
+    ] as const) {
+      for (const row of rows || []) {
+        const n = Number(row?.balance);
+        if (!Number.isFinite(n)) {
+          problems.push(`${label}: قيمة غير صالحة`);
+        } else if (!allowNegative) {
+          const res = checkAmount(n, label);
+          if (!res.ok) problems.push(res.message);
+        }
+      }
+    }
+    if (problems.length > 0) {
+      return { success: false, message: problems.slice(0, 3).join(' • ') };
+    }
+
     const tx = db.transaction(() => {
       for (const c of data.cashAccounts) {
         db.prepare('UPDATE cash_accounts SET Balance = ? WHERE CashAccountID = ?').run(c.balance, c.id);

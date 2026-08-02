@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth.store';
 import { useThemeStore } from '../../stores/theme.store';
-import { Lock, User, Moon, Sun, Eye, EyeOff, Save, KeyRound, ShieldAlert, X } from 'lucide-react';
+import { Lock, User, Moon, Sun, Eye, EyeOff, Save, ShieldAlert, X } from 'lucide-react';
 import { useToastStore } from '../../components/ui/Toast';
 
 export function Login() {
@@ -16,7 +16,6 @@ export function Login() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [saveUsername, setSaveUsername] = useState(false);
-  const [savePassword, setSavePassword] = useState(false);
   const [savedAccounts, setSavedAccounts] = useState<{username: string; password: string}[]>([]);
   const [showForgot, setShowForgot] = useState(false);
   const [forgotDevUser, setForgotDevUser] = useState('');
@@ -51,17 +50,21 @@ export function Login() {
         }
       } catch {}
     }
-    const savedPass = localStorage.getItem('saved_password');
-    if (savedPass) {
+    // A previous build stored the password here. Read the USERNAME out of it
+    // so the shop does not lose that convenience, then delete the record —
+    // leaving it in place would keep the plaintext on disk indefinitely for
+    // anyone who upgrades.
+    const legacy = localStorage.getItem('saved_password');
+    if (legacy) {
       try {
-        const parsed = JSON.parse(savedPass);
-        if (parsed.username) {
+        const parsed = JSON.parse(legacy);
+        if (parsed?.username) {
           setUsername(parsed.username);
-          setPassword(parsed.password || '');
-          setSavePassword(true);
           setSaveUsername(true);
+          localStorage.setItem('saved_username', parsed.username);
         }
-      } catch {}
+      } catch { /* unreadable: it is being deleted anyway */ }
+      localStorage.removeItem('saved_password');
     }
   }, []);
 
@@ -84,12 +87,17 @@ export function Login() {
         localStorage.removeItem('saved_username');
       }
 
-      // Save password if checked
-      if (savePassword) {
-        localStorage.setItem('saved_password', JSON.stringify({ username, password }));
-      } else {
-        localStorage.removeItem('saved_password');
-      }
+      // The password is NEVER persisted.
+      //
+      // It used to be written to localStorage as plain JSON — not even
+      // obfuscated — under `saved_password`. localStorage is readable by any
+      // script running in this window and by anyone who opens the profile
+      // folder, and a shop counter is a shared machine: the point of a
+      // password is that the next person on the till does not have it.
+      //
+      // Removed unconditionally, so a build that once saved one wipes it on
+      // the next successful login rather than leaving it on disk forever.
+      localStorage.removeItem('saved_password');
       navigate('/');
     } else {
       setError('اسم المستخدم أو كلمة المرور غير صحيحة');
@@ -318,18 +326,10 @@ export function Login() {
               </span>
             </label>
 
-            <label className={`flex items-center gap-2 cursor-pointer ${!saveUsername ? 'opacity-40' : ''}`}>
-              <input
-                type="checkbox"
-                checked={savePassword}
-                onChange={(e) => setSavePassword(e.target.checked)}
-                disabled={!saveUsername}
-                className="w-4 h-4 rounded text-primary-600 focus:ring-primary-500"
-              />
-              <span className="text-sm text-slate-600 dark:text-slate-300 flex items-center gap-1">
-                <KeyRound size={14} /> حفظ كلمة المرور
-              </span>
-            </label>
+            {/* "Save password" removed. Offering it implies the program can
+                store a password safely on a shared counter machine, and it
+                cannot: localStorage is plain text to anyone with the profile
+                folder. The username is still remembered. */}
           </div>
 
           {error && (

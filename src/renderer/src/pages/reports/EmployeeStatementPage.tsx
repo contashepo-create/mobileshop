@@ -441,7 +441,7 @@ export function EmployeeStatementPage() {
                 </div>
               )},
             ]}
-            data={asRows(data.operations)}
+            data={asRows<Record<string, any>>(data.operations)}
             keyField="RefID"
             emptyMessage="لا توجد عمليات"
           />

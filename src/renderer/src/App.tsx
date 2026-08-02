@@ -4,6 +4,7 @@ import { Login } from './pages/auth/Login';
 import { LicenseActivationPage } from './pages/auth/LicenseActivationPage';
 import { FirstRunWizard } from './pages/setup/FirstRunWizard';
 import { MainLayout } from './components/layout/MainLayout';
+import { ErrorBoundary } from './components/shared/ErrorBoundary';
 import { Dashboard } from './pages/dashboard/Dashboard';
 import { SettingsPage } from './pages/settings/SettingsPage';
 import { BackupPage } from './pages/settings/BackupPage';
@@ -98,7 +99,11 @@ export default function App() {
   const isLicensed = licenseStatus?.status === 'active' || licenseStatus?.status === 'trial';
 
   return (
-    <>
+    // The ROOT boundary. The one inside MainLayout covers ordinary screens;
+    // this covers everything outside it — the login screen, the first-run
+    // wizard and the licence page — where there is no layout left to fall
+    // back to and a throw would otherwise leave a blank window.
+    <ErrorBoundary area="التطبيق">
       <Routes>
         {/* Dev console is always accessible, even when license is expired */}
         <Route path="/dev-console" element={<DevConsolePage />} />
@@ -156,6 +161,6 @@ export default function App() {
         to type into, and those screens already state the licence situation.
       */}
       {isLicensed && isAuthenticated && <NoticeCenter />}
-    </>
+    </ErrorBoundary>
   );
 }

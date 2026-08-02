@@ -417,7 +417,7 @@ export function SupplierStatementPage() {
                 </div>
               )},
             ]}
-            data={asRows(data.operations)}
+            data={asRows<Record<string, any>>(data.operations)}
             keyField="RefNumber"
             emptyMessage="لا توجد عمليات"
           />

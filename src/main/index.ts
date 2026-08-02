@@ -15,6 +15,7 @@ import { registerMaintenanceHandlers } from './ipc/maintenance.handlers';
 import { registerVouchersHandlers } from './ipc/vouchers.handlers';
 import { registerPayrollHandlers } from './ipc/payroll.handlers';
 import { registerRentHandlers } from './ipc/rent.handlers';
+import { registerRentPartyHandlers } from './ipc/rentParty.handlers';
 import { registerFiscalYearHandlers } from './ipc/fiscalYear.handlers';
 import { registerReportsHandlers } from './ipc/reports.handlers';
 import { registerBackupHandlers } from './ipc/backup.handlers';
@@ -220,6 +221,7 @@ app.whenReady().then(() => {
     registerVouchersHandlers();
     registerPayrollHandlers();
     registerRentHandlers();
+    registerRentPartyHandlers();
     registerFiscalYearHandlers();
     registerReportsHandlers();
     registerBackupHandlers();

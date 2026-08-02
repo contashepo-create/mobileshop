@@ -73,7 +73,7 @@ const GUARDED_PREFIXES = [
   // meant the runtime invariant checks never ran on the rent section at
   // all — which is why a double payment could drain the till without the
   // guard noticing.
-  'rents:', 'rentPayments:',
+  'rents:', 'rentPayments:', 'rentParties:',
 ];
 
 /** Read-only channels inside those prefixes. Checking them wastes time only. */

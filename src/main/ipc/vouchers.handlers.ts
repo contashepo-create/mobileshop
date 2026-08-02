@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
+import { applyToInstalment, remainingOn } from './rentSettle';
 import { checkAmounts } from '../../shared/money';
 
 export function registerVouchersHandlers() {
@@ -37,6 +38,8 @@ export function registerVouchersHandlers() {
     PartyType?: string; PartyID?: number; PartyName?: string;
     Description: string; CashAccountID: number; PaymentMethodID?: number;
     ReferenceType?: string; ReferenceID?: number;
+    /** Settles a specific rent instalment. See the block in the transaction. */
+    RentPaymentID?: number;
     userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
@@ -68,6 +71,35 @@ export function registerVouchersHandlers() {
       }
     }
 
+    // A voucher may settle a specific rent instalment.
+    //
+    // Before this existed, writing a voucher for rent moved money and updated
+    // NOTHING: the profit and loss excludes PartyType='rent' (rent is supposed
+    // to arrive from rent_payments), so the amount left the till and appeared
+    // in no expense figure at all. The month also stayed unpaid, so it could
+    // be settled AGAIN from the rent screen.
+    //
+    // Checked here, before anything is written, so a bad link cannot leave a
+    // voucher recorded against an instalment it could not settle.
+    if (data.RentPaymentID) {
+      if (data.VoucherType !== 'payment') {
+        return { success: false, message: 'ربط الإيجار متاح لسندات الصرف فقط' };
+      }
+      const rp = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?')
+        .get(data.RentPaymentID) as any;
+      if (!rp) return { success: false, message: 'القسط المحدد غير موجود' };
+      if (rp.CancelledAt) return { success: false, message: 'القسط المحدد ملغى' };
+      const left = remainingOn(rp);
+      if (left <= 0) return { success: false, message: 'تم دفع هذا القسط بالكامل' };
+      if (data.Amount > left + 0.005) {
+        return {
+          success: false,
+          message: `المبلغ أكبر من المتبقي على القسط: المتبقي ${left.toFixed(2)}`,
+        };
+      }
+    }
+
+    let rentResult: any = null;
     const tx = db.transaction(() => {
       const result = db.prepare(`
         INSERT INTO vouchers (VoucherNumber, VoucherType, FiscalYearID, Date, Amount,
@@ -101,6 +133,32 @@ export function registerVouchersHandlers() {
           .run(sign * data.Amount, data.CashAccountID);
       }
 
+      // Settle the linked instalment.
+      //
+      // `skipCashMove` because the voucher has ALREADY moved the money a few
+      // lines above. Letting the settle helper move it again would take the
+      // amount twice for one payment — exactly the class of defect this whole
+      // section was rebuilt to remove.
+      if (data.RentPaymentID) {
+        rentResult = applyToInstalment({
+          db,
+          rentPaymentId: data.RentPaymentID,
+          amount: data.Amount,
+          txnDate: dateStr,
+          cashAccountId: data.CashAccountID ?? null,
+          paymentMethodId: data.PaymentMethodID ?? null,
+          sourceType: 'voucher',
+          sourceId: Number(result.lastInsertRowid),
+          userId: data.userId,
+          fiscalYearId: data.fiscalYearId,
+          notes: data.Description ?? null,
+          skipCashMove: true,
+        });
+        // Abandon the whole voucher if the instalment refused it, so a voucher
+        // can never exist claiming to have paid a month that it did not.
+        if (!rentResult.success) throw new Error('RENT_REJECTED');
+      }
+
       // Update party balance
       if (data.PartyType === 'customer' && data.PartyID) {
         if (data.VoucherType === 'receipt') {
@@ -123,7 +181,21 @@ export function registerVouchersHandlers() {
       }
     });
 
-    tx();
-    return { success: true, voucherNumber };
+    try {
+      tx();
+    } catch (err: any) {
+      // A rejected instalment rolls the voucher back with it. Report the
+      // instalment's own reason — "the amount exceeds what the month owes" is
+      // useful; an opaque failure is not.
+      if (err?.message === 'RENT_REJECTED') {
+        return rentResult ?? { success: false, message: 'تعذّر ربط السند بالقسط' };
+      }
+      throw err;
+    }
+    return {
+      success: true,
+      voucherNumber,
+      ...(rentResult ? { rentRemaining: rentResult.remaining, rentStatus: rentResult.status } : {}),
+    };
   });
 }

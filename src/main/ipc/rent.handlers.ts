@@ -3,6 +3,7 @@ import { getDb } from '../database/connection';
 import { checkAmount } from '../../shared/money';
 import { getCallerUserId } from '../security/ipcGuard';
 import { businessToday } from '../../shared/businessDate';
+import { applyToInstalment, moveCash, checkFunds, remainingOn } from './rentSettle';
 
 /**
  * RENT CONTRACTS AND THEIR INSTALMENTS.
@@ -206,83 +207,72 @@ export function registerRentHandlers() {
     return db.prepare(query).all(...params);
   });
 
+  /**
+   * Pays all or PART of an instalment.
+   *
+   * The arithmetic lives in `rentSettle.applyToInstalment`, shared with the
+   * voucher path, so both doors enforce the same rule: an instalment can never
+   * receive more than it still owes. That is what makes it impossible to
+   * settle the same month twice through two different screens.
+   */
   ipcMain.handle('rentPayments:pay', async (_event, data: {
-    RentPaymentID: number; CashAccountID: number;
-    userId: number; fiscalYearId: number;
+    RentPaymentID: number; CashAccountID?: number; PaymentMethodID?: number;
+    Amount?: number; userId: number; fiscalYearId: number; Notes?: string;
   }) => {
     const db = getDb();
     const payment = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?')
       .get(data.RentPaymentID) as any;
     if (!payment) return { success: false, message: 'الدفعة غير موجودة' };
-
-    // THE GUARD THAT WAS MISSING.
-    //
-    // Without it the handler re-stamped the row 'paid' and moved the cash
-    // again, every time it was called. Two clicks on a slow machine, or a
-    // retry after a lost window, silently took the rent twice: the ledger kept
-    // showing one charge because the row is one row, while the till kept
-    // losing money. Verified against `salaries:pay`, which has always had it.
-    if (payment.Status === 'paid') {
-      return { success: false, message: 'تم دفع هذا القسط بالفعل' };
-    }
-    if (payment.CancelledAt) {
-      return { success: false, message: 'هذا القسط ملغى ولا يمكن دفعه' };
-    }
-    if (!data.CashAccountID) {
-      return { success: false, message: 'اختر الخزينة' };
+    if (!data.CashAccountID && !data.PaymentMethodID) {
+      return { success: false, message: 'اختر الخزينة أو وسيلة الدفع' };
     }
 
-    const dateStr = businessToday();
-    const rent = db.prepare('SELECT RentType FROM rents WHERE RentID = ?').get(payment.RentID) as any;
+    const rent = db.prepare('SELECT * FROM rents WHERE RentID = ?').get(payment.RentID) as any;
+    if (!rent) return { success: false, message: 'العقد غير موجود' };
 
-    // Check sufficient balance for expense payments (unless negative cash allowed)
-    const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
-    if (allowNegCash?.Value !== '1' && rent?.RentType === 'expense') {
-      const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
-      if (!acc || (acc.Balance || 0) < payment.Amount) {
-        return { success: false, message: `الرصيد غير كافٍ في الخزينة لدفع الإيجار: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${(payment.Amount || 0).toFixed(2)}` };
-      }
+    // Absent amount means "settle what is left", which is the common case and
+    // keeps the old one-click behaviour working.
+    const outstanding = remainingOn(payment);
+    const amount = data.Amount === undefined || data.Amount === null
+      ? outstanding : Number(data.Amount);
+
+    const shortfall = checkFunds(db, rent.RentType, amount, data.CashAccountID, data.PaymentMethodID);
+    if (shortfall) return { success: false, message: shortfall };
+
+    // The throw below rolls the transaction back; the structured failure that
+    // caused it is what the caller sees. Without the try the rejection would
+    // surface as an unhandled Error and the screen would show nothing useful.
+    let result: any = { success: false, message: 'تعذّر الدفع' };
+    try {
+      db.transaction(() => {
+      result = applyToInstalment({
+        db,
+        rentPaymentId: data.RentPaymentID,
+        amount,
+        txnDate: businessToday(),
+        cashAccountId: data.CashAccountID ?? null,
+        paymentMethodId: data.PaymentMethodID ?? null,
+        sourceType: 'rent',
+        userId: data.userId,
+        fiscalYearId: data.fiscalYearId,
+        notes: data.Notes ?? null,
+      });
+      if (!result.success) throw new Error('REJECTED');
+      })();
+    } catch {
+      // `result` already holds the reason.
     }
 
-    db.transaction(() => {
-      // SECOND LAYER, deliberately redundant with the check above.
-      //
-      // The early return handles the ordinary case. This handles the one it
-      // cannot: two calls that interleave between the SELECT and the UPDATE,
-      // where both read 'pending' and both proceed. Making the UPDATE itself
-      // conditional means the database decides, and only one call can win.
-      //
-      // Mutation testing reports this clause as equivalent while the early
-      // guard stands — removing either alone changes nothing observable.
-      // Removing BOTH reproduces the original defect exactly: the till fell to
-      // 80,000 while the ledger still showed a single 5,000 charge. It is kept
-      // for the race the first check cannot see, not for the case it can.
-      const res = db.prepare(`
-        UPDATE rent_payments SET Status = 'paid', PaidDate = ?, CashAccountID = ?
-        WHERE RentPaymentID = ? AND Status = 'pending' AND CancelledAt IS NULL
-      `).run(dateStr, data.CashAccountID, data.RentPaymentID);
-      if (res.changes !== 1) {
-        throw new Error('ALREADY_PAID');
-      }
-
-      if (rent?.RentType === 'expense') {
-        db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?')
-          .run(payment.Amount, data.CashAccountID);
-      } else {
-        db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?')
-          .run(payment.Amount, data.CashAccountID);
-      }
-    })();
-
-    return { success: true };
+    return result;
   });
 
   /**
-   * Un-pays an instalment that was paid by mistake.
+   * Reverses everything received against an instalment.
    *
-   * The cash is returned to the account it came from, so the till and the
-   * books move together. Without this the only correction available was to
-   * edit the database by hand.
+   * Each movement is undone against the ACCOUNT IT CAME FROM, using the same
+   * `moveCash` the payment used. A partial paid half from the till and half
+   * from a wallet returns half to each — reversing the total to one account
+   * would leave one short and the other over by the same amount.
    */
   ipcMain.handle('rentPayments:unpay', async (_event, data: {
     RentPaymentID: number; Reason?: string;
@@ -291,30 +281,148 @@ export function registerRentHandlers() {
     const payment = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?')
       .get(data?.RentPaymentID) as any;
     if (!payment) return { success: false, message: 'الدفعة غير موجودة' };
-    if (payment.Status !== 'paid') return { success: false, message: 'هذا القسط غير مدفوع' };
+    if ((payment.PaidAmount || 0) <= 0) {
+      return { success: false, message: 'هذا القسط غير مدفوع' };
+    }
 
     const rent = db.prepare('SELECT RentType FROM rents WHERE RentID = ?').get(payment.RentID) as any;
+    const txns = db.prepare(`
+      SELECT * FROM rent_transactions
+       WHERE RentPaymentID = ? AND Kind = 'instalment' AND ReversedAt IS NULL
+    `).all(data.RentPaymentID) as any[];
 
+    const now = businessToday();
     db.transaction(() => {
       const res = db.prepare(`
-        UPDATE rent_payments SET Status = 'pending', PaidDate = NULL
-        WHERE RentPaymentID = ? AND Status = 'paid'
+        UPDATE rent_payments SET Status = 'pending', PaidAmount = 0, PaidDate = NULL
+         WHERE RentPaymentID = ? AND COALESCE(PaidAmount, 0) > 0
       `).run(data.RentPaymentID);
       if (res.changes !== 1) throw new Error('NOT_PAID');
 
-      // Exact reverse of the payment, against the SAME account.
-      if (payment.CashAccountID) {
-        if (rent?.RentType === 'expense') {
-          db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?')
-            .run(payment.Amount, payment.CashAccountID);
-        } else {
-          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?')
-            .run(payment.Amount, payment.CashAccountID);
+      if (txns.length > 0) {
+        for (const t of txns) {
+          moveCash(db, rent?.RentType, t.Amount, t.CashAccountID, t.PaymentMethodID, -1);
+          db.prepare('UPDATE rent_transactions SET ReversedAt = ? WHERE RentTxnID = ?')
+            .run(now, t.RentTxnID);
         }
+      } else if (payment.CashAccountID) {
+        // A row paid before rent_transactions existed has no movements to walk,
+        // so fall back to the single account the instalment recorded.
+        moveCash(db, rent?.RentType, payment.PaidAmount || payment.Amount,
+          payment.CashAccountID, payment.PaymentMethodID, -1);
       }
     })();
 
-    return { success: true, message: 'تم التراجع عن الدفع وإعادة المبلغ للخزينة' };
+    return { success: true, message: 'تم التراجع عن الدفع وإعادة المبلغ' };
+  });
+
+  /**
+   * Records a deposit or prepayment held against the CONTRACT.
+   *
+   * Deliberately NOT an expense. The money has been handed over but no month
+   * has been consumed by it yet, so it is an asset of the shop — a claim on
+   * the landlord — until it is applied. Treating it as rent paid would charge
+   * the profit and loss for a period that has not happened.
+   */
+  ipcMain.handle('rents:addAdvance', async (_event, data: {
+    RentID: number; Amount: number;
+    CashAccountID?: number; PaymentMethodID?: number;
+    userId?: number; fiscalYearId?: number; Notes?: string;
+  }) => {
+    const db = getDb();
+    const rent = db.prepare('SELECT * FROM rents WHERE RentID = ?').get(data?.RentID) as any;
+    if (!rent) return { success: false, message: 'العقد غير موجود' };
+    if (rent.Status === 'cancelled') return { success: false, message: 'العقد ملغى' };
+
+    const amt = checkAmount(data?.Amount, 'قيمة المقدم', { allowZero: false });
+    if (!amt.ok) return { success: false, message: amt.message };
+    if (!data.CashAccountID && !data.PaymentMethodID) {
+      return { success: false, message: 'اختر الخزينة أو وسيلة الدفع' };
+    }
+
+    const shortfall = checkFunds(db, rent.RentType, data.Amount, data.CashAccountID, data.PaymentMethodID);
+    if (shortfall) return { success: false, message: shortfall };
+
+    const now = businessToday();
+    db.transaction(() => {
+      db.prepare('UPDATE rents SET AdvanceBalance = COALESCE(AdvanceBalance,0) + ? WHERE RentID = ?')
+        .run(data.Amount, data.RentID);
+      db.prepare(`
+        INSERT INTO rent_transactions
+          (RentID, RentPaymentID, RentPartyID, Kind, Amount, TxnDate,
+           CashAccountID, PaymentMethodID, SourceType, Notes, FiscalYearID, UserID)
+        VALUES (?, NULL, ?, 'advance', ?, ?, ?, ?, 'rent', ?, ?, ?)
+      `).run(
+        data.RentID, rent.RentPartyID ?? null, data.Amount, now,
+        data.CashAccountID ?? null, data.PaymentMethodID ?? null,
+        data.Notes ?? null, data.fiscalYearId ?? null, data.userId ?? null,
+      );
+      moveCash(db, rent.RentType, data.Amount, data.CashAccountID, data.PaymentMethodID, +1);
+    })();
+
+    return { success: true, message: 'تم تسجيل المقدم' };
+  });
+
+  /**
+   * Consumes part of the advance against a specific instalment.
+   *
+   * No cash moves here — it moved when the advance was taken. This only
+   * converts a held balance into a settled month, which is the point at which
+   * it becomes rent expense.
+   */
+  ipcMain.handle('rents:applyAdvance', async (_event, data: {
+    RentPaymentID: number; Amount?: number; userId?: number; fiscalYearId?: number;
+  }) => {
+    const db = getDb();
+    const payment = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?')
+      .get(data?.RentPaymentID) as any;
+    if (!payment) return { success: false, message: 'القسط غير موجود' };
+    const rent = db.prepare('SELECT * FROM rents WHERE RentID = ?').get(payment.RentID) as any;
+    if (!rent) return { success: false, message: 'العقد غير موجود' };
+
+    const held = Number(rent.AdvanceBalance || 0);
+    if (held <= 0) return { success: false, message: 'لا يوجد رصيد مقدم على هذا العقد' };
+
+    const outstanding = remainingOn(payment);
+    if (outstanding <= 0) return { success: false, message: 'تم دفع هذا القسط بالكامل' };
+
+    // Never apply more than is held, and never more than the month owes.
+    const amount = Math.min(
+      data.Amount === undefined || data.Amount === null ? outstanding : Number(data.Amount),
+      held, outstanding,
+    );
+    if (!(amount > 0)) return { success: false, message: 'المبلغ غير صالح' };
+
+    let result: any = { success: false, message: 'تعذّر الخصم من المقدم' };
+    try {
+      db.transaction(() => {
+        result = applyToInstalment({
+          db,
+          rentPaymentId: data.RentPaymentID,
+          amount,
+          txnDate: businessToday(),
+          sourceType: 'rent',
+          userId: data.userId ?? null,
+          fiscalYearId: data.fiscalYearId ?? null,
+          notes: 'خصم من المقدم',
+          // The cash already left when the advance was taken; moving it again
+          // here would take the money twice for one payment.
+          //
+          // Belt and braces: this call also passes no account, so `moveCash`
+          // would find nothing to update even without the flag — mutation
+          // testing confirms removing it changes nothing today. It is stated
+          // anyway because it declares the INTENT. If an account is ever
+          // threaded through here for reporting, the flag is what stops that
+          // change from silently double-charging the till.
+          skipCashMove: true,
+        });
+        if (!result.success) throw new Error('REJECTED');
+        db.prepare('UPDATE rents SET AdvanceBalance = COALESCE(AdvanceBalance,0) - ? WHERE RentID = ?')
+          .run(amount, payment.RentID);
+      })();
+    } catch { /* result carries the reason */ }
+
+    return result;
   });
 
   /**

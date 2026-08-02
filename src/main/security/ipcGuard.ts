@@ -229,6 +229,15 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'rents:cancel': 'rent.edit',
   // Read-only: what the shop still owes. Same permission as viewing the list.
   'rents:commitments': 'rent.view',
+  // Advances move money, so they are held to the same bar as a payment.
+  'rents:addAdvance': 'rent.create',
+  'rents:applyAdvance': 'rent.create',
+  // Landlords and tenants.
+  'rentParties:list': 'rent.view',
+  'rentParty:statement': 'rent.view',
+  'rentParties:create': 'rent.create',
+  'rentParties:update': 'rent.edit',
+  'rentParties:delete': 'rent.edit',
 
   // ---- Settlements
   'settlements:list': 'settlements.view',

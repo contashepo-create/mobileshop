@@ -879,6 +879,67 @@ export function runMigrations(db: Database.Database) {
       FOREIGN KEY (RentID) REFERENCES rents(RentID),
       FOREIGN KEY (FiscalYearID) REFERENCES fiscal_years(FiscalYearID)
     );
+
+    -- Landlords and tenants.
+    --
+    -- The other party to a rent agreement used to be two free-text columns on
+    -- the contract itself (PartyName, PartyPhone). That cannot carry a
+    -- balance, cannot be looked up, and produces a different "party" every
+    -- time the name is typed slightly differently. A landlord with three
+    -- shops was three unrelated strings.
+    --
+    -- PartyKind is 'landlord' (we pay them) or 'tenant' (they pay us), which
+    -- is the same split as RentType expense/income, held on the party so a
+    -- statement can be produced per person rather than per contract.
+    CREATE TABLE IF NOT EXISTS rent_parties (
+      RentPartyID  INTEGER PRIMARY KEY AUTOINCREMENT,
+      PartyKind    TEXT NOT NULL,
+      Name         TEXT NOT NULL,
+      Phone        TEXT,
+      NationalID   TEXT,
+      Address      TEXT,
+      Notes        TEXT,
+      IsActive     INTEGER DEFAULT 1,
+      CreatedAt    TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    -- Individual movements of money against a rent agreement.
+    --
+    -- The rent_payments table records what is DUE. This records what was
+    -- actually HANDED OVER, and there can be several per instalment: half
+    -- now and half at the end of the month. Without it an instalment was
+    -- all-or-nothing, which is not how rent is paid in practice.
+    --
+    -- Kind:
+    --   'instalment' — against a specific rent_payments row
+    --   'advance'    — a deposit or prepayment held against the CONTRACT,
+    --                  not yet applied to any month
+    -- SourceType records WHERE the money moved: 'rent' from the rent screen,
+    -- 'voucher' from a payment voucher. One instalment can receive both.
+    CREATE TABLE IF NOT EXISTS rent_transactions (
+      RentTxnID       INTEGER PRIMARY KEY AUTOINCREMENT,
+      RentID          INTEGER NOT NULL,
+      RentPaymentID   INTEGER,
+      RentPartyID     INTEGER,
+      Kind            TEXT NOT NULL DEFAULT 'instalment',
+      Amount          REAL NOT NULL,
+      TxnDate         TEXT NOT NULL,
+      CashAccountID   INTEGER,
+      PaymentMethodID INTEGER,
+      SourceType      TEXT DEFAULT 'rent',
+      SourceID        INTEGER,
+      Notes           TEXT,
+      ReversedAt      TEXT,
+      FiscalYearID    INTEGER,
+      UserID          INTEGER,
+      CreatedAt       TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (RentID) REFERENCES rents(RentID),
+      FOREIGN KEY (RentPaymentID) REFERENCES rent_payments(RentPaymentID)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rent_txn_rent    ON rent_transactions(RentID);
+    CREATE INDEX IF NOT EXISTS idx_rent_txn_payment ON rent_transactions(RentPaymentID);
+    CREATE INDEX IF NOT EXISTS idx_rent_txn_party   ON rent_transactions(RentPartyID);
   `);
 
   // =============================================
@@ -1091,6 +1152,35 @@ export function runMigrations(db: Database.Database) {
   // record of what was agreed.
   try {
     db.exec(`ALTER TABLE rent_payments ADD COLUMN CancelledAt TEXT`);
+  } catch {}
+
+  // The contract points at a PARTY record instead of carrying a loose name.
+  // PartyName stays populated for contracts created before this existed.
+  try {
+    db.exec(`ALTER TABLE rents ADD COLUMN RentPartyID INTEGER`);
+  } catch {}
+  // A deposit or prepayment sits on the CONTRACT until it is applied to a
+  // month. It is money the shop has handed over but not yet consumed, so it
+  // is an asset, not an expense — and it must not be counted as rent paid.
+  try {
+    db.exec(`ALTER TABLE rents ADD COLUMN AdvanceBalance REAL DEFAULT 0`);
+  } catch {}
+  // How much of this instalment has actually been received so far. `Status`
+  // becomes 'partial' between zero and Amount, and 'paid' only when settled.
+  try {
+    db.exec(`ALTER TABLE rent_payments ADD COLUMN PaidAmount REAL DEFAULT 0`);
+  } catch {}
+  // Paying rent from an e-wallet was impossible: only a cash account could be
+  // named, while vouchers have supported payment methods all along.
+  try {
+    db.exec(`ALTER TABLE rent_payments ADD COLUMN PaymentMethodID INTEGER`);
+  } catch {}
+  // Existing rows predate PaidAmount. A row already marked 'paid' has, by
+  // definition, received its full amount; leaving it at 0 would make every
+  // historical instalment look unpaid the moment the new column appears.
+  try {
+    db.exec(`UPDATE rent_payments SET PaidAmount = Amount
+             WHERE Status = 'paid' AND COALESCE(PaidAmount, 0) = 0`);
   } catch {}
 
   // Allow NULL PaymentMethod in service_sales (for credit/no-payment)

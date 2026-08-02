@@ -59,12 +59,24 @@ function makeDb() {
       RentID INTEGER PRIMARY KEY AUTOINCREMENT, RentName TEXT, RentType TEXT,
       Amount REAL, Period TEXT, StartDate TEXT, EndDate TEXT,
       IsActive INTEGER DEFAULT 1, Status TEXT DEFAULT 'active',
-      CancelledAt TEXT, CancelReason TEXT, PartyName TEXT, PartyPhone TEXT, Notes TEXT);
+      CancelledAt TEXT, CancelReason TEXT, PartyName TEXT, PartyPhone TEXT, Notes TEXT,
+      RentPartyID INTEGER, AdvanceBalance REAL DEFAULT 0);
     CREATE TABLE rent_payments (
       RentPaymentID INTEGER PRIMARY KEY AUTOINCREMENT, RentID INTEGER, PeriodLabel TEXT,
       Amount REAL, DueDate TEXT, PaidDate TEXT, Status TEXT DEFAULT 'pending',
-      CashAccountID INTEGER, FiscalYearID INTEGER, UserID INTEGER, CancelledAt TEXT);
+      CashAccountID INTEGER, FiscalYearID INTEGER, UserID INTEGER, CancelledAt TEXT,
+      PaidAmount REAL DEFAULT 0, PaymentMethodID INTEGER);
     CREATE TABLE cash_accounts (CashAccountID INTEGER PRIMARY KEY, AccountName TEXT, Balance REAL);
+    CREATE TABLE payment_methods (PaymentMethodID INTEGER PRIMARY KEY, MethodName TEXT, Balance REAL);
+    CREATE TABLE rent_parties (
+      RentPartyID INTEGER PRIMARY KEY AUTOINCREMENT, PartyKind TEXT, Name TEXT, Phone TEXT,
+      NationalID TEXT, Address TEXT, Notes TEXT, IsActive INTEGER DEFAULT 1, CreatedAt TEXT);
+    CREATE TABLE rent_transactions (
+      RentTxnID INTEGER PRIMARY KEY AUTOINCREMENT, RentID INTEGER, RentPaymentID INTEGER,
+      RentPartyID INTEGER, Kind TEXT DEFAULT 'instalment', Amount REAL, TxnDate TEXT,
+      CashAccountID INTEGER, PaymentMethodID INTEGER, SourceType TEXT DEFAULT 'rent',
+      SourceID INTEGER, Notes TEXT, ReversedAt TEXT, FiscalYearID INTEGER, UserID INTEGER,
+      CreatedAt TEXT);
     CREATE TABLE settings (Key TEXT PRIMARY KEY, Value TEXT);
   `);
   db.exec(`INSERT INTO rents (RentID,RentName,RentType,Amount,Period,StartDate)

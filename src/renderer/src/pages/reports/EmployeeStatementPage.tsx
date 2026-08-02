@@ -8,6 +8,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { asRows } from '../../lib/ipc';
 import { escapeHtml as esc, safeNumber } from '../../../../shared/escapeHtml';
+import { printHeaderHtml, printFooterHtml, printHeaderCss } from '../../lib/printHeader';
 
 export function EmployeeStatementPage() {
   const { showToast } = useToastStore();
@@ -20,11 +21,13 @@ export function EmployeeStatementPage() {
   const [previewData, setPreviewData] = useState<any>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
+  const [settings, setSettings] = useState<any>({});
 
   useEffect(() => {
     (async () => {
       const list = await window.api.invoke('employees:list', { isActive: 1 });
       setEmployees(list);
+      setSettings(await window.api.invoke('settings:getAll'));
     })();
   }, []);
 
@@ -236,13 +239,10 @@ export function EmployeeStatementPage() {
       .sig-box .line { border-top: 1px solid #64748b; margin-top: 20mm; padding-top: 3mm; font-size: 11px; color: #475569; }
       .footer { margin-top: 8mm; text-align: center; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 3mm; }
       @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+      ${printHeaderCss(settings)}
     </style></head><body>
     <div class="sheet">
-      <div class="report-header">
-        <h1>كشف حساب موظف</h1>
-        <div class="company">${esc((window as any).__settings?.company_name || '')}</div>
-        <div class="sub">تاريخ الطباعة: ${new Date().toLocaleDateString('ar-EG-u-ca-islamic')} | ${new Date().toLocaleDateString('ar-EG')}</div>
-      </div>
+      ${printHeaderHtml(settings, 'كشف حساب موظف')}
       <div class="party-box">
         <div><div class="label">اسم الموظف</div><div class="value">${esc(employee.Name)}</div></div>
         <div><div class="label">الوظيفة</div><div class="value">${esc(employee.Position || '—')}</div></div>
@@ -264,7 +264,7 @@ export function EmployeeStatementPage() {
         <div class="sig-box"><div class="line">المحاسب</div></div>
         <div class="sig-box"><div class="line">الموظف</div></div>
       </div>
-      <div class="footer">هذا الكشف معتمد ومعتبر لدى الطرفين</div>
+      ${printFooterHtml(settings, 'هذا الكشف معتمد ومعتبر لدى الطرفين')}
     </div>
     <script>window.print();window.onafterprint=()=>window.close();<\/script>
     </body></html>`;

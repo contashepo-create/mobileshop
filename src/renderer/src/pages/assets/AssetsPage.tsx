@@ -8,6 +8,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage, asRows } from '../../lib/ipc';
 import { escapeHtml as esc, safeNumber } from '../../../../shared/escapeHtml';
+import { printHeaderHtml, printFooterHtml, printHeaderCss } from '../../lib/printHeader';
 
 export function AssetsPage() {
   const { showToast } = useToastStore();
@@ -20,9 +21,12 @@ export function AssetsPage() {
 
   const [cashForm, setCashForm] = useState({ AccountName: '', AccountType: 'safe', Balance: '', BankName: '', AccountNumber: '', IsActive: 1 });
 
+  const [settings, setSettings] = useState<any>({});
+
   const fetchData = async () => {
     const ca = await window.api.invoke('cashAccounts:list');
     setCashAccounts(ca);
+    setSettings(await window.api.invoke('settings:getAll'));
   };
 
   useEffect(() => { fetchData(); }, []);
@@ -94,13 +98,10 @@ export function AssetsPage() {
       '.sig-box .line { border-top: 1px solid #64748b; margin-top: 20mm; padding-top: 3mm; font-size: 11px; color: #475569; }',
       '.footer { margin-top: 8mm; text-align: center; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 3mm; }',
       '@media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }',
+      printHeaderCss(settings),
       '<\/style></head><body>',
       '<div class="sheet">',
-      '<div class="report-header">',
-      '<h1>\u0643\u0634\u0641 \u062d\u0633\u0627\u0628 \u062e\u0632\u064a\u0646\u0629/\u0628\u0646\u0643</h1>',
-      '<div class="company">' + esc((window as any).__settings?.company_name || '') + '<\/div>',
-      '<div class="sub">\u062A\u0627\u0631\u064A\u062E \u0627\u0644\u0637\u0628\u0627\u0639\u0629: ' + new Date().toLocaleDateString('ar-EG-u-ca-islamic') + ' | ' + new Date().toLocaleDateString('ar-EG') + '<\/div>',
-      '<\/div>',
+      printHeaderHtml(settings, '\u0643\u0634\u0641 \u062d\u0633\u0627\u0628 \u062e\u0632\u064a\u0646\u0629/\u0628\u0646\u0643'),
       '<div class="party-box">',
       '<div><div class="label">\u0627\u0633\u0645 \u0627\u0644\u062D\u0633\u0627\u0628<\/div><div class="value">' + esc(statementAccount.AccountName) + '<\/div><\/div>',
       '<div><div class="label">\u0627\u0644\u0646\u0648\u0639<\/div><div class="value">' + (statementAccount.AccountType === 'safe' ? '\u062E\u0632\u0646\u0629' : '\u0628\u0646\u0643') + '<\/div><\/div>',
@@ -125,7 +126,7 @@ export function AssetsPage() {
       '<div class="sig-box"><div class="line">\u0627\u0644\u0645\u062D\u0627\u0633\u0628<\/div><\/div>',
       '<div class="sig-box"><div class="line">\u0635\u0627\u062D\u0628 \u0627\u0644\u062D\u0633\u0627\u0628<\/div><\/div>',
       '<\/div>',
-      '<div class="footer">\u0647\u0630\u0627 \u0627\u0644\u0643\u0634\u0641 \u0645\u0639\u062A\u0645\u062F \u0648\u0645\u0639\u062A\u0628\u0631 \u2014 ' + esc((window as any).__settings?.company_name || '\u0646\u0638\u0627\u0645 \u0627\u0644\u0645\u062D\u0645\u0648\u0644') + '<\/div>',
+      printFooterHtml(settings, '\u0647\u0630\u0627 \u0627\u0644\u0643\u0634\u0641 \u0645\u0639\u062A\u0645\u062F \u0648\u0645\u0639\u062A\u0628\u0631'),
       '<\/div>',
       "<script>window.print();window.onafterprint=()=>window.close();<\/script>",
       '<\/body><\/html>',

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Save, ArrowUp, ArrowDown } from 'lucide-react';
+import { ArrowUp, ArrowDown } from 'lucide-react';
 import {
   DOCUMENT_TYPES, DOCUMENT_LABELS, COLUMN_KEYS, COLUMN_LABELS,
   MANDATORY_COLUMNS, resolveProfile, profileKeys,
@@ -8,6 +8,7 @@ import {
 import { Button } from '../../components/ui/Button';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage } from '../../lib/ipc';
+import { SettingsHeader } from '../../components/shared/SettingsHeader';
 
 const templates = [
   { id: '1', name: 'القالب الكلاسيكي', colors: { primary: '#2563eb', bg: '#ffffff' } },
@@ -55,6 +56,15 @@ export function PrintSettings() {
   const [docType, setDocType] = useState<DocumentType>('sale');
   const [profiles, setProfiles] = useState<Record<string, PrintProfile>>({});
   const [rawSettings, setRawSettings] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  /**
+   * A snapshot of what was loaded, so the header can say whether anything is
+   * pending. Compared as JSON rather than field by field: the page has
+   * seventeen global fields plus a profile per document type, and a hand-rolled
+   * comparison would silently stop noticing whichever field was added last.
+   */
+  const [baseline, setBaseline] = useState('');
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -83,8 +93,30 @@ export function PrintSettings() {
       const resolved: Record<string, PrintProfile> = {};
       for (const t of DOCUMENT_TYPES) resolved[t] = resolveProfile(settings, t);
       setProfiles(resolved);
+      setLoaded(true);
     })();
   }, []);
+
+  // Taken AFTER the state has been applied, not inside the loader: setState is
+  // asynchronous, so a snapshot taken there would capture the previous values
+  // and the page would open already claiming unsaved changes.
+  useEffect(() => {
+    if (loaded && baseline === '') setBaseline(snapshot());
+  });
+
+  /**
+   * Everything this page owns, in one comparable value.
+   *
+   * Used both for the dirty marker and to reset it after a successful save,
+   * so the two can never disagree about what "saved" means.
+   */
+  const snapshot = () => JSON.stringify({
+    selectedTemplate, showCustomerInfo, showShopInfo, paperSize, defaultAction,
+    logoPath, showPrintUser, thanksNote, terms,
+    fontSize, fontFamily, margin, logoHeight, cols, profiles,
+  });
+
+  const dirty = baseline !== '' && snapshot() !== baseline;
 
   const handleSave = async () => {
     // The reply is CHECKED. `settings:setMany` is permission-gated
@@ -94,6 +126,8 @@ export function PrintSettings() {
     // and showing the success toast anyway is what made a failed logo save
     // look like a successful one: the shop pressed حفظ, was told the settings
     // were saved, and nothing had been written.
+    setSaving(true);
+    try {
     const reply = await window.api.invoke('settings:setMany', {
       default_invoice_template: selectedTemplate,
       invoice_show_customer: showCustomerInfo ? '1' : '0',
@@ -131,7 +165,13 @@ export function PrintSettings() {
       showToast('error', 'لم يُحفظ الشعار - جرّب صورة أصغر حجماً');
       return;
     }
+    // Only now is the page clean. Clearing the marker before the write, or on
+    // a failed one, would tell the shop its changes are safe when they are not.
+    setBaseline(snapshot());
     showToast('success', 'تم حفظ إعدادات الطباعة');
+    } finally {
+      setSaving(false);
+    }
   };
 
   /**
@@ -205,6 +245,14 @@ export function PrintSettings() {
 
   return (
     <div className="max-w-3xl space-y-6">
+      <SettingsHeader
+        title="الطباعة والفواتير"
+        description="الشعار، تنسيق المستند، الأعمدة، وإعدادات كل نوع مستند على حدة"
+        onSave={handleSave}
+        saving={saving}
+        dirty={dirty}
+        saveLabel="حفظ إعدادات الطباعة"
+      />
       {/* Shop logo — the value already reached the printed invoice, but there
           was no way to set it, so it sat unused in the database. */}
       <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
@@ -535,9 +583,6 @@ export function PrintSettings() {
         </div>
       </div>
 
-      <div className="flex justify-end">
-        <Button onClick={handleSave} icon={<Save size={16} />}>حفظ إعدادات الطباعة</Button>
-      </div>
     </div>
   );
 }

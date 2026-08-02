@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Save, AlertTriangle } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage } from '../../lib/ipc';
+import { SettingsHeader } from '../../components/shared/SettingsHeader';
 
 export function GeneralSettings() {
   const { showToast } = useToastStore();
@@ -20,11 +21,14 @@ export function GeneralSettings() {
   const [resetStep, setResetStep] = useState<1 | 2>(1);
   const [resetCode, setResetCode] = useState('');
   const [resetTgReady, setResetTgReady] = useState(true);
+  // Snapshot of the loaded values, so the header can report pending edits.
+  const [baseline, setBaseline] = useState('');
 
   useEffect(() => {
     (async () => {
       const result = await window.api.invoke('settings:getAll');
       setSettings(result);
+      setBaseline(JSON.stringify(result));
       setLoading(false);
     })();
   }, []);
@@ -32,6 +36,8 @@ export function GeneralSettings() {
   const handleChange = (key: string, value: string) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
   };
+
+  const dirty = !loading && JSON.stringify(settings) !== baseline;
 
   const handleSave = async () => {
     setSaving(true);
@@ -66,6 +72,7 @@ export function GeneralSettings() {
         showToast('error', failureMessage(reply, 'فشل حفظ الإعدادات'));
         return;
       }
+      setBaseline(JSON.stringify(settings));
       showToast('success', 'تم حفظ الإعدادات بنجاح');
     } catch {
       showToast('error', 'فشل حفظ الإعدادات');
@@ -78,6 +85,14 @@ export function GeneralSettings() {
 
   return (
     <div className="max-w-2xl space-y-6">
+      <SettingsHeader
+        title="الإعدادات العامة"
+        description="بيانات المحل، العملة، الضريبة، وحدود الأرصدة"
+        onSave={handleSave}
+        saving={saving}
+        dirty={dirty}
+        saveLabel="حفظ الإعدادات"
+      />
       {/* Company Info */}
       <div className="bg-white dark:bg-slate-800 rounded-xl p-6 border border-slate-200 dark:border-slate-700">
         <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-4">بيانات المحل</h2>
@@ -220,7 +235,11 @@ export function GeneralSettings() {
         </div>
       </div>
 
-      <div className="flex justify-between items-center">
+      {/* The destructive action stays at the FOOT of the page, deliberately.
+          Saving moved to the header because it is used constantly; clearing the
+          database is used once, and putting it beside the save button is how a
+          misclick wipes a shop. */}
+      <div className="flex justify-start items-center pt-2 border-t border-slate-200 dark:border-slate-700">
         <Button variant="outline" className="!border-red-300 !text-red-600 hover:!bg-red-50 dark:!border-red-800 dark:hover:!bg-red-900/20" onClick={async () => {
           setResetStep(1); setResetPassword(''); setResetCode('');
           // Tell the owner up front if no bot is configured, rather than
@@ -230,9 +249,6 @@ export function GeneralSettings() {
           setShowResetConfirm(true);
         }} icon={<AlertTriangle size={16} />}>
           تصفير قاعدة البيانات
-        </Button>
-        <Button onClick={handleSave} loading={saving} icon={<Save size={16} />}>
-          حفظ الإعدادات
         </Button>
       </div>
 

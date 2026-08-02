@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
 import {
-  Save, Bell, BellOff, RotateCcw, Moon, Users, Truck, Wrench, Package,
+  Bell, BellOff, RotateCcw, Moon, Users, Truck, Wrench, Package,
   User, Wallet, ChevronDown, ChevronLeft, ShieldCheck,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { useToastStore } from '../../components/ui/Toast';
+import { SettingsHeader } from '../../components/shared/SettingsHeader';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 /**
  * Control panel for the smart-notification engine.
@@ -88,6 +90,7 @@ export function NotificationSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [baseline, setBaseline] = useState('');
 
   const load = async () => {
     try {
@@ -95,6 +98,7 @@ export function NotificationSettings() {
       setPrefs(res.prefs);
       setCatalogue(res.catalogue || []);
       setCategories(res.categories || {});
+      setBaseline(JSON.stringify(res.prefs));
     } catch {
       showToast('error', 'تعذّر تحميل إعدادات الإشعارات');
     }
@@ -118,14 +122,24 @@ export function NotificationSettings() {
       },
     }));
 
+  const dirty = !loading && prefs !== null && JSON.stringify(prefs) !== baseline;
+
   const save = async () => {
     setSaving(true);
     try {
       const res = await window.api.invoke('notifications:setPrefs', prefs);
+      // The guard refuses by RETURNING a failure, not by throwing, so the
+      // catch below would never see it and the success toast would be shown
+      // over a write that never happened.
+      if (isFailure(res)) {
+        showToast('error', failureMessage(res, 'فشل حفظ الإعدادات'));
+        setSaving(false);
+        return;
+      }
       // The main process clamps out-of-range numbers, so adopt what it stored
       // rather than what was typed — otherwise the screen would keep showing a
       // value that was never saved.
-      if (res?.prefs) setPrefs(res.prefs);
+      if (res?.prefs) { setPrefs(res.prefs); setBaseline(JSON.stringify(res.prefs)); }
       showToast('success', 'تم حفظ إعدادات الإشعارات');
     } catch {
       showToast('error', 'فشل حفظ الإعدادات');
@@ -137,7 +151,7 @@ export function NotificationSettings() {
     setSaving(true);
     try {
       const res = await window.api.invoke('notifications:resetPrefs');
-      if (res?.prefs) setPrefs(res.prefs);
+      if (res?.prefs) { setPrefs(res.prefs); setBaseline(JSON.stringify(res.prefs)); }
       showToast('success', 'تمت الاستعادة للإعدادات الافتراضية');
     } catch {
       showToast('error', 'فشلت الاستعادة');
@@ -165,6 +179,19 @@ export function NotificationSettings() {
 
   return (
     <div className="max-w-3xl space-y-5">
+      <SettingsHeader
+        title="التنبيهات الذكية"
+        description={`${activeCount} تنبيه مفعّل من ${catalogue.length}`}
+        onSave={save}
+        saving={saving}
+        dirty={dirty}
+        saveLabel="حفظ الإعدادات"
+      >
+        <Button variant="outline" onClick={reset} disabled={saving} icon={<RotateCcw size={16} />}>
+          استعادة الافتراضي
+        </Button>
+      </SettingsHeader>
+
       {/* ---------------------------------------------------------- master */}
       <Card>
         <div className="flex items-start justify-between gap-4">
@@ -470,15 +497,6 @@ export function NotificationSettings() {
         </div>
       </Card>
 
-      {/* ---------------------------------------------------------- actions */}
-      <div className="flex items-center justify-between gap-3 pb-4">
-        <Button variant="outline" onClick={reset} disabled={saving} icon={<RotateCcw size={16} />}>
-          استعادة الافتراضي
-        </Button>
-        <Button onClick={save} loading={saving} icon={<Save size={16} />}>
-          حفظ الإعدادات
-        </Button>
-      </div>
     </div>
   );
 }

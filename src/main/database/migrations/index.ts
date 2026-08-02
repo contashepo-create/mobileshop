@@ -1068,6 +1068,31 @@ export function runMigrations(db: Database.Database) {
     db.exec(`ALTER TABLE maintenance_deliveries ADD COLUMN SaleID INTEGER`);
   } catch {}
 
+  // --- Rent contracts -------------------------------------------------------
+  // A rent agreement has an END, and can be terminated early. Without those the
+  // section could only describe an open-ended arrangement that runs forever,
+  // and `rents:delete` had nothing to record WHY a contract stopped.
+  try {
+    db.exec(`ALTER TABLE rents ADD COLUMN EndDate TEXT`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE rents ADD COLUMN CancelledAt TEXT`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE rents ADD COLUMN CancelReason TEXT`);
+  } catch {}
+  // 'active' | 'completed' | 'cancelled'. IsActive is kept so nothing that
+  // reads it breaks, but the status carries the reason as well as the fact.
+  try {
+    db.exec(`ALTER TABLE rents ADD COLUMN Status TEXT DEFAULT 'active'`);
+  } catch {}
+  // A cancelled instalment is neither pending nor paid. Without a third state
+  // the only way to remove one was to delete the row, which destroys the
+  // record of what was agreed.
+  try {
+    db.exec(`ALTER TABLE rent_payments ADD COLUMN CancelledAt TEXT`);
+  } catch {}
+
   // Allow NULL PaymentMethod in service_sales (for credit/no-payment)
   // service_sales rebuild — see the note above. Guarded the same way so an
   // added column can never orphan the table or drop live rows.

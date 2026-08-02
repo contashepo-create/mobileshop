@@ -222,6 +222,13 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'rents:update': 'rent.edit',
   'rents:delete': 'rent.edit',
   'rentPayments:pay': 'rent.create',
+  // Reversing a payment moves money back out of the books, so it is an EDIT,
+  // not a creation. Cancelling a contract withdraws future obligations and is
+  // held to the same bar.
+  'rentPayments:unpay': 'rent.edit',
+  'rents:cancel': 'rent.edit',
+  // Read-only: what the shop still owes. Same permission as viewing the list.
+  'rents:commitments': 'rent.view',
 
   // ---- Settlements
   'settlements:list': 'settlements.view',

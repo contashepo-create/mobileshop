@@ -68,8 +68,13 @@ const newItem = o => raw('items:create', {
   ItemName: 'Item', ItemType: 'part', IsSerialized: 0, SalePrice: 100,
   MinStock: 0, Barcode: '', CategoryID: null, Unit: 'قطعة', ...o,
 });
+// RentType is 'expense' or 'income' — the two values every reader in the
+// codebase compares against (reports, statements, the payment handler). This
+// fixture said 'paid', which matched nothing: the row was accepted and then
+// counted as neither an expense nor an income. `rents:create` now validates
+// the value, so the fixture has to state a real one.
 const newRent = o => raw('rents:create', {
-  RentName: 'Rent', RentType: 'paid', Amount: 1000, Period: 'monthly',
+  RentName: 'Rent', RentType: 'expense', Amount: 1000, Period: 'monthly',
   StartDate: '2026-01-01', ...o,
 });
 

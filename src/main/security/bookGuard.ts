@@ -67,11 +67,17 @@ const GUARDED_PREFIXES = [
   'sales:', 'saleReturns:', 'purchases:', 'purchaseReturns:',
   'maintenance:', 'delete:', 'vouchers:', 'transfers:', 'warehouseTransfers:',
   'services:', 'payroll:', 'salaries:', 'advances:', 'deductions:',
-  'settlements:', 'openingBalances:', 'rent:', 'stock:', 'items:',
+  'settlements:', 'openingBalances:', 'stock:', 'items:',
+  // 'rent:' was listed here and matched NOTHING: every channel in
+  // rent.handlers.ts is 'rents:' or 'rentPayments:'. One missing letter
+  // meant the runtime invariant checks never ran on the rent section at
+  // all — which is why a double payment could drain the till without the
+  // guard noticing.
+  'rents:', 'rentPayments:',
 ];
 
 /** Read-only channels inside those prefixes. Checking them wastes time only. */
-const READ_ONLY = /(^|:)(list|get|getDetails|returnable|openTickets|statement|summary|getFinancialSummary|getWarrantyHistory|listServiceCosts)$/;
+const READ_ONLY = /(^|:)(list|get|getDetails|returnable|openTickets|statement|summary|getFinancialSummary|getWarrantyHistory|listServiceCosts|commitments)$/;
 
 export function isGuardedChannel(channel: string): boolean {
   if (READ_ONLY.test(channel)) return false;

@@ -357,8 +357,11 @@ const MUTANTS = [
   {
     name: 'rent can be a negative amount',
     file: RENT,
-    find: "    const amt = checkAmount(data?.Amount, 'قيمة الإيجار', { allowZero: false });\n    if (!amt.ok) return { success: false, message: amt.message };",
-    replace: '',
+    // Anchored on the CREATE path specifically. The same two lines now also
+    // guard `rents:update`, so the shorter anchor matched twice and the mutant
+    // could not be placed. Including the line above it makes it unique again.
+    find: "    if (!amt.ok) return { success: false, message: amt.message };\n\n    const start = String(data?.StartDate ?? '').trim();",
+    replace: "\n    const start = String(data?.StartDate ?? '').trim();",
     why: 'direction is the RentType, never the sign of the money',
   },
   {

@@ -8,6 +8,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage } from '../../lib/ipc';
 import { currentUserId } from '../../stores/auth.store';
+import { AssetPicker, splitAssetValue, useAssets } from '../../components/shared/AssetPicker';
 
 /**
  * RENT CONTRACTS.
@@ -32,7 +33,6 @@ export function RentPage() {
   const { showToast } = useToastStore();
   const [rents, setRents] = useState<any[]>([]);
   const [payments, setPayments] = useState<any[]>([]);
-  const [cashAccounts, setCashAccounts] = useState<any[]>([]);
   const [commitments, setCommitments] = useState<any>(null);
 
   const [showModal, setShowModal] = useState(false);
@@ -41,7 +41,12 @@ export function RentPage() {
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [selectedPayment, setSelectedPayment] = useState<any>(null);
   const [selectedRent, setSelectedRent] = useState<any>(null);
-  const [payCashAccount, setPayCashAccount] = useState('');
+  const [payAsset, setPayAsset] = useState('');
+  const [payAmount, setPayAmount] = useState('');
+  const [advAsset, setAdvAsset] = useState('');
+  const [advAmount, setAdvAmount] = useState('');
+  const [showAdvModal, setShowAdvModal] = useState(false);
+  const { assets, reload: reloadAssets } = useAssets();
   const [genCount, setGenCount] = useState('12');
   const [cancelReason, setCancelReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -54,19 +59,22 @@ export function RentPage() {
   const [form, setForm] = useState({
     RentName: '', RentType: 'expense', Amount: '', Period: 'monthly',
     StartDate: new Date().toISOString().split('T')[0], EndDate: '',
-    PartyName: '', PartyPhone: '', Notes: '',
+    PartyName: '', PartyPhone: '', Notes: '', RentPartyID: '',
   });
+  const [rentParties, setRentParties] = useState<any[]>([]);
 
   const fetchData = async () => {
-    const [r, p, ca, c] = await Promise.all([
+    // The asset list is loaded by useAssets, so this no longer fetches cash
+    // accounts separately — one source for what money can move through.
+    const [r, p, c, rp] = await Promise.all([
       window.api.invoke('rents:list'),
       window.api.invoke('rentPayments:list'),
-      window.api.invoke('cashAccounts:list'),
       window.api.invoke('rents:commitments'),
+      window.api.invoke('rentParties:list'),
     ]);
+    setRentParties(Array.isArray(rp) ? rp : []);
     setRents(Array.isArray(r) ? r : []);
     setPayments(Array.isArray(p) ? p : []);
-    setCashAccounts(Array.isArray(ca) ? ca : []);
     setCommitments(isFailure(c) ? null : c);
   };
 
@@ -75,13 +83,17 @@ export function RentPage() {
   const resetForm = () => setForm({
     RentName: '', RentType: 'expense', Amount: '', Period: 'monthly',
     StartDate: new Date().toISOString().split('T')[0], EndDate: '',
-    PartyName: '', PartyPhone: '', Notes: '',
+    PartyName: '', PartyPhone: '', Notes: '', RentPartyID: '',
   });
 
   const handleCreate = async () => {
     if (!form.RentName || !form.Amount) { showToast('error', 'أكمل البيانات'); return; }
     setBusy(true);
-    const reply = await window.api.invoke('rents:create', { ...form, Amount: parseFloat(form.Amount) });
+    const reply = await window.api.invoke('rents:create', {
+      ...form,
+      Amount: parseFloat(form.Amount),
+      RentPartyID: form.RentPartyID ? parseInt(form.RentPartyID) : null,
+    });
     setBusy(false);
     if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', 'تم إضافة العقد');
@@ -115,22 +127,63 @@ export function RentPage() {
   };
 
   const handlePay = async () => {
-    if (!payCashAccount) { showToast('error', 'اختر الخزنة'); return; }
+    if (!payAsset) { showToast('error', 'اختر الأصل'); return; }
     const activeFy = await window.api.invoke('fiscalYear:getActive');
     if (!activeFy) { showToast('error', 'لا توجد سنة مالية مفتوحة'); return; }
+    // A blank amount means "settle whatever is left", which is the common case.
+    const amount = payAmount.trim() === '' ? undefined : parseFloat(payAmount);
+    if (amount !== undefined && !(amount > 0)) {
+      showToast('error', 'المبلغ يجب أن يكون أكبر من صفر'); return;
+    }
     setBusy(true);
     const reply = await window.api.invoke('rentPayments:pay', {
       RentPaymentID: selectedPayment.RentPaymentID,
-      CashAccountID: parseInt(payCashAccount),
+      ...splitAssetValue(payAsset),
+      Amount: amount,
       userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
     setBusy(false);
     if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
-    showToast('success', 'تم دفع القسط');
+    showToast('success', reply?.status === 'partial'
+      ? `تم دفع جزء - المتبقي ${(reply.remaining ?? 0).toFixed(2)}`
+      : 'تم دفع القسط بالكامل');
     setShowPayModal(false);
     setSelectedPayment(null);
-    setPayCashAccount('');
+    setPayAsset(''); setPayAmount('');
+    reloadAssets();
+    fetchData();
+  };
+
+  const handleAddAdvance = async () => {
+    if (!advAsset) { showToast('error', 'اختر الأصل'); return; }
+    const amount = parseFloat(advAmount);
+    if (!(amount > 0)) { showToast('error', 'أدخل مبلغ المقدم'); return; }
+    const activeFy = await window.api.invoke('fiscalYear:getActive');
+    setBusy(true);
+    const reply = await window.api.invoke('rents:addAdvance', {
+      RentID: selectedRent.RentID,
+      Amount: amount,
+      ...splitAssetValue(advAsset),
+      userId: currentUserId(),
+      fiscalYearId: activeFy?.FiscalYearID,
+    });
+    setBusy(false);
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
+    showToast('success', reply?.message || 'تم تسجيل المقدم');
+    setShowAdvModal(false);
+    setAdvAsset(''); setAdvAmount('');
+    reloadAssets();
+    fetchData();
+  };
+
+  const handleUseAdvance = async (row: any) => {
+    if (!confirm(`خصم قيمة قسط ${row.PeriodLabel} من رصيد المقدم؟`)) return;
+    const reply = await window.api.invoke('rents:applyAdvance', {
+      RentPaymentID: row.RentPaymentID, userId: currentUserId(),
+    });
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
+    showToast('success', 'تم الخصم من المقدم');
     fetchData();
   };
 
@@ -291,6 +344,10 @@ export function RentPage() {
                         className="text-xs text-slate-600 dark:text-slate-300 hover:underline">
                         توليد
                       </button>
+                      <button onClick={() => { setSelectedRent(row); setAdvAmount(''); setAdvAsset(''); setShowAdvModal(true); }}
+                        className="text-xs text-blue-600 hover:underline">
+                        مقدم
+                      </button>
                       <button
                         onClick={() => { setSelectedRent(row); setCancelReason(''); setShowCancelModal(true); }}
                         className="text-xs text-red-600 hover:underline">
@@ -333,7 +390,24 @@ export function RentPage() {
           columns={[
             { key: 'PeriodLabel', title: 'الفترة', render: (row: any) => <span className="font-medium">{row.PeriodLabel}</span> },
             { key: 'RentName', title: 'العقد' },
-            { key: 'Amount', title: 'المبلغ', render: (row: any) => <span className="font-bold">{money(row.Amount)}</span> },
+            {
+              key: 'Amount', title: 'المبلغ',
+              render: (row: any) => {
+                const paid = row.PaidAmount || 0;
+                const left = (row.Amount || 0) - paid;
+                return (
+                  <span className="font-bold">
+                    {money(row.Amount)}
+                    {paid > 0 && left > 0.005 && (
+                      <div className="text-[11px] font-normal">
+                        <span className="text-green-600">دُفع {money(paid)}</span>
+                        <span className="text-red-600"> · متبقٍ {money(left)}</span>
+                      </div>
+                    )}
+                  </span>
+                );
+              },
+            },
             {
               key: 'DueDate', title: 'الاستحقاق',
               render: (row: any) => {
@@ -350,11 +424,9 @@ export function RentPage() {
               key: 'Status', title: 'الحالة',
               render: (row: any) => {
                 if (row.CancelledAt) return <Badge variant="gray">ملغى</Badge>;
-                return (
-                  <Badge variant={row.Status === 'paid' ? 'green' : 'red'}>
-                    {row.Status === 'paid' ? 'مدفوع' : 'مستحق'}
-                  </Badge>
-                );
+                if (row.Status === 'paid') return <Badge variant="green">مدفوع</Badge>;
+                if ((row.PaidAmount || 0) > 0) return <Badge variant="yellow">مدفوع جزئياً</Badge>;
+                return <Badge variant="red">مستحق</Badge>;
               },
             },
             {
@@ -370,8 +442,12 @@ export function RentPage() {
                   );
                 }
                 return (
-                  <button onClick={() => { setSelectedPayment(row); setShowPayModal(true); }}
-                    className="text-xs text-green-600 hover:underline">دفع</button>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => { setSelectedPayment(row); setPayAmount(''); setPayAsset(''); setShowPayModal(true); }}
+                      className="text-xs text-green-600 hover:underline">دفع</button>
+                    <button onClick={() => handleUseAdvance(row)}
+                      className="text-xs text-blue-600 hover:underline">من المقدم</button>
+                  </div>
                 );
               },
             },
@@ -399,8 +475,17 @@ export function RentPage() {
           </Select>
           <Input label="بداية العقد" type="date" value={form.StartDate} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, StartDate: e.target.value })} />
           <Input label="نهاية العقد (اختياري)" type="date" value={form.EndDate} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, EndDate: e.target.value })} />
-          <Input label="اسم الطرف الآخر" value={form.PartyName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, PartyName: e.target.value })} />
-          <Input label="هاتف الطرف" value={form.PartyPhone} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, PartyPhone: e.target.value })} />
+          {/* Linked to a real record, so the contract joins that person's
+              account rather than creating a new "party" from a typed name. */}
+          <Select label={form.RentType === 'expense' ? 'المؤجر' : 'المستأجر'}
+            value={form.RentPartyID}
+            onChange={(e) => setForm({ ...form, RentPartyID: e.target.value })}>
+            <option value="">— بدون —</option>
+            {rentParties
+              .filter((x: any) => x.PartyKind === (form.RentType === 'expense' ? 'landlord' : 'tenant'))
+              .map((x: any) => <option key={x.RentPartyID} value={x.RentPartyID}>{x.Name}</option>)}
+          </Select>
+          <Input label="أو اكتب اسم الطرف" value={form.PartyName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, PartyName: e.target.value })} />
         </div>
         <p className="text-[11px] text-slate-400 mt-3">
           اترك تاريخ النهاية فارغاً للعقود المفتوحة. عند تحديده لن يولّد البرنامج أقساطاً بعده.
@@ -440,6 +525,28 @@ export function RentPage() {
         )}
       </Modal>
 
+      <Modal isOpen={showAdvModal} onClose={() => setShowAdvModal(false)} title="تسجيل مقدم / تأمين" size="sm"
+        footer={<><Button variant="secondary" onClick={() => setShowAdvModal(false)}>إلغاء</Button><Button onClick={handleAddAdvance} loading={busy}>حفظ</Button></>}
+      >
+        {selectedRent && (
+          <div className="space-y-3">
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 text-xs text-blue-800 dark:text-blue-200">
+              المقدم <strong>ليس مصروفاً</strong> — المال خرج من الخزينة لكنه محفوظ لصالحك على العقد،
+              ويُخصم من الأقساط عند استحقاقها.
+            </div>
+            <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3 text-sm">
+              <div className="flex justify-between"><span className="text-slate-500">العقد:</span><span className="font-medium">{selectedRent.RentName}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">الرصيد المقدم الحالي:</span><span className="font-bold">{money(selectedRent.AdvanceBalance)}</span></div>
+            </div>
+            <Input label="مبلغ المقدم" type="number" value={advAmount}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAdvAmount(e.target.value)} />
+            <AssetPicker
+              label={selectedRent.RentType === 'income' ? 'المبلغ يدخل إلى' : 'المبلغ يخرج من'}
+              assets={assets} value={advAsset} onChange={setAdvAsset} />
+          </div>
+        )}
+      </Modal>
+
       <Modal isOpen={showPayModal} onClose={() => setShowPayModal(false)} title="دفع قسط" size="sm"
         footer={<><Button variant="secondary" onClick={() => setShowPayModal(false)}>إلغاء</Button><Button onClick={handlePay} loading={busy}>دفع</Button></>}
       >
@@ -447,12 +554,22 @@ export function RentPage() {
           <div className="space-y-4">
             <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-4 space-y-2 text-sm">
               <div className="flex justify-between"><span className="text-slate-500">الفترة:</span><span className="font-medium text-slate-700 dark:text-slate-200">{selectedPayment.PeriodLabel}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">المبلغ:</span><span className="font-bold text-slate-700 dark:text-white">{money(selectedPayment.Amount)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">قيمة القسط:</span><span className="font-bold text-slate-700 dark:text-white">{money(selectedPayment.Amount)}</span></div>
+              {(selectedPayment.PaidAmount || 0) > 0 && (
+                <>
+                  <div className="flex justify-between"><span className="text-slate-500">المدفوع سابقاً:</span><span className="text-green-600">{money(selectedPayment.PaidAmount)}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">المتبقي:</span><span className="font-bold text-red-600">{money((selectedPayment.Amount||0)-(selectedPayment.PaidAmount||0))}</span></div>
+                </>
+              )}
             </div>
-            <Select label="الخزنة/البنك" value={payCashAccount} onChange={(e) => setPayCashAccount(e.target.value)}>
-              <option value="">— اختر —</option>
-              {cashAccounts.map((ca: any) => <option key={ca.CashAccountID} value={ca.CashAccountID}>{ca.AccountName} ({money(ca.Balance)})</option>)}
-            </Select>
+            <Input
+              label={`المبلغ — اتركه فارغاً لدفع المتبقي كاملاً (${money(
+                (selectedPayment.Amount || 0) - (selectedPayment.PaidAmount || 0))})`}
+              type="number" value={payAmount}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPayAmount(e.target.value)} />
+            <AssetPicker
+              label={selectedPayment.RentType === 'income' ? 'المبلغ يدخل إلى' : 'المبلغ يخرج من'}
+              assets={assets} value={payAsset} onChange={setPayAsset} />
           </div>
         )}
       </Modal>

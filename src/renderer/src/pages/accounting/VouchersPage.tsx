@@ -6,6 +6,8 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
+import { AssetPicker, splitAssetValue, useAssets } from '../../components/shared/AssetPicker';
 import { currentUserId } from '../../stores/auth.store';
 
 export function VouchersPage() {
@@ -26,9 +28,12 @@ export function VouchersPage() {
     PartyID: '',
     PartyName: '',
     Description: '',
-    CashAccountID: '',
-    PaymentMethodID: '',
+    // One field replacing CashAccountID + PaymentMethodID. Holding a single
+    // value makes it impossible for the form to name two assets at once.
+    AssetValue: '',
   });
+
+  const { assets, reload: reloadAssets } = useAssets();
 
   const fetchData = async () => {
     const [v, ca, pm, cu, su, em] = await Promise.all([
@@ -50,8 +55,8 @@ export function VouchersPage() {
   useEffect(() => { fetchData(); }, [typeFilter]);
 
   const handleSave = async () => {
-    if (!form.Amount || !form.Description || !form.CashAccountID) {
-      showToast('error', 'يرجى إدخال المبلغ والبيان والخزنة');
+    if (!form.Amount || !form.Description || !form.AssetValue) {
+      showToast('error', 'يرجى إدخال المبلغ والبيان والأصل');
       return;
     }
     const activeFy = await window.api.invoke('fiscalYear:getActive');
@@ -59,22 +64,30 @@ export function VouchersPage() {
       showToast('error', 'لا توجد سنة مالية مفتوحة');
       return;
     }
+    // The picker's single value becomes exactly one of the two ids the
+    // handler expects, so no handler signature had to change.
+    const { AssetValue, ...rest } = form;
     const data = {
-      ...form,
+      ...rest,
       Amount: parseFloat(form.Amount),
       PartyID: form.PartyID ? parseInt(form.PartyID) : null,
-      CashAccountID: parseInt(form.CashAccountID),
-      PaymentMethodID: form.PaymentMethodID ? parseInt(form.PaymentMethodID) : null,
+      ...splitAssetValue(AssetValue),
       userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     };
     const result = await window.api.invoke('vouchers:create', data);
-    if (result.success) {
-      showToast('success', `تم إنشاء السند - رقم: ${result.voucherNumber}`);
-      setShowModal(false);
-      setForm({ VoucherType: 'receipt', Amount: '', PartyType: 'general', PartyID: '', PartyName: '', Description: '', CashAccountID: '', PaymentMethodID: '' });
-      fetchData();
+    // Checked. A refused voucher used to close nothing and say nothing: the
+    // modal stayed open with no explanation, which reads as the button not
+    // working rather than as a rejection.
+    if (isFailure(result) || !result?.success) {
+      showToast('error', failureMessage(result, 'تعذّر إنشاء السند'));
+      return;
     }
+    showToast('success', `تم إنشاء السند - رقم: ${result.voucherNumber}`);
+    setShowModal(false);
+    setForm({ VoucherType: 'receipt', Amount: '', PartyType: 'general', PartyID: '', PartyName: '', Description: '', AssetValue: '' });
+    reloadAssets();
+    fetchData();
   };
 
   const partyTypeOptions = [
@@ -146,14 +159,20 @@ export function VouchersPage() {
           {form.PartyType === 'general' && (
             <Input label="اسم الطرف (اختياري)" value={form.PartyName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, PartyName: e.target.value })} />
           )}
-          <Select label="الخزنة/البنك" value={form.CashAccountID} onChange={(e) => setForm({ ...form, CashAccountID: e.target.value })}>
-            <option value="">— اختر —</option>
-            {cashAccounts.map((ca: any) => <option key={ca.CashAccountID} value={ca.CashAccountID}>{ca.AccountName} ({ca.Balance?.toFixed(2)})</option>)}
-          </Select>
-          <Select label="طريقة الدفع (اختياري)" value={form.PaymentMethodID} onChange={(e) => setForm({ ...form, PaymentMethodID: e.target.value })}>
-            <option value="">— بدون —</option>
-            {paymentMethods.map((pm: any) => <option key={pm.PaymentMethodID} value={pm.PaymentMethodID}>{pm.MethodName}</option>)}
-          </Select>
+          {/* ONE question, not two. The old form offered a safe AND a separate
+              "payment method (optional)", but both name an asset with a
+              balance and only one of them can receive the money. Choosing
+              both moved the wallet and silently ignored the safe; choosing
+              neither was accepted and moved nothing at all. */}
+          <div className="col-span-2">
+            <AssetPicker
+              label={form.VoucherType === 'receipt'
+                ? 'المبلغ يدخل إلى' : 'المبلغ يخرج من'}
+              assets={assets}
+              value={form.AssetValue}
+              onChange={(v) => setForm({ ...form, AssetValue: v })}
+            />
+          </div>
           <div className="col-span-2">
             <Textarea label="البيان" value={form.Description} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setForm({ ...form, Description: e.target.value })} placeholder="وصف العملية..." />
           </div>

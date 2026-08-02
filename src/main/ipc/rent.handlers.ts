@@ -66,6 +66,8 @@ export function registerRentHandlers() {
     RentName: string; RentType: string; Amount: number; Period: string;
     StartDate: string; EndDate?: string;
     PartyName?: string; PartyPhone?: string; Notes?: string;
+    /** Links the contract to a landlord/tenant record. */
+    RentPartyID?: number | null;
   }) => {
     const db = getDb();
     // Rent is an amount of money, so it follows the same rule as every other:
@@ -101,11 +103,12 @@ export function registerRentHandlers() {
 
     const result = db.prepare(`
       INSERT INTO rents (RentName, RentType, Amount, Period, StartDate, EndDate,
-                         IsActive, Status, PartyName, PartyPhone, Notes)
-      VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?)
+                         IsActive, Status, PartyName, PartyPhone, Notes, RentPartyID)
+      VALUES (?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?)
     `).run(
       data.RentName.trim(), data.RentType, data.Amount, data.Period, start,
       end || null, data.PartyName ?? null, data.PartyPhone ?? null, data.Notes ?? null,
+      data.RentPartyID ?? null,
     );
     return { success: true, id: result.lastInsertRowid };
   });
@@ -129,11 +132,13 @@ export function registerRentHandlers() {
     db.transaction(() => {
       db.prepare(`
         UPDATE rents SET RentName = ?, RentType = ?, Amount = ?, Period = ?,
-          EndDate = ?, IsActive = ?, PartyName = ?, PartyPhone = ?, Notes = ?
+          EndDate = ?, IsActive = ?, PartyName = ?, PartyPhone = ?, Notes = ?,
+          RentPartyID = COALESCE(?, RentPartyID)
         WHERE RentID = ?
       `).run(
         data.RentName, data.RentType, data.Amount, data.Period, end || null,
-        data.IsActive, data.PartyName, data.PartyPhone, data.Notes, id,
+        data.IsActive, data.PartyName, data.PartyPhone, data.Notes,
+        data.RentPartyID ?? null, id,
       );
       if (Number(data.Amount) !== Number(existing.Amount)) {
         db.prepare(`

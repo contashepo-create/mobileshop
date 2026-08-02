@@ -121,7 +121,25 @@ console.log('\n[6] Server keys are separated by privilege');
   check('device listing requires the admin key',
     worker.slice(worker.indexOf('async function handleDevices')).includes("X-Admin-Key"));
   check('key comparison is not a plain ===', worker.includes('function safeEqual'));
-  check('the bot only obeys its owner', worker.includes('chatId !== String(env.TG_ADMIN_CHAT)'));
+  // Asserted BEHAVIOURALLY. This used to match the literal text
+  // `chatId !== String(env.TG_ADMIN_CHAT)`, which was the single-admin
+  // implementation. TG_ADMIN_CHAT now accepts a comma-separated list so the
+  // owner can register a backup phone, and the check failed on code that had
+  // become more capable rather than less — a structural check pinned to one
+  // implementation cannot tell those apart. The RULE is what matters: only
+  // registered numeric ids may drive the bot.
+  {
+    const parse = /function adminChats\(env\) \{[\s\S]*?\n\}/.exec(worker)[0];
+    const gate = /function isAdminChat\(env, chatId\) \{[\s\S]*?\n\}/.exec(worker)[0];
+    const isAdminChat = new Function(`${parse}; ${gate}; return isAdminChat;`)();
+    const env = { TG_ADMIN_CHAT: '7232305465,1593943219' };
+    check('the bot obeys its registered owners',
+      isAdminChat(env, '7232305465') && isAdminChat(env, '1593943219'));
+    check('and nobody else',
+      !isAdminChat(env, '999999999') && !isAdminChat(env, '') && !isAdminChat({}, '7232305465'));
+    check('the webhook gate uses that check',
+      worker.includes('if (!isAdminChat(env, chatId)) return json({ ok: true });'));
+  }
   check('no secret is committed in wrangler.toml', !/ADMIN_KEY\s*=|CLIENT_KEY\s*=|LICENSE_SECRET\s*=/.test(R('server/wrangler.toml')));
 }
 

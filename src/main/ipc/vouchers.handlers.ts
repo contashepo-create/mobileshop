@@ -50,6 +50,24 @@ export function registerVouchersHandlers() {
     // that was the exact opposite of the truth.
     const badAmount = checkAmounts([[data.Amount, 'مبلغ السند', { allowZero: false }]]);
     if (badAmount) return { success: false, message: badAmount };
+
+    // A voucher MUST name exactly one asset.
+    //
+    // Neither: the voucher was accepted and no balance changed at all — the
+    // expense or income was recorded while the money existed nowhere. Both:
+    // the form let a safe AND a wallet be chosen, and the code below moves the
+    // WALLET and silently ignores the safe, so the printed document named an
+    // asset that never moved. Both cases were reachable from the ordinary
+    // form, which is why the screen now asks the question once.
+    if (!data.CashAccountID && !data.PaymentMethodID) {
+      return { success: false, message: 'اختر الأصل الذي يخرج منه المبلغ أو يدخل إليه' };
+    }
+    if (data.CashAccountID && data.PaymentMethodID) {
+      return {
+        success: false,
+        message: 'اختر أصلاً واحداً فقط - إما خزينة/بنك أو محفظة',
+      };
+    }
     const dateStr = businessToday();
     const prefix = data.VoucherType === 'receipt' ? 'RCV' : 'PAY';
     const voucherNumber = nextDocNumber(db, 'vouchers', 'VoucherNumber', prefix, dateStr);

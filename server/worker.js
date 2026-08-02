@@ -14,7 +14,9 @@
  *   npx wrangler secret put CLIENT_KEY     # shipped in the app -> heartbeat only
  *   npx wrangler secret put LICENSE_PRIVATE_KEY # Ed25519 private key (base64, 32 bytes)
  *   npx wrangler secret put TG_BOT_TOKEN   # from @BotFather
- *   npx wrangler secret put TG_ADMIN_CHAT  # your numeric Telegram chat id
+ *   npx wrangler secret put TG_ADMIN_CHAT  # numeric chat id, or several
+ *                                          # separated by commas for a backup
+ *                                          # phone: 7232305465,1593943219
  */
 
 const EPOCH_UTC = Date.UTC(2020, 0, 1);
@@ -94,15 +96,49 @@ function safeEqual(a, b) {
   return diff === 0;
 }
 
+/**
+ * The chat ids allowed to drive the bot, and to receive its alerts.
+ *
+ * TG_ADMIN_CHAT accepts a COMMA-SEPARATED list so the owner can hold a second
+ * number as a fallback: if the first phone is lost, stolen or its Telegram
+ * account is locked, the shop is not cut off from its own bot.
+ *
+ * Read as a list everywhere. A single id keeps working unchanged, because one
+ * value is simply a list of one.
+ *
+ * SECURITY: every id here has FULL control of the bot. That is the point of a
+ * fallback, and it is also the cost — a second id is a second key to the same
+ * door, so only numbers the owner personally controls belong in it.
+ */
+function adminChats(env) {
+  return String(env.TG_ADMIN_CHAT || '')
+    .split(',')
+    .map(x => x.trim())
+    .filter(x => /^-?\d{5,}$/.test(x));
+}
+
+/** True when this chat id may command the bot. */
+function isAdminChat(env, chatId) {
+  const id = String(chatId || '').trim();
+  if (!id) return false;
+  return adminChats(env).includes(id);
+}
+
 async function tg(env, text) {
-  if (!env.TG_BOT_TOKEN || !env.TG_ADMIN_CHAT) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: env.TG_ADMIN_CHAT, text, parse_mode: 'HTML' }),
-    });
-  } catch { /* notification failure must never break the request */ }
+  const chats = adminChats(env);
+  if (!env.TG_BOT_TOKEN || chats.length === 0) return;
+  // Alerts go to EVERY registered admin. A backup number that never hears
+  // anything is not a backup — it would only be discovered to be misconfigured
+  // at the moment the primary is already lost.
+  for (const chat_id of chats) {
+    try {
+      await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id, text, parse_mode: 'HTML' }),
+      });
+    } catch { /* notification failure must never break the request */ }
+  }
 }
 
 // ---------------------------------------------------------------- schema
@@ -468,16 +504,28 @@ async function tgCall(env, method, payload) {
   }
 }
 
+/**
+ * The chat currently being served.
+ *
+ * With more than one admin, replying to `TG_ADMIN_CHAT` would send the answer
+ * to the FIRST number no matter who asked — the second phone would press a
+ * button and watch the reply arrive on the first. `handleTelegram` records
+ * who is acting, and everything below answers them.
+ */
+function actingChat(env) {
+  return env.__actingChat || adminChats(env)[0] || '';
+}
+
 const send = (env, text, keyboard) =>
   tgCall(env, 'sendMessage', {
-    chat_id: env.TG_ADMIN_CHAT, text, parse_mode: 'HTML',
+    chat_id: actingChat(env), text, parse_mode: 'HTML',
     reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined,
   });
 
 /** Replaces the current message instead of stacking new ones — feels like an app. */
 const edit = (env, messageId, text, keyboard) =>
   tgCall(env, 'editMessageText', {
-    chat_id: env.TG_ADMIN_CHAT, message_id: messageId, text, parse_mode: 'HTML',
+    chat_id: actingChat(env), message_id: messageId, text, parse_mode: 'HTML',
     reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined,
   });
 
@@ -496,12 +544,12 @@ async function setPending(env, action, data) {
     VALUES (?, ?, ?, ?)
     ON CONFLICT(chat_id) DO UPDATE SET action = excluded.action,
       data = excluded.data, created_at = excluded.created_at
-  `).bind(String(env.TG_ADMIN_CHAT), action, JSON.stringify(data || {}), new Date().toISOString()).run();
+  `).bind(String(actingChat(env)), action, JSON.stringify(data || {}), new Date().toISOString()).run();
 }
 
 async function getPending(env) {
   const row = await env.DB.prepare('SELECT action, data, created_at FROM pending_actions WHERE chat_id = ?')
-    .bind(String(env.TG_ADMIN_CHAT)).first();
+    .bind(String(actingChat(env))).first();
   if (!row) return null;
   // Expire stale prompts so a forgotten flow does not swallow a later command.
   if (Date.now() - new Date(row.created_at).getTime() > 10 * 60 * 1000) {
@@ -512,7 +560,7 @@ async function getPending(env) {
 }
 
 const clearPending = env =>
-  env.DB.prepare('DELETE FROM pending_actions WHERE chat_id = ?').bind(String(env.TG_ADMIN_CHAT)).run();
+  env.DB.prepare('DELETE FROM pending_actions WHERE chat_id = ?').bind(String(actingChat(env))).run();
 
 // ---------------------------------------------------------------- screens
 
@@ -915,7 +963,11 @@ async function handleTelegram(request, env) {
   const cb = update?.callback_query;
   const msg = update?.message;
   const chatId = String(cb?.from?.id || msg?.chat?.id || '');
-  if (!chatId || chatId !== String(env.TG_ADMIN_CHAT)) return json({ ok: true });
+  if (!isAdminChat(env, chatId)) return json({ ok: true });
+
+  // Answer whoever asked. Each admin also keeps their OWN pending-prompt state,
+  // keyed by chat id, so one owner mid-flow cannot swallow the other's command.
+  env.__actingChat = chatId;
 
   try {
     if (cb) await handleCallback(env, cb);

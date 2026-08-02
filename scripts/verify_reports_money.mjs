@@ -202,7 +202,11 @@ console.log('\n[3] How a customer pays: every route lands in ONE place');
   seed();
   await sell({ PaidAmount: 0 });
   const c0 = cash(), w0 = wallet();
-  await voucher({ Amount: 1000, PaymentMethodID: 1 });
+  // CashAccountID is nulled explicitly. The helper defaults it to 1, and a
+  // voucher naming BOTH a safe and a wallet is now refused outright rather
+  // than silently picking one — so a wallet receipt has to name only the
+  // wallet, which is exactly what the screen now sends.
+  await voucher({ Amount: 1000, CashAccountID: null, PaymentMethodID: 1 });
   t('a receipt into a wallet credits the wallet only, never both',
     near(wallet() - w0, 1000) && near(cash(), c0),
     `wallet +${r2(wallet() - w0)}, cash +${r2(cash() - c0)}`);

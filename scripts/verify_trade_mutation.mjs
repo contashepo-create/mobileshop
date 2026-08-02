@@ -444,11 +444,17 @@ const MUTANTS = [
   },
   // ---- back office ------------------------------------------------------
   {
-    name: 'a voucher naming both a safe and a wallet banks the money twice',
+    // Retargeted. The old mutant added a second balance update guarded by
+    // `PaymentMethodID && CashAccountID`, and that combination is now REFUSED
+    // before any money moves — so the injected line became unreachable and the
+    // mutant survived by being impossible rather than by being undetected.
+    // The rule worth protecting is the refusal itself: allow "both" again and
+    // the double-banking it used to cause becomes reachable once more.
+    name: 'a voucher may name both a safe and a wallet',
     file: VOU,
-    find: "      const sign = data.VoucherType === 'receipt' ? 1 : -1;",
-    replace: "      const sign = data.VoucherType === 'receipt' ? 1 : -1;\n      if (data.PaymentMethodID && data.CashAccountID) db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(sign * data.Amount, data.CashAccountID);",
-    why: 'a 300 receipt credited 600 and the shop invented cash',
+    find: "    if (data.CashAccountID && data.PaymentMethodID) {",
+    replace: "    if (false) {",
+    why: 'naming two assets let one of them move while the document named the other',
   },
   {
     name: 'a negative amount is accepted again',

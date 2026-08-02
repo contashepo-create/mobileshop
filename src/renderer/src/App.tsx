@@ -21,6 +21,7 @@ import { MaintenancePage } from './pages/accounting/MaintenancePage';
 import { VouchersPage } from './pages/accounting/VouchersPage';
 import { PayrollPage } from './pages/accounting/PayrollPage';
 import { RentPage } from './pages/accounting/RentPage';
+import { RentPartiesPage } from './pages/accounting/RentPartiesPage';
 import { FiscalYearPage } from './pages/accounting/FiscalYearPage';
 import { SettlementPage } from './pages/accounting/SettlementPage';
 import { OpeningBalancePage } from './pages/accounting/OpeningBalancePage';
@@ -120,6 +121,7 @@ export default function App() {
               <Route path="accounting/vouchers" element={<VouchersPage />} />
               <Route path="accounting/payroll" element={<PayrollPage />} />
               <Route path="accounting/rents" element={<RentPage />} />
+              <Route path="accounting/rent-parties" element={<RentPartiesPage />} />
               <Route path="accounting/services" element={<ServicesPage />} />
               <Route path="accounting/fiscal-year" element={<FiscalYearPage />} />
               <Route path="accounting/settlement" element={<SettlementPage />} />

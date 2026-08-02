@@ -189,20 +189,43 @@ console.log('\n[2] A negative amount must be refused, never run backwards');
 // ---------------------------------------------------------------- 3
 console.log('\n[3] Money must land in exactly ONE account');
 {
+  // These two used to assert that naming BOTH a safe and a wallet moved the
+  // amount once rather than twice — the old form offered both fields, so the
+  // handler had to pick one and did, silently. The screen now asks the
+  // question once and the handler REFUSES a voucher that names two assets, so
+  // the ambiguity cannot be expressed at all. That is strictly safer: the
+  // document can no longer name an asset that never moved.
   seed();
   const c0 = cash(), w0 = wallet();
-  await voucher({ Amount: 300, PaymentMethodID: 1 });
-  const moved = r2((cash() - c0) + (wallet() - w0));
-  t('a 300 receipt naming both a safe and a wallet credits 300, not 600',
-    Math.abs(moved - 300) < 0.011, `total credited ${moved}`);
+  const both = await voucher({ Amount: 300, PaymentMethodID: 1 });
+  t('a receipt naming BOTH a safe and a wallet is refused', both?.success === false,
+    JSON.stringify(both));
+  t('and no money moves for it', Math.abs(r2((cash() - c0) + (wallet() - w0))) < 0.011);
 }
 {
   seed();
   const c0 = cash(), w0 = wallet();
-  await voucher({ VoucherType: 'payment', PartyType: null, PartyID: null, Amount: 300, PaymentMethodID: 1 });
-  const moved = r2((cash() - c0) + (wallet() - w0));
-  t('a 300 payment naming both debits 300, not 600',
-    Math.abs(moved + 300) < 0.011, `total moved ${moved}`);
+  const bothPay = await voucher({ VoucherType: 'payment', PartyType: null, PartyID: null, Amount: 300, PaymentMethodID: 1 });
+  t('a payment naming BOTH is refused too', bothPay?.success === false, JSON.stringify(bothPay));
+  t('and no money moves for that either', Math.abs(r2((cash() - c0) + (wallet() - w0))) < 0.011);
+}
+{
+  // The rule the section is really about: whichever ONE asset is named, the
+  // amount lands there exactly once.
+  seed();
+  const c0 = cash(), w0 = wallet();
+  await voucher({ Amount: 300, CashAccountID: null, PaymentMethodID: 1 });
+  t('a wallet-only receipt credits the wallet once',
+    Math.abs(r2(wallet() - w0) - 300) < 0.011, `wallet moved ${r2(wallet() - w0)}`);
+  t('and leaves the safe alone', Math.abs(r2(cash() - c0)) < 0.011);
+}
+{
+  seed();
+  const c0 = cash(), w0 = wallet();
+  await voucher({ Amount: 300 });
+  t('a safe-only receipt credits the safe once',
+    Math.abs(r2(cash() - c0) - 300) < 0.011, `safe moved ${r2(cash() - c0)}`);
+  t('and leaves the wallet alone', Math.abs(r2(wallet() - w0)) < 0.011);
 }
 
 // ---------------------------------------------------------------- 4

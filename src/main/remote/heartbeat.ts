@@ -21,7 +21,7 @@ import {
  * receipts, not personal data about a third party. It can be suppressed with the
  * `telemetry_share_shop_name` setting.
  *
- * The whole feature can be switched off with `telemetry_enabled = '0'`, and the
+ * The whole feature is OFF unless `telemetry_enabled = '1'`, and the
  * customer is told about it on the activation screen.
  *
  * RELIABILITY
@@ -61,9 +61,16 @@ function setting(key: string): string | null {
   }
 }
 
-/** Telemetry is opt-out; a customer (or the developer) can disable it. */
+/**
+ * Telemetry is OPT-IN. It sends nothing unless the setting is exactly '1'.
+ *
+ * It used to be opt-out, and the test was `!== '0'` — which also returns true
+ * when the row is ABSENT. A database created before the setting existed, or
+ * one where the row was removed, therefore transmitted by default. Requiring
+ * an explicit '1' means silence is silence.
+ */
 export function telemetryEnabled(): boolean {
-  return setting('telemetry_enabled') !== '0';
+  return setting('telemetry_enabled') === '1';
 }
 
 export interface HeartbeatPayload {

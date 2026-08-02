@@ -3,7 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { getDb } from '../database/connection';
 import bcrypt from 'bcryptjs';
-import { devLogin, revokeDevToken } from '../security/devAuth';
+import { devLogin, revokeDevToken, createDevChallenge, devLoginSigned } from '../security/devAuth';
+import { LICENSE_PUBLIC_KEY } from '../security/licenseCrypto';
 import { getRemoteOverrides } from '../remote/remoteStore';
 import { isRemoteManaged } from '../remote/remoteConfig';
 import { requestCode, verifyCode } from '../security/confirmCode';
@@ -22,6 +23,37 @@ export function registerSettingsHandlers() {
   ipcMain.handle('dev:login', async (_event, data: { username: string; password: string }) => {
     return devLogin(data?.username ?? '', data?.password ?? '');
   });
+
+  /**
+   * Issues a challenge for the developer to sign on their OWN machine.
+   *
+   * Public because it must answer before anyone is authenticated — it is part
+   * of getting in. It reveals nothing: a random nonce is not a secret, and
+   * being able to ask for one does not help produce a signature.
+   */
+  ipcMain.handle('dev:challenge', async () => {
+    const { nonce, expiresInSec } = createDevChallenge();
+    return {
+      success: true,
+      nonce,
+      expiresInSec,
+      command: `npm run dev:sign -- ${nonce}`,
+    };
+  });
+
+  /**
+   * The strong path into the developer console.
+   *
+   * Requires BOTH a signature over the challenge — produced with a private key
+   * that never ships — and the password. Cracking the shipped hash gets an
+   * attacker one factor; stealing the key gets them the other. Neither alone
+   * opens anything.
+   */
+  ipcMain.handle('dev:loginSigned', async (_event, data: {
+    nonce?: string; signature?: string; password?: string;
+  }) => devLoginSigned(
+    LICENSE_PUBLIC_KEY, data?.nonce, data?.signature, data?.password ?? '',
+  ));
 
   ipcMain.handle('dev:logout', async (_event, data: { devToken?: string }) => {
     revokeDevToken(data?.devToken);

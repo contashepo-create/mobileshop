@@ -1643,7 +1643,9 @@ function seedData(db: Database.Database) {
     ['custom_block_title', ''],
     ['custom_block_body', ''],
     // --- Telemetry (opt-out). See heartbeat.ts for exactly what is sent.
-    ['telemetry_enabled', '1'],
+    // OFF by default. Sending a shop's data anywhere should be a decision the
+    // owner makes, not one they have to discover and undo.
+    ['telemetry_enabled', '0'],
     ['telemetry_share_shop_name', '1'],
     ['allow_negative_stock', '0'],
     ['allow_negative_cash', '0'],

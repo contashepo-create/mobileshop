@@ -70,7 +70,7 @@ export function registerTransfersHandlers() {
 
       const tx = db.transaction(() => {
         // Record transfer
-        db.prepare(`
+        const inserted = db.prepare(`
           INSERT INTO asset_transfers (
             TransferNumber, Date, FiscalYearID,
             FromType, FromID, ToType, ToID,
@@ -83,6 +83,7 @@ export function registerTransfersHandlers() {
           data.Amount, data.TransferCost, receivedAmount, data.TransferCostSource,
           data.Notes ?? null, data.userId
         );
+        const transferId = Number(inserted.lastInsertRowid);
 
         // Deduct from source
         if (data.FromType === 'cash_account') {
@@ -100,14 +101,23 @@ export function registerTransfersHandlers() {
 
         // Record transfer cost as expense (general voucher if cost > 0)
         if (data.TransferCost > 0) {
+          // ReferenceType/ReferenceID tie this voucher to THIS transfer.
+          //
+          // The delete used to find it by date + amount + a `TRC-%` prefix,
+          // which is not an identity: two transfers on the same day with the
+          // same fee produced two indistinguishable vouchers, and deleting
+          // one transfer removed BOTH. Measured — one delete, two rows gone,
+          // and the second transfer's fee silently vanished from the books.
           db.prepare(`
             INSERT INTO vouchers (VoucherNumber, VoucherType, FiscalYearID, Date, Amount,
-              PartyType, PartyName, Description, CashAccountID, UserID)
-            VALUES (?, 'payment', ?, ?, ?, 'general', 'تكلفة تحويل', 'عمولة تحويل بين الحسابات', ?, ?)
+              PartyType, PartyName, Description, CashAccountID, UserID,
+              ReferenceType, ReferenceID)
+            VALUES (?, 'payment', ?, ?, ?, 'general', 'تكلفة تحويل', 'عمولة تحويل بين الحسابات', ?, ?,
+                    'transfer', ?)
           `).run(
             nextDocNumber(db, 'vouchers', 'VoucherNumber', 'TRC', dateStr),
             data.fiscalYearId, dateStr, data.TransferCost,
-            data.FromID, data.userId
+            data.FromID, data.userId, transferId
           );
         }
       });

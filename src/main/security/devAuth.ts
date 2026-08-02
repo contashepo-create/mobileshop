@@ -177,3 +177,143 @@ export function verifyDevToken(token: unknown): boolean {
 export function revokeDevToken(token: unknown) {
   if (typeof token === 'string') tokens.delete(token);
 }
+
+// ============================================================================
+// CHALLENGE / RESPONSE — the shipped-secret problem, solved
+// ============================================================================
+/**
+ * WHY THE PASSWORD ALONE WAS NEVER ENOUGH
+ * ---------------------------------------
+ * A bcrypt hash of the developer password ships inside every build. Rate
+ * limiting protects the live dialog and does nothing once the hash has been
+ * pulled out of app.asar: the attacker then grinds it offline, at their own
+ * pace, on their own hardware. That is not a flaw in the password — it is what
+ * a SHARED SECRET means. Any secret the app can check, the app must contain.
+ *
+ * The fix is to stop shipping a secret at all. The developer console now
+ * issues a random CHALLENGE; the developer signs it on their own machine with
+ * an Ed25519 PRIVATE key that is never packaged; the app verifies the
+ * signature with the PUBLIC key it already embeds for licensing. Extracting
+ * everything in the build yields a verifier and no way to produce a signature.
+ *
+ * The password is kept as a SECOND factor rather than replaced. Someone who
+ * steals the developer's private key still cannot open the console without it,
+ * and someone who cracks the password still cannot sign a challenge. Neither
+ * alone is sufficient, which is the whole point.
+ */
+
+interface Challenge {
+  nonce: string;
+  expiresAt: number;
+  used: boolean;
+}
+
+/** Live challenges, keyed by nonce. Small and short-lived by construction. */
+const challenges = new Map<string, Challenge>();
+const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+
+function purgeChallenges() {
+  const now = Date.now();
+  for (const [n, c] of challenges) {
+    if (c.expiresAt <= now || c.used) challenges.delete(n);
+  }
+}
+
+/**
+ * Issues a fresh challenge for the developer to sign.
+ *
+ * The nonce is random and single-use, so a signature captured from an earlier
+ * session cannot be replayed — which is the attack that a fixed "sign the
+ * device id" scheme would invite.
+ */
+export function createDevChallenge(): { nonce: string; expiresInSec: number } {
+  purgeChallenges();
+  const nonce = crypto.randomBytes(24).toString('hex');
+  challenges.set(nonce, { nonce, expiresAt: Date.now() + CHALLENGE_TTL_MS, used: false });
+  return { nonce, expiresInSec: Math.floor(CHALLENGE_TTL_MS / 1000) };
+}
+
+/** What gets signed. Domain-separated so a licence signature cannot be reused here. */
+export function devChallengeMessage(nonce: string): Buffer {
+  return Buffer.from(`mobileshop-dev-console:v1:${nonce}`, 'utf8');
+}
+
+/**
+ * Verifies a signed challenge and mints the same short-lived token the
+ * password path issues.
+ *
+ * `publicKeyB64` is supplied by the caller so licensing owns the key material;
+ * devAuth stays free of key plumbing and cannot drift from it.
+ */
+export function devLoginSigned(
+  publicKeyB64: string,
+  nonce: unknown,
+  signatureB64: unknown,
+  password: unknown,
+): { success: boolean; token?: string; message?: string } {
+  const lockRemaining = isLockedOut();
+  if (lockRemaining > 0) {
+    return { success: false, message: `تم قفل الدخول مؤقتاً - حاول بعد ${lockRemaining} ثانية` };
+  }
+  purgeChallenges();
+
+  const key = typeof nonce === 'string' ? nonce : '';
+  const challenge = challenges.get(key);
+  if (!challenge) {
+    return { success: false, message: 'التحدي غير صالح أو منتهي - اطلب تحدياً جديداً' };
+  }
+  // Consumed on the FIRST attempt, successful or not. A challenge that
+  // survives a failure is a challenge an attacker can grind against.
+  challenge.used = true;
+  challenges.delete(key);
+
+  if (challenge.expiresAt <= Date.now()) {
+    return { success: false, message: 'انتهت صلاحية التحدي - اطلب تحدياً جديداً' };
+  }
+
+  // The password is still required: two independent factors, and the theft of
+  // either one on its own opens nothing.
+  const passOk = typeof password === 'string'
+    && bcrypt.compareSync(password || '', DEV_PASSWORD_HASH);
+
+  let sigOk = false;
+  try {
+    const sig = Buffer.from(String(signatureB64 ?? ''), 'base64');
+    // Ed25519 signatures are exactly 64 bytes; anything else is not worth
+    // handing to the verifier.
+    if (sig.length === 64) {
+      const der = Buffer.concat([
+        Buffer.from('302a300506032b6570032100', 'hex'),
+        Buffer.from(String(publicKeyB64 ?? ''), 'base64'),
+      ]);
+      const pub = crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
+      sigOk = crypto.verify(null, devChallengeMessage(key), pub, sig);
+    }
+  } catch {
+    sigOk = false;
+  }
+
+  if (!sigOk || !passOk) {
+    failedAttempts++;
+    if (failedAttempts >= MAX_ATTEMPTS) {
+      lockedUntil = Date.now() + LOCKOUT_MS;
+      failedAttempts = 0;
+      return { success: false, message: 'تم تجاوز عدد المحاولات - تم القفل 15 دقيقة' };
+    }
+    // One message for both failures, so this cannot be used to discover which
+    // of the two factors was wrong.
+    return { success: false, message: 'التوقيع أو كلمة المرور غير صحيحة' };
+  }
+
+  failedAttempts = 0;
+  purgeExpired();
+  const token = crypto.randomBytes(32).toString('hex');
+  tokens.set(token, { expiresAt: Date.now() + TOKEN_TTL_MS });
+  return { success: true, token };
+}
+
+/** Test seam: how many challenges are outstanding. */
+export function __challengeCountForTests(): number {
+  purgeChallenges();
+  return challenges.size;
+}

@@ -73,8 +73,15 @@ console.log('\n[2] Activation works with no internet at all');
   const activate = lic.split("ipcMain.handle('license:activate'")[1].split('ipcMain.handle(')[0];
   check('activation performs no network request',
     !/\bfetch\s*\(|https?:\/\//.test(activate));
+  // Matched the literal `verifyCode(VERIFIER_SECRET, ...)`. That constant was
+  // the shipped symmetric secret, and it is gone — the router now verifies
+  // with the embedded PUBLIC key and ignores anything a caller passes. The
+  // property worth asserting is that activation is decided LOCALLY by a
+  // signature, not the spelling of the call.
   check('the code is verified locally by signature',
-    activate.includes('verifyCode(VERIFIER_SECRET, deviceId, raw)'));
+    /verifyCode\(\s*['"]{2}\s*,\s*deviceId,\s*raw\s*\)/.test(activate));
+  check('and the verifier no longer takes a shipped secret',
+    !R('src/main/security/licenseCrypto.ts').includes('export const VERIFIER_SECRET'));
 }
 
 // ---------------------------------------------------------------- 3

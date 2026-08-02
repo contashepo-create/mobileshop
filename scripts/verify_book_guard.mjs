@@ -251,8 +251,15 @@ console.log('\n[4] The guard is actually installed in the real IPC path');
   check('ipcGuard imports the book guard', /from '\.\/bookGuard'/.test(g));
   check('guarded channels are routed through runGuarded',
     /runGuarded\(channel/.test(g));
-  check('unguarded channels still run untouched',
-    /if \(!isGuardedChannel\(channel\)\)[\s\S]{0,80}return listener/.test(g));
+  // Unguarded channels must NOT be routed through the book-invariant check —
+  // that is the property. They now pass through `runSafely`, which only turns
+  // a thrown handler into a structured failure, so the listener still runs
+  // without any book verification. The check matches that shape rather than
+  // the exact old spelling.
+  check('unguarded channels skip the book invariants',
+    /if \(!isGuardedChannel\(channel\)\)[\s\S]{0,120}return runSafely\(\(\) => listener/.test(g));
+  check('and only guarded ones reach runGuarded',
+    /return runSafely\(\(\) => runGuarded\(channel/.test(g));
   const bg = code('src/main/security/bookGuard.ts');
   check('the guard rolls back rather than reporting after the fact',
     /ROLLBACK TO/.test(g), 'detecting a fault without undoing it still corrupts the books');

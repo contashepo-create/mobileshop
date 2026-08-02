@@ -246,6 +246,175 @@ console.log('\n[6] Two audit claims that did NOT hold');
     /function Card\(\{ children, className = '' \}: \{ children: React\.ReactNode; className\?: string \}\)/.test(ns));
 }
 
+// ---------------------------------------------------------------- 7
+console.log('\n[7] The forgeable licence path is gone');
+{
+  const lc = raw('src/main/security/licenseCrypto.ts');
+  // HMAC verifies with the key it signs with, and that key shipped in every
+  // build. Demonstrated before removal: the constant alone minted a PERPETUAL
+  // licence for an arbitrary device.
+  t('the shipped symmetric secret is gone', !/export const VERIFIER_SECRET/.test(lc));
+  t('the legacy verifier is gone', !/export function verifyLegacyCode/.test(lc));
+  t('the router accepts only 69-byte Ed25519 codes',
+    /if \(!raw \|\| raw\.length < 69\) return null;/.test(lc));
+  t('the caller-supplied secret is explicitly ignored',
+    /export function verifyCode\(_secret: string/.test(lc));
+
+  const lh = raw('src/main/ipc/license.handlers.ts');
+  // A build that can MINT a licence contains the key that mints licences.
+  t('the app can no longer mint activation codes',
+    !/signCode\(/.test(lh) && /لا يمكن إصدار كود التفعيل من داخل البرنامج/.test(lh));
+  t('and it tells the developer the command to use instead',
+    /npm run license:new/.test(lh));
+}
+
+// ---------------------------------------------------------------- 8
+console.log('\n[8] The developer console no longer relies on a shipped secret');
+{
+  const da = raw('src/main/security/devAuth.ts');
+  t('a challenge can be issued', /export function createDevChallenge/.test(da));
+  t('a signed login exists', /export function devLoginSigned/.test(da));
+  // A challenge that survives a failed attempt is one an attacker can grind.
+  t('a challenge is single-use', /challenge\.used = true;[\s\S]{0,60}challenges\.delete/.test(da));
+  t('and time-limited', /CHALLENGE_TTL_MS = 5 \* 60 \* 1000/.test(da));
+  // Two factors: neither the stolen key nor the cracked password alone opens it.
+  t('the password is STILL required alongside the signature',
+    /if \(!sigOk \|\| !passOk\)/.test(da));
+  t('one message for both failures, so neither can be probed',
+    /التوقيع أو كلمة المرور غير صحيحة/.test(da));
+  // Domain separation: a licence signature must not work as a console login.
+  t('the signed message is domain-separated',
+    /mobileshop-dev-console:v1:/.test(da));
+
+  const sign = raw('scripts/dev-sign.js');
+  t('the signing tool signs the same message',
+    /mobileshop-dev-console:v1:/.test(sign));
+  t('and it runs on the developer machine, reading the private key there',
+    /MOBILESHOP_LICENSE_PRIVATE_KEY/.test(sign) && /\.license-key/.test(sign));
+
+  // Behavioural: sign a challenge and verify it, then prove a replay fails.
+  const crypto = await import('node:crypto');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const pubB64 = publicKey.export({ format: 'der', type: 'spki' }).subarray(12).toString('base64');
+  const privB64 = privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(16).toString('base64');
+  const nonce = crypto.randomBytes(24).toString('hex');
+  const msg = (n) => Buffer.from(`mobileshop-dev-console:v1:${n}`, 'utf8');
+  const der = Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(privB64, 'base64')]);
+  const sig = crypto.sign(null, msg(nonce), crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' }));
+  const vder = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(pubB64, 'base64')]);
+  const pub = crypto.createPublicKey({ key: vder, format: 'der', type: 'spki' });
+  t('a signed challenge verifies', crypto.verify(null, msg(nonce), pub, sig) === true);
+  t('the same signature does NOT verify for another nonce',
+    crypto.verify(null, msg(crypto.randomBytes(24).toString('hex')), pub, sig) === false);
+  t('an Ed25519 signature is 64 bytes', sig.length === 64);
+}
+
+// ---------------------------------------------------------------- 9
+console.log('\n[9] Sessions end, telemetry is silent, handlers cannot vanish');
+{
+  const ses = raw('src/main/security/session.ts');
+  // An idle timer that every IPC call refreshes never fires on a window left
+  // open. A ceiling that activity cannot extend is what actually ends it.
+  t('there is an absolute lifetime, not only an idle one',
+    /ABSOLUTE_TIMEOUT_MS/.test(ses));
+  t('it is checked before lastSeenAt is refreshed',
+    ses.indexOf('now - s.createdAt > ABSOLUTE_TIMEOUT_MS') < ses.indexOf('s.lastSeenAt = now;'));
+  t('the limits are exported so they can be asserted', /SESSION_LIMITS/.test(ses));
+
+  // Behavioural, against the REAL module. The structural checks above pass on
+  // a build where the absolute check is disabled — a mutant proved it — because
+  // nothing here constructed the session that only that check can catch: one
+  // created long ago whose LAST call was a moment ago. Background polling
+  // produces exactly that, and it is the case the idle timer can never see.
+  {
+    const S = await import('../src/main/security/session.ts');
+    const mk = (id) => S.createSession(id, {
+      userId: 1, username: 'admin', roleId: 1, employeeId: null,
+      permissions: new Set(['settings.view']),
+    });
+
+    mk(101);
+    t('a fresh session is valid', S.getSession(101) !== null);
+
+    // Age it past the ceiling while keeping it "active".
+    mk(102);
+    const aged = S.getSession(102);
+    aged.createdAt = Date.now() - (S.SESSION_LIMITS.absoluteMs + 60_000);
+    aged.lastSeenAt = Date.now() - 1_000;   // used one second ago
+    t('a session older than the ceiling is dropped even while ACTIVE',
+      S.getSession(102) === null);
+
+    // And the idle rule still works on its own.
+    mk(103);
+    const idle = S.getSession(103);
+    idle.lastSeenAt = Date.now() - (S.SESSION_LIMITS.idleMs + 60_000);
+    t('an idle session is dropped too', S.getSession(103) === null);
+
+    t('the ceiling is longer than the idle window',
+      S.SESSION_LIMITS.absoluteMs > S.SESSION_LIMITS.idleMs);
+  }
+
+  const hb = raw('src/main/remote/heartbeat.ts');
+  // `!== '0'` is also true when the row is ABSENT, so a database predating the
+  // setting transmitted by default.
+  t('telemetry requires an explicit opt-in',
+    /setting\('telemetry_enabled'\) === '1'/.test(hb));
+  t('the default stored value is off',
+    /\['telemetry_enabled', '0'\]/.test(raw('src/main/database/migrations/index.ts')));
+
+  const g = raw('src/main/security/ipcGuard.ts');
+  // ~30 handlers carry no try/catch; a throw crossed IPC as an unhandled
+  // rejection and the screen received no reply at all.
+  t('every handler is wrapped centrally', /const runSafely = async/.test(g));
+  // Both exits from the wrapper must go through it: the read-only path and
+  // the book-guarded one. Counting `runSafely(` also matched the definition,
+  // so the two CALL SITES are asserted by name instead.
+  t('the unguarded path uses it',
+    /return runSafely\(\(\) => listener\(event, \.\.\.args\)\);/.test(g));
+  t('the book-guarded path uses it too',
+    /return runSafely\(\(\) => runGuarded\(channel, \(\) => listener\(event, \.\.\.args\)\)\);/.test(g));
+  t('a thrown handler returns a structured failure', /code: 'HANDLER_ERROR'/.test(g));
+  t('and the reason is logged rather than swallowed',
+    /console\.error\(`\[IPC\] "\$\{channel\}" threw:/.test(g));
+}
+
+// ---------------------------------------------------------------- 10
+console.log('\n[10] A transfer deletion removes ONE fee voucher');
+{
+  const tr = raw('src/main/ipc/transfers.handlers.ts');
+  const del = raw('src/main/ipc/delete.handlers.ts');
+  t('the fee voucher records which transfer it belongs to',
+    /'transfer', \?\)/.test(tr) && /ReferenceType, ReferenceID/.test(tr));
+  t('the delete matches on that reference',
+    /ReferenceType = 'transfer' AND ReferenceID = \?/.test(del));
+  t('the legacy fallback can only take one row', /ORDER BY VoucherID LIMIT 1/.test(del));
+
+  // Behavioural: two transfers, same day, same fee — ordinary in a busy shop.
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE vouchers (VoucherID INTEGER PRIMARY KEY AUTOINCREMENT,
+    VoucherNumber TEXT, VoucherType TEXT, Date TEXT, Amount REAL, PartyType TEXT,
+    ReferenceType TEXT, ReferenceID INTEGER);`);
+  db.exec(`INSERT INTO vouchers (VoucherNumber,VoucherType,Date,Amount,PartyType,ReferenceType,ReferenceID)
+           VALUES ('TRC-20260802-001','payment','2026-08-02',25,'general','transfer',1),
+                  ('TRC-20260802-002','payment','2026-08-02',25,'general','transfer',2)`);
+  const removed = db.prepare(
+    "DELETE FROM vouchers WHERE ReferenceType = 'transfer' AND ReferenceID = ?").run(1);
+  t('deleting one transfer removes exactly one voucher', removed.changes === 1, String(removed.changes));
+  t("and the other transfer's fee survives",
+    db.prepare('SELECT COUNT(*) c FROM vouchers').get().c === 1);
+
+  // The old query, for contrast — this is what it did.
+  const db2 = new DatabaseSync(':memory:');
+  db2.exec(`CREATE TABLE vouchers (VoucherID INTEGER PRIMARY KEY AUTOINCREMENT,
+    VoucherNumber TEXT, VoucherType TEXT, Date TEXT, Amount REAL, PartyType TEXT);`);
+  db2.exec(`INSERT INTO vouchers (VoucherNumber,VoucherType,Date,Amount,PartyType)
+            VALUES ('TRC-20260802-001','payment','2026-08-02',25,'general'),
+                   ('TRC-20260802-002','payment','2026-08-02',25,'general')`);
+  const old = db2.prepare(`DELETE FROM vouchers WHERE VoucherType='payment' AND PartyType='general'
+    AND Date = ? AND Amount = ? AND VoucherNumber LIKE ?`).run('2026-08-02', 25, 'TRC-20260802%');
+  t('the old date+amount match really did delete both', old.changes === 2, String(old.changes));
+}
+
 console.log('\n' + '='.repeat(72));
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 console.log('='.repeat(72));

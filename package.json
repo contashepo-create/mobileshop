@@ -19,7 +19,8 @@
     "dev:password": "node scripts/dev-password.js",
     "rescue:keys": "node scripts/rescue-keys.js",
     "check:env": "node scripts/check-env.js",
-    "check:keypair": "node scripts/check-keypair.js"
+    "check:keypair": "node scripts/check-keypair.js",
+    "dev:sign": "node scripts/dev-sign.js"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.4.0",

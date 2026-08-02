@@ -72,7 +72,13 @@ console.log('\n[3] The heartbeat sends only non-business data');
   const banned = /\b(customers|suppliers|sales|invoices|purchases|balance|amount|profit|PasswordHash|items)\b/i;
   check('no business table is referenced in the payload', !banned.test(payload));
   check('shop name can be suppressed', beat.includes('telemetry_share_shop_name'));
-  check('telemetry is opt-out', beat.includes("setting('telemetry_enabled') !== '0'"));
+  // Was opt-OUT, tested as `!== '0'`. That expression is also true when the
+  // row is ABSENT, so a database created before the setting existed
+  // transmitted by default. Sending a shop's data anywhere should be a
+  // decision the owner makes, not one they have to discover and undo.
+  check('telemetry is opt-IN', beat.includes("setting('telemetry_enabled') === '1'"));
+  check('and the stored default is off',
+    R('src/main/database/migrations/index.ts').includes("['telemetry_enabled', '0']"));
 }
 
 // ---------------------------------------------------------------- 4

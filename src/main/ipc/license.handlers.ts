@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { verifyDevToken } from '../security/devAuth';
 import {
-  VERIFIER_SECRET, verifyCode, signCode, daysRemaining, expiryToDate, dateToExpiry,
+  verifyCode, daysRemaining, expiryToDate, dateToExpiry,
 } from '../security/licenseCrypto';
 import { isImplausiblyFuture, businessToday } from '../../shared/businessDate';
 import { readTrialAnchor, writeTrialAnchor, healTrialAnchor } from '../security/trialAnchor';
@@ -394,7 +394,9 @@ export function registerLicenseHandlers() {
       attempts = 0;
     }
 
-    const payload = verifyCode(VERIFIER_SECRET, deviceId, raw);
+    // The secret argument is vestigial: verification uses the embedded
+    // PUBLIC key only, and nothing a caller passes can change the outcome.
+    const payload = verifyCode('', deviceId, raw);
     if (!payload) {
       try { fs.writeFileSync(attemptsPath, String(attempts + 1), 'utf-8'); } catch { /* ignore */ }
       return { success: false, message: 'كود التفعيل غير صحيح أو غير مخصص لهذا الجهاز' };
@@ -455,13 +457,17 @@ export function registerLicenseHandlers() {
     };
   });
 
-  // Generate an activation code from inside the app (developer console).
+  // Activation codes can NO LONGER be minted from inside the app.
   //
-  // Codes are normally minted with `scripts/license-keygen.js` on the
-  // developer's own machine — that keeps the signing secret off customer
-  // installs. This handler exists for convenience when the developer is sitting
-  // at a customer's machine; it produces exactly the same code because both
-  // sides use the same HMAC construction.
+  // This used to work because both sides shared one HMAC secret, and that is
+  // exactly why the scheme was replaceable: a build that can MINT a licence
+  // contains the key that mints licences. Under Ed25519 the signing key is
+  // private and never ships, so an installed copy has nothing to sign with —
+  // and giving it one would recreate the original hole.
+  //
+  // Codes are issued with `npm run license:new` on the developer's own
+  // machine. The handler stays so the console can explain that clearly rather
+  // than appearing broken.
   ipcMain.handle('license:generateCode', async (_event, data: {
     days: number;              // 0 = perpetual
     customerDeviceId: string;  // required — the code is bound to it
@@ -479,21 +485,16 @@ export function registerLicenseHandlers() {
       return { success: false, message: 'عدد الأيام غير صالح' };
     }
 
-    const expiryDays = days === 0 ? 0 : dateToExpiry(new Date()) + Math.floor(days);
-    if (expiryDays > 0xffff) {
-      return { success: false, message: 'المدة طويلة جداً' };
-    }
-
-    // Serial counter kept locally so repeat issues for the same device differ.
-    const serialPath = path.join(app.getPath('userData'), 'issue_serial.dat');
-    let serial = 1;
-    try { serial = (parseInt(fs.readFileSync(serialPath, 'utf-8'), 10) || 0) + 1; } catch { serial = 1; }
-    try { fs.writeFileSync(serialPath, String(serial), 'utf-8'); } catch { /* ignore */ }
-
-    const code = signCode(VERIFIER_SECRET, target, { expiryDays, serial });
-    const label = expiryDays === 0 ? 'غير محدود' : expiryToDate(expiryDays).toISOString().slice(0, 10);
-
-    return { success: true, code, days, expiry: label, deviceId: target, serial };
+    // Refused, deliberately and always. The device id is echoed back so the
+    // developer can copy it straight into the keygen on their own machine.
+    return {
+      success: false,
+      deviceId: target,
+      message:
+        'لا يمكن إصدار كود التفعيل من داخل البرنامج. '
+        + 'مفتاح التوقيع الخاص لا يُشحن مع أي نسخة — وهذا ما يمنع تزوير التراخيص. '
+        + `أصدر الكود من جهازك بالأمر:  npm run license:new -- --device ${target} --days ${Math.floor(days)}`,
+    };
   });
 
   // Deactivate license (dev only - for transferring to new device)

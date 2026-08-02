@@ -156,7 +156,9 @@ export function registerOpeningBalanceHandlers() {
           problems.push(`${label}: قيمة غير صالحة`);
         } else if (!allowNegative) {
           const res = checkAmount(n, label);
-          if (!res.ok) problems.push(res.message);
+          // `message` is only present on a failure, so it is optional in the
+          // type. Fall back rather than push `undefined` into the list.
+          if (!res.ok) problems.push(res.message ?? `${label}: قيمة غير صالحة`);
         }
       }
     }

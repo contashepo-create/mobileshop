@@ -89,15 +89,23 @@ export function isDevelopmentLicenseKey(): boolean {
 }
 
 /**
- * LEGACY symmetric secret, kept ONLY to honour codes issued before the move to
- * Ed25519.
+ * REMOVED: the legacy symmetric secret and the HMAC verifier that used it.
  *
- * This value is public — it shipped in every build — so it proves nothing
- * about who issued a code. It is accepted solely so existing customers are not
- * locked out overnight. Delete it, and `verifyLegacyCode`, once every live
- * licence has been re-issued in the v2 format.
+ * HMAC is symmetric — the key that verifies is the key that signs — and that
+ * key shipped inside every build. Demonstrated before deleting it: the
+ * constant alone minted `0000-0001-54RJ-HRND`, a PERPETUAL licence for an
+ * arbitrary device id, and the router accepted it because a 10-byte code was
+ * routed to the weak path.
+ *
+ * It was retained only so existing customers were not locked out. There are
+ * none — the product has not shipped — so the compatibility that justified
+ * keeping a forgeable path no longer exists, and keeping it would mean
+ * releasing with a known master key.
+ *
+ * Only Ed25519 (v2) codes are accepted now. The private key never leaves the
+ * developer's machine; the build embeds the public key, which can verify and
+ * nothing else.
  */
-export const VERIFIER_SECRET = 'w/Y8yrd9F9WSt1OMZWdM9Hx88g0tj1c6XRQEQbt+DI0=';
 
 /** Crockford Base32 — no I, L, O, U so codes cannot be misread over the phone. */
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -210,8 +218,15 @@ export function signCodeV2(privateKeyB64: string, deviceId: string, p: LicensePa
   return text.match(/.{1,4}/g)!.join('-');
 }
 
-/** LEGACY signer, retained for the tests that prove old codes still verify. */
-export function signCode(secret: string, deviceId: string, p: LicensePayload): string {
+/**
+ * LEGACY signer, kept ONLY so a suite can mint an old-format code and prove
+ * the application now REFUSES it.
+ *
+ * It is exported for that reason alone. Nothing in the application calls it,
+ * and the router no longer has a path that would accept what it produces —
+ * `verifyCode` requires 69 bytes, and this emits 10.
+ */
+export function signLegacyCodeForTests(secret: string, deviceId: string, p: LicensePayload): string {
   const payload = payloadBuffer(p);
   const raw = Buffer.concat([payload, tag(secret, deviceId, payload)]);
   return encodeBase32(raw).match(/.{1,4}/g)!.join('-');
@@ -244,32 +259,27 @@ export function verifyCodeV2(publicKeyB64: string, deviceId: string, code: strin
   }
 }
 
-/** LEGACY verifier for the 10-byte HMAC codes issued before v2. */
-export function verifyLegacyCode(secret: string, deviceId: string, code: string): LicensePayload | null {
-  const raw = decodeBase32(code || '');
-  if (!raw || raw.length !== 10) return null;
-  const payload = raw.subarray(0, 5);
-  const provided = raw.subarray(5, 10);
-  const expected = tag(secret, deviceId, payload);
-  if (provided.length !== expected.length) return null;
-  // Constant-time compare so the tag cannot be recovered byte-by-byte.
-  if (!crypto.timingSafeEqual(provided, expected)) return null;
-  return readPayload(payload);
-}
-
 /**
- * Accepts either format, preferring the secure one.
+ * The ONLY accepted format: Ed25519 v2.
  *
- * Length decides which path runs: 69 bytes is v2, exactly 10 is legacy. A v2
- * code can therefore never be validated by the weak legacy path, and vice
- * versa, so adding backward compatibility does not weaken the new format.
+ * The `secret` parameter is retained so the many call sites did not all have
+ * to change, and is deliberately IGNORED. Nothing about a caller-supplied
+ * secret can make a code valid any more — verification depends solely on the
+ * embedded public key, so there is no value an attacker could supply here to
+ * influence the result.
+ *
+ * A short code is not "an old code" to be tried on a weaker path; it is simply
+ * not a licence.
  */
-export function verifyCode(secret: string, deviceId: string, code: string): LicensePayload | null {
+export function verifyCode(_secret: string, deviceId: string, code: string): LicensePayload | null {
   const raw = decodeBase32(code || '');
-  if (!raw) return null;
-  if (raw.length >= 69) return verifyCodeV2(LICENSE_PUBLIC_KEY, deviceId, code);
-  if (raw.length === 10) return verifyLegacyCode(secret, deviceId, code);
-  return null;
+  // Defence in depth, and deliberately redundant: a short code sliced for a
+  // signature yields fewer than 64 bytes, which `crypto.verify` rejects on its
+  // own. Mutation testing confirms removing this line changes no outcome. It
+  // stays because it states the rule — 69 bytes or it is not a licence —
+  // rather than leaving that to a downstream side effect.
+  if (!raw || raw.length < 69) return null;
+  return verifyCodeV2(LICENSE_PUBLIC_KEY, deviceId, code);
 }
 
 /** Converts a stored expiry (days since epoch) to a calendar date. */

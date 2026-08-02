@@ -315,10 +315,7 @@ export function Login() {
               <input
                 type="checkbox"
                 checked={saveUsername}
-                onChange={(e) => {
-                  setSaveUsername(e.target.checked);
-                  if (!e.target.checked) setSavePassword(false);
-                }}
+                onChange={(e) => setSaveUsername(e.target.checked)}
                 className="w-4 h-4 rounded text-primary-600 focus:ring-primary-500"
               />
               <span className="text-sm text-slate-600 dark:text-slate-300 flex items-center gap-1">

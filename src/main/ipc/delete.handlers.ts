@@ -647,13 +647,34 @@ export function registerDeleteHandlers() {
 
         // The transfer wrote a 'TRC-' expense voucher for its commission; remove
         // it too, otherwise the fee stays on the P&L after the transfer is gone.
+        //
+        // Matched by REFERENCE, not by date + amount + a name prefix. That
+        // combination is not an identity: two transfers on the same day with
+        // the same fee produce two indistinguishable vouchers, and the old
+        // query deleted BOTH. Measured — one transfer deleted, two fee
+        // vouchers gone, and the surviving transfer's cost silently removed
+        // from the books.
         if (transfer.TransferCost > 0) {
-          const trcNumber = `TRC-${String(transfer.Date || '').replace(/-/g, '')}`;
-          db.prepare(`
+          const byRef = db.prepare(`
             DELETE FROM vouchers
-            WHERE VoucherType = 'payment' AND PartyType = 'general'
-              AND Date = ? AND Amount = ? AND VoucherNumber LIKE ?
-          `).run(transfer.Date, transfer.TransferCost, `${trcNumber}%`);
+            WHERE ReferenceType = 'transfer' AND ReferenceID = ?
+          `).run(transferId);
+
+          // Rows written before the reference existed have none, so fall back
+          // to the old match — but LIMITED TO ONE, so a shared date and amount
+          // can no longer take a second voucher with it.
+          if (byRef.changes === 0) {
+            const trcNumber = `TRC-${String(transfer.Date || '').replace(/-/g, '')}`;
+            db.prepare(`
+              DELETE FROM vouchers WHERE VoucherID = (
+                SELECT VoucherID FROM vouchers
+                 WHERE VoucherType = 'payment' AND PartyType = 'general'
+                   AND Date = ? AND Amount = ? AND VoucherNumber LIKE ?
+                   AND ReferenceType IS NULL
+                 ORDER BY VoucherID LIMIT 1
+              )
+            `).run(transfer.Date, transfer.TransferCost, `${trcNumber}%`);
+          }
         }
 
         db.prepare('DELETE FROM asset_transfers WHERE TransferID = ?').run(transferId);

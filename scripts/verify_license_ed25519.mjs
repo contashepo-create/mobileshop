@@ -21,7 +21,7 @@
  *   [1] the shipped key can verify but CANNOT sign
  *   [2] a genuine code is accepted, and is bound to one device
  *   [3] tampering with the expiry or the payload breaks the signature
- *   [4] legacy HMAC codes still work, and cannot be used to bypass v2
+ *   [4] the forgeable HMAC path is GONE — old codes are refused outright
  *   [5] no private key is present anywhere in the shipped source
  *   [6] the generator and the worker agree with the app
  *
@@ -96,13 +96,14 @@ console.log('\n[1] The shipped key can verify but CANNOT sign');
     forged = L.signCodeV2(L.LICENSE_PUBLIC_KEY, DEV_A, { expiryDays: 0, serial: 999999 });
   } catch { /* expected: a public key cannot sign */ }
   t('signing with the shipped public key is impossible',
-    forged === null || L.verifyCode(L.VERIFIER_SECRET, DEV_A, forged) === null,
+    forged === null || L.verifyCode('', DEV_A, forged) === null,
     forged ? 'a code was produced AND accepted' : '');
 
-  // And the legacy secret must not open the v2 door either.
-  const viaLegacySecret = L.signCode(L.VERIFIER_SECRET, DEV_A, { expiryDays: 0, serial: 5 });
+  // And the retired secret must not open the v2 door either.
+  const viaLegacySecret = L.signLegacyCodeForTests(
+    'w/Y8yrd9F9WSt1OMZWdM9Hx88g0tj1c6XRQEQbt+DI0=', DEV_A, { expiryDays: 0, serial: 5 });
   const asV2 = L.verifyCodeV2(L.LICENSE_PUBLIC_KEY, DEV_A, viaLegacySecret);
-  t('the public legacy secret cannot produce a v2 code', asV2 === null);
+  t('the retired symmetric secret cannot produce a v2 code', asV2 === null);
 }
 
 // ---------------------------------------------------------------- 2
@@ -150,34 +151,52 @@ console.log('\n[3] Tampering breaks the signature');
 }
 
 // ---------------------------------------------------------------- 4
-console.log('\n[4] Legacy codes still work, and cannot bypass v2');
+console.log('\\n[4] The forgeable HMAC path is GONE');
 {
-  // Existing paying customers must not be locked out overnight.
-  const legacy = L.signCode(L.VERIFIER_SECRET, DEV_A, { expiryDays: 2000, serial: 11 });
-  const viaRouter = L.verifyCode(L.VERIFIER_SECRET, DEV_A, legacy);
-  t('an old HMAC code is still honoured',
-    viaRouter !== null && viaRouter.expiryDays === 2000, JSON.stringify(viaRouter));
-  t('an old code is still bound to its device',
-    L.verifyCode(L.VERIFIER_SECRET, DEV_B, legacy) === null);
+  // This section used to assert the OPPOSITE: that old HMAC codes were still
+  // honoured so existing customers were not locked out. There are no
+  // customers — the product has not shipped — so the compatibility that
+  // justified keeping a forgeable path no longer exists.
+  //
+  // The original attack, reproduced: the symmetric secret shipped in every
+  // build, and HMAC verifies with the same key it signs with. That constant
+  // alone minted a PERPETUAL licence for an arbitrary device id, and the
+  // router accepted it because a 10-byte code went down the weak path.
+  const RETIRED = 'w/Y8yrd9F9WSt1OMZWdM9Hx88g0tj1c6XRQEQbt+DI0=';
+  const forgedPerpetual = L.signLegacyCodeForTests(RETIRED, 'ANY-DEVICE-I-LIKE', { expiryDays: 0, serial: 1 });
+  t('the old attack still PRODUCES a code (the maths has not changed)',
+    typeof forgedPerpetual === 'string' && forgedPerpetual.length > 0, forgedPerpetual);
+  t('but the application now REFUSES it',
+    L.verifyCode('', 'ANY-DEVICE-I-LIKE', forgedPerpetual) === null);
 
-  // The router must choose by length so the weak path can never validate a v2
-  // code, and a legacy forgery cannot masquerade as v2.
+  const legacy = L.signLegacyCodeForTests(RETIRED, DEV_A, { expiryDays: 2000, serial: 11 });
+  t('a dated legacy code is refused too', L.verifyCode('', DEV_A, legacy) === null);
+  t('and refused on every device', L.verifyCode('', DEV_B, legacy) === null);
+
+  // The exports that made the weak path reachable are gone, not merely unused.
+  t('verifyLegacyCode is no longer exported', typeof L.verifyLegacyCode === 'undefined');
+  t('the shipped symmetric secret is no longer exported', typeof L.VERIFIER_SECRET === 'undefined');
+  t('the production HMAC signer is gone', typeof L.signCode === 'undefined');
+
   const v2 = L.signCodeV2(PRIV, DEV_A, { expiryDays: 0, serial: 2 });
-  t('a v2 code is never checked by the legacy path',
-    L.verifyLegacyCode(L.VERIFIER_SECRET, DEV_A, v2) === null);
+
+  // Nothing a caller passes can influence verification any more.
+  const good = L.signCodeV2(PRIV, DEV_A, { expiryDays: 2000, serial: 3 });
+  t('a caller-supplied secret changes nothing',
+    String(L.verifyCode('nonsense', DEV_A, good)) === String(L.verifyCode(RETIRED, DEV_A, good)));
 
   // `verifyCode` is the production router and ALWAYS verifies against the
   // key embedded in the app, never a caller-supplied one — that is precisely
   // the property that kills forgery. So it must reject this code, which was
   // signed with a throwaway key, and accept one signed by the real key only.
   t('the router refuses a v2 code signed by an unknown key',
-    L.verifyCode(L.VERIFIER_SECRET, DEV_A, v2) === null);
+    L.verifyCode('', DEV_A, v2) === null);
   t('the router routes by length, reaching the v2 path for a 69-byte code',
     L.decodeBase32(v2).length === 69);
 
   // A code of the wrong length is nobody's business.
   t('a truncated v2 code is rejected',
-    L.verifyCode(L.VERIFIER_SECRET, DEV_A, v2.slice(0, 40)) === null);
+    L.verifyCode('', DEV_A, v2.slice(0, 40)) === null);
 }
 
 // ---------------------------------------------------------------- 4b
@@ -196,45 +215,42 @@ console.log('\n[4b] The production router works for a REAL customer code');
   try {
     const real = L.signCodeV2(PRIV, DEV_A, { expiryDays: 2768, serial: 77 });
 
-    const activated = L.verifyCode(L.VERIFIER_SECRET, DEV_A, real);
+    const activated = L.verifyCode('', DEV_A, real);
     t('a genuine v2 code activates through the production router',
       activated !== null && activated.serial === 77, JSON.stringify(activated));
     t('and it is still refused on another device',
-      L.verifyCode(L.VERIFIER_SECRET, DEV_B, real) === null);
+      L.verifyCode('', DEV_B, real) === null);
 
     // The router must use the EMBEDDED key, never one handed in by the caller.
     // Passing the legacy secret as the "secret" argument must change nothing.
     t('the router ignores the caller-supplied secret for v2 codes',
       JSON.stringify(L.verifyCode('any-other-value', DEV_A, real)) === JSON.stringify(activated));
 
-    // A legacy code must still work alongside it.
-    const legacy10 = L.signCode(L.VERIFIER_SECRET, DEV_A, { expiryDays: 5, serial: 1 });
-    t('a legacy code still activates through the same router',
-      L.verifyCode(L.VERIFIER_SECRET, DEV_A, legacy10) !== null);
-    t('the legacy verifier takes exactly 10 bytes, never a v2 code',
-      L.decodeBase32(legacy10).length === 10
-      && L.verifyLegacyCode(L.VERIFIER_SECRET, DEV_A, real) === null
-      && L.decodeBase32(real).length === 69);
+    // A legacy code must NOT work alongside it any more.
+    const legacy10 = L.signLegacyCodeForTests('w/Y8yrd9F9WSt1OMZWdM9Hx88g0tj1c6XRQEQbt+DI0=', DEV_A, { expiryDays: 5, serial: 1 });
+    t('a legacy code is refused by the router',
+      L.verifyCode('', DEV_A, legacy10) === null);
+    t('it really is a 10-byte code, and a real one is 69',
+      L.decodeBase32(legacy10).length === 10 && L.decodeBase32(real).length === 69);
 
-    // Defence in depth. If the legacy verifier is ever loosened to accept
-    // "10 bytes or more", an attacker can take a genuine 10-byte HMAC code,
-    // pad it to 69 bytes with zeros, and have it routed down the weak path.
-    // The router's length check stops that today; this asserts the legacy
-    // verifier ALSO refuses it, so neither layer alone is load-bearing.
+    // The padding attack, retested against the new rule. Previously the
+    // concern was that a loosened legacy verifier might accept a 10-byte code
+    // padded out to 69 bytes. There is no legacy verifier now, so the padded
+    // code reaches the Ed25519 path — where it fails, because zeros are not a
+    // signature. Kept because it exercises the ONE surviving door with input
+    // shaped to look legitimate.
     const padded = L.encodeBase32(
       Buffer.concat([L.decodeBase32(legacy10), Buffer.alloc(59)]),
     ).match(/.{1,4}/g).join('-');
-    t('a legacy code padded to v2 length is refused by BOTH layers',
-      L.decodeBase32(padded).length === 69
-      && L.verifyLegacyCode(L.VERIFIER_SECRET, DEV_A, padded) === null
-      && L.verifyCode(L.VERIFIER_SECRET, DEV_A, padded) === null);
+    t('a legacy code padded to v2 length is still refused',
+      L.decodeBase32(padded).length === 69 && L.verifyCode('', DEV_A, padded) === null);
 
     // Tampering must still fail through the router, not just the direct call.
     const raw = L.decodeBase32(real);
     raw.writeUInt16BE(60000, 0);
     const extended = L.encodeBase32(raw).match(/.{1,4}/g).join('-');
     t('extending the expiry is refused by the router too',
-      L.verifyCode(L.VERIFIER_SECRET, DEV_A, extended) === null);
+      L.verifyCode('', DEV_A, extended) === null);
   } finally {
     L.__setPublicKeyForTests(original);
   }

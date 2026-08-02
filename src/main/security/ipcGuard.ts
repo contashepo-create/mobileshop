@@ -30,6 +30,13 @@ export interface CallerContext {
  * the developer console (which has its own password + token gate).
  */
 const PUBLIC_CHANNELS = new Set<string>([
+  // These two verify a username and password THEMSELVES, with a uniform
+  // failure message and a dummy compare, and exist precisely for the case
+  // where the shop cannot log in — a forgotten password, or a licence that
+  // has lapsed. Requiring a session would make them unreachable exactly when
+  // they are needed. They are login-equivalent, not unauthenticated.
+  'db:exportForOwner',
+  'users:listRecoverable',
   'auth:login',
   'auth:logout',
   'auth:session',
@@ -43,6 +50,11 @@ const PUBLIC_CHANNELS = new Set<string>([
   'settings:get',
   'dev:login',
   'dev:logout',
+  // Getting INTO the developer console cannot itself require being inside it.
+  // A challenge is a random nonce — not a secret — and the signed login is
+  // guarded by the signature and the password, not by the channel list.
+  'dev:challenge',
+  'dev:loginSigned',
   // Diagnosing a clock problem must work while the app is locked out — that is
   // precisely the state the owner needs explained. It only reports dates.
   'license:clockDiagnostics',
@@ -70,8 +82,6 @@ const PUBLIC_CHANNELS = new Set<string>([
   // Phone confirmation runs during first-run setup, before any user exists.
   // It only talks to the shop own bot and returns a yes or no.
   'phone:verify',
-  'db:exportForOwner',
-  'users:listRecoverable',
   'recovery:isAvailable',
   'recovery:requestCode',
   'recovery:resetPassword',
@@ -454,11 +464,37 @@ export function installIpcGuard() {
         }
       }
 
+      // Any handler that throws is turned into the structured failure the
+      // renderer already understands.
+      //
+      // Roughly thirty handlers — assets, hr, fiscalYear, notes among them —
+      // carry no try/catch of their own. An unexpected throw in one of those
+      // crossed the IPC boundary as an unhandled rejection: the screen got no
+      // reply at all, so a button appeared to do nothing and the failure was
+      // invisible. Catching HERE covers every channel at once, including any
+      // added later, which is the same reason the guard itself patches
+      // `ipcMain.handle` rather than editing every call site.
+      //
+      // Deliberately NOT swallowed: the reason is logged, and the caller is
+      // told the operation failed rather than being left to assume it worked.
+      const runSafely = async (run: () => any) => {
+        try {
+          return await run();
+        } catch (err: any) {
+          console.error(`[IPC] "${channel}" threw:`, err?.message || err);
+          return {
+            success: false,
+            code: 'HANDLER_ERROR',
+            message: 'تعذّر تنفيذ العملية - راجع سجل الأخطاء',
+          };
+        }
+      };
+
       // Read-only or non-financial channels run exactly as before.
       if (!isGuardedChannel(channel)) {
-        return listener(event, ...args);
+        return runSafely(() => listener(event, ...args));
       }
-      return runGuarded(channel, () => listener(event, ...args));
+      return runSafely(() => runGuarded(channel, () => listener(event, ...args)));
     });
   }) as typeof ipcMain.handle;
 }

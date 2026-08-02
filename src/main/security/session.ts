@@ -18,8 +18,24 @@ export interface Session {
   lastSeenAt: number;
 }
 
-/** Idle timeout: a session is dropped after this long without any IPC call. */
-const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12h — desktop POS shift length
+/**
+ * Idle timeout: a session is dropped after this long without any IPC call.
+ *
+ * Twelve hours matched a shift, but `getSession` refreshes `lastSeenAt` on
+ * EVERY call — so a screen that polls, or a window simply left open on the
+ * dashboard, renews the session indefinitely and it never expires at all.
+ */
+const IDLE_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * Absolute lifetime, which idle activity CANNOT extend.
+ *
+ * This is the part that was missing. Without it a till left logged in over a
+ * weekend is still logged in on Monday, under whoever walks up to it — the
+ * idle timer having been reset by background polling the whole time. A hard
+ * ceiling means every session ends, and the shop signs in again.
+ */
+const ABSOLUTE_TIMEOUT_MS = 16 * 60 * 60 * 1000;
 
 const sessions = new Map<number, Session>();
 
@@ -31,13 +47,25 @@ export function createSession(webContentsId: number, session: Omit<Session, 'cre
 export function getSession(webContentsId: number): Session | null {
   const s = sessions.get(webContentsId);
   if (!s) return null;
-  if (Date.now() - s.lastSeenAt > IDLE_TIMEOUT_MS) {
+  const now = Date.now();
+  if (now - s.lastSeenAt > IDLE_TIMEOUT_MS) {
     sessions.delete(webContentsId);
     return null;
   }
-  s.lastSeenAt = Date.now();
+  // Checked BEFORE the refresh below, so activity cannot push the ceiling out.
+  if (now - s.createdAt > ABSOLUTE_TIMEOUT_MS) {
+    sessions.delete(webContentsId);
+    return null;
+  }
+  s.lastSeenAt = now;
   return s;
 }
+
+/** Exposed so a suite can assert the two limits rather than restate them. */
+export const SESSION_LIMITS = {
+  idleMs: IDLE_TIMEOUT_MS,
+  absoluteMs: ABSOLUTE_TIMEOUT_MS,
+} as const;
 
 export function destroySession(webContentsId: number) {
   sessions.delete(webContentsId);

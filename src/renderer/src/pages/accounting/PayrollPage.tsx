@@ -113,7 +113,7 @@ export function PayrollPage() {
     if (!advanceForm.EmployeeID || !advanceForm.Amount || !advanceForm.CashAccountID) { showToast('error', 'أكمل البيانات'); return; }
     const activeFy = await window.api.invoke('fiscalYear:getActive');
     if (!activeFy) { showToast('error', 'لا توجد سنة مالية مفتوحة'); return; }
-    await window.api.invoke('advances:create', {
+    const reply = await window.api.invoke('advances:create', {
       EmployeeID: parseInt(advanceForm.EmployeeID),
       Amount: parseFloat(advanceForm.Amount),
       Reason: advanceForm.Reason,
@@ -121,6 +121,7 @@ export function PayrollPage() {
       userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', 'تم صرف السلفية');
     setShowAdvanceModal(false);
     setAdvanceForm({ EmployeeID: '', Amount: '', Reason: '', CashAccountID: '' });

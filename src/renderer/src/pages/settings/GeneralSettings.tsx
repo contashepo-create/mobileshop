@@ -3,6 +3,7 @@ import { Save, AlertTriangle } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 export function GeneralSettings() {
   const { showToast } = useToastStore();
@@ -35,7 +36,36 @@ export function GeneralSettings() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await window.api.invoke('settings:setMany', settings);
+      // Checked, not assumed. The catch below only fires on a THROW, and the
+      // IPC guard does not throw when it refuses a call — it returns
+      // `{ success: false, ... }`. Without this branch a refused save was
+      // reported to the shop as a successful one.
+      // Only the fields THIS TAB owns.
+      //
+      // It used to post back the entire object returned by `settings:getAll`,
+      // and that object is not just the shop's own rows: the handler layers
+      // the developer's REMOTE overrides on top before returning. Saving the
+      // whole thing therefore burned those overrides into the shop's settings
+      // table as permanent local rows, and rewrote dozens of keys this screen
+      // never edits — including print and per-document keys owned by another
+      // tab. Writing an explicit list makes the blast radius the form itself.
+      const OWNED = [
+        'company_name', 'owner_name', 'phone', 'email', 'address', 'tax_number',
+        'bank_name', 'bank_account', 'currency',
+        'vat_enabled', 'vat_rate',
+        'allow_negative_stock', 'allow_negative_cash',
+        'allow_negative_customer', 'allow_negative_supplier',
+        'customer_warn_threshold', 'customer_danger_threshold',
+      ];
+      const payload: Record<string, string> = {};
+      for (const key of OWNED) {
+        if (settings[key] !== undefined) payload[key] = settings[key];
+      }
+      const reply = await window.api.invoke('settings:setMany', payload);
+      if (isFailure(reply)) {
+        showToast('error', failureMessage(reply, 'فشل حفظ الإعدادات'));
+        return;
+      }
       showToast('success', 'تم حفظ الإعدادات بنجاح');
     } catch {
       showToast('error', 'فشل حفظ الإعدادات');

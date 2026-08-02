@@ -79,7 +79,8 @@ export function OpeningBalancePage() {
   };
 
   const handleSaveCapital = async () => {
-    await window.api.invoke('capital:set', parseFloat(capitalInput) || 0);
+    const reply = await window.api.invoke('capital:set', parseFloat(capitalInput) || 0);
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     setCapital(capitalInput);
     setShowCapitalModal(false);
     showToast('success', 'تم تحديث رأس المال');

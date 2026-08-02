@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 import { currentUserId } from '../../stores/auth.store';
 
 export function RentPage() {
@@ -38,7 +39,8 @@ export function RentPage() {
 
   const handleCreate = async () => {
     if (!form.RentName || !form.Amount) { showToast('error', 'أكمل البيانات'); return; }
-    await window.api.invoke('rents:create', { ...form, Amount: parseFloat(form.Amount) });
+    const reply = await window.api.invoke('rents:create', { ...form, Amount: parseFloat(form.Amount) });
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', 'تم إضافة الإيجار');
     setShowModal(false);
     setForm({ RentName: '', RentType: 'expense', Amount: '', Period: 'monthly', StartDate: new Date().toISOString().split('T')[0], PartyName: '', PartyPhone: '', Notes: '' });
@@ -48,7 +50,8 @@ export function RentPage() {
   const handleGenerate = async (rentId: number) => {
     const activeFy = await window.api.invoke('fiscalYear:getActive');
     if (!activeFy) { showToast('error', 'لا توجد سنة مالية مفتوحة'); return; }
-    await window.api.invoke('rents:generatePayments', rentId, 12, 1, activeFy.FiscalYearID);
+    const reply = await window.api.invoke('rents:generatePayments', rentId, 12, 1, activeFy.FiscalYearID);
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', 'تم توليد دفعات الإيجار');
     fetchData();
   };
@@ -57,12 +60,13 @@ export function RentPage() {
     if (!payCashAccount) { showToast('error', 'اختر الخزنة'); return; }
     const activeFy = await window.api.invoke('fiscalYear:getActive');
     if (!activeFy) { showToast('error', 'لا توجد سنة مالية مفتوحة'); return; }
-    await window.api.invoke('rentPayments:pay', {
+    const reply = await window.api.invoke('rentPayments:pay', {
       RentPaymentID: selectedPayment.RentPaymentID,
       CashAccountID: parseInt(payCashAccount),
       userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', 'تم دفع الإيجار');
     setShowPayModal(false);
     setSelectedPayment(null);

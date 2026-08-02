@@ -5,6 +5,7 @@ import { Button } from '../../components/ui/Button';
 import { Input, Textarea } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 type DevTab = 'about' | 'license' | 'codes';
 
@@ -75,7 +76,8 @@ export function DevConsolePage() {
   };
 
   const handleSave = async () => {
-    await window.api.invoke('settings:setMany', devInfo);
+    const reply = await window.api.invoke('settings:setMany', devInfo);
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', 'تم حفظ البيانات');
     setMode('view');
   };

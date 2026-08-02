@@ -213,7 +213,11 @@ export function Login() {
       targetUserId: parseInt(forgotTargetUser),
       newPassword: forgotNewPass,
     });
-    await window.api.invoke('dev:logout', { devToken: auth.token });
+    // Fire and forget on purpose: the reset above already succeeded or failed
+    // on its own terms, and its outcome is reported below. Whether the
+    // developer token was torn down cleanly is not something to interrupt the
+    // shop owner about.
+    void window.api.invoke('dev:logout', { devToken: auth.token });
     setForgotLoading(false);
     if (result.success) {
       showToast('success', result.message);

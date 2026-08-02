@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 export function PaymentMethodsPage() {
   const { showToast } = useToastStore();
@@ -36,10 +37,12 @@ export function PaymentMethodsPage() {
   const handleSave = async () => {
     if (!form.MethodName) { showToast('error', 'يرجى إدخال اسم طريقة الدفع'); return; }
     if (editing) {
-      await window.api.invoke('paymentMethods:update', editing.PaymentMethodID, form);
+      const reply = await window.api.invoke('paymentMethods:update', editing.PaymentMethodID, form);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم التحديث');
     } else {
-      await window.api.invoke('paymentMethods:create', form);
+      const reply = await window.api.invoke('paymentMethods:create', form);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم الإضافة');
     }
     setShowModal(false);

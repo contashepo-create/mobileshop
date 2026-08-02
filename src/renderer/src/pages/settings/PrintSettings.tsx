@@ -7,6 +7,7 @@ import {
 } from '../../../../shared/printProfile';
 import { Button } from '../../components/ui/Button';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 const templates = [
   { id: '1', name: 'القالب الكلاسيكي', colors: { primary: '#2563eb', bg: '#ffffff' } },
@@ -86,7 +87,14 @@ export function PrintSettings() {
   }, []);
 
   const handleSave = async () => {
-    await window.api.invoke('settings:setMany', {
+    // The reply is CHECKED. `settings:setMany` is permission-gated
+    // (`settings.edit`) and the IPC guard answers a refusal — an expired
+    // session, or a user without the permission — with
+    // `{ success: false, message, code }` rather than by throwing. Ignoring it
+    // and showing the success toast anyway is what made a failed logo save
+    // look like a successful one: the shop pressed حفظ, was told the settings
+    // were saved, and nothing had been written.
+    const reply = await window.api.invoke('settings:setMany', {
       default_invoice_template: selectedTemplate,
       invoice_show_customer: showCustomerInfo ? '1' : '0',
       invoice_show_shop: showShopInfo ? '1' : '0',
@@ -107,6 +115,22 @@ export function PrintSettings() {
       print_col_imei: cols.imei ? '1' : '0',
       ...perDocumentPayload(),
     });
+    if (isFailure(reply)) {
+      showToast('error', failureMessage(reply, 'تعذّر حفظ إعدادات الطباعة'));
+      return;
+    }
+
+    // Read the settings back and confirm the logo really landed.
+    //
+    // A logo is a large value — a 400 KB image becomes ~533 KB of base64 —
+    // and it is the one setting where "saved" and "stored" can diverge. Saying
+    // so immediately is far better than the shop discovering it on a printed
+    // invoice in front of a customer.
+    const after = await window.api.invoke('settings:getAll');
+    if (!isFailure(after) && (after?.logo_path || '') !== logoPath) {
+      showToast('error', 'لم يُحفظ الشعار - جرّب صورة أصغر حجماً');
+      return;
+    }
     showToast('success', 'تم حفظ إعدادات الطباعة');
   };
 
@@ -162,7 +186,11 @@ export function PrintSettings() {
   const clearOverrides = async () => {
     const cleared: Record<string, string> = {};
     for (const k of profileKeys(docType)) cleared[k] = '';
-    await window.api.invoke('settings:setMany', cleared);
+    const reply = await window.api.invoke('settings:setMany', cleared);
+    if (isFailure(reply)) {
+      showToast('error', failureMessage(reply, 'تعذّر إلغاء التخصيص'));
+      return;
+    }
     const settings = await window.api.invoke('settings:getAll');
     setRawSettings(settings);
     const resolved: Record<string, PrintProfile> = {};

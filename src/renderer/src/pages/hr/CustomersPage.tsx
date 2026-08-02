@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 import { getPartyColor } from '../../../../shared/types';
 
 export function CustomersPage() {
@@ -48,10 +49,12 @@ export function CustomersPage() {
     if (!form.Name) { showToast('error', 'يرجى إدخال اسم العميل'); return; }
     const data = { ...form, CreditLimit: form.CreditLimit ? parseFloat(form.CreditLimit) : null };
     if (editing) {
-      await window.api.invoke('customers:update', editing.CustomerID, data);
+      const reply = await window.api.invoke('customers:update', editing.CustomerID, data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم تحديث العميل');
     } else {
-      await window.api.invoke('customers:create', data);
+      const reply = await window.api.invoke('customers:create', data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم إضافة العميل');
     }
     setShowModal(false);
@@ -59,7 +62,8 @@ export function CustomersPage() {
   };
 
   const handleStatusChange = async (id: number, status: string) => {
-    await window.api.invoke('customers:updateStatus', id, status);
+    const reply = await window.api.invoke('customers:updateStatus', id, status);
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', status === 'suspended' ? 'تم حظر العميل' : 'تم تحديث حالة العميل');
     fetchData();
   };

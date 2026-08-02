@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 export function SuppliersPage() {
   const { showToast } = useToastStore();
@@ -39,10 +40,12 @@ export function SuppliersPage() {
     if (!form.Name) { showToast('error', 'يرجى إدخال اسم المورد'); return; }
     const data = { ...form, CreditLimit: form.CreditLimit ? parseFloat(form.CreditLimit) : null };
     if (editing) {
-      await window.api.invoke('suppliers:update', editing.SupplierID, data);
+      const reply = await window.api.invoke('suppliers:update', editing.SupplierID, data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم تحديث المورد');
     } else {
-      await window.api.invoke('suppliers:create', data);
+      const reply = await window.api.invoke('suppliers:create', data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم إضافة المورد');
     }
     setShowModal(false);
@@ -50,7 +53,8 @@ export function SuppliersPage() {
   };
 
   const handleStatusChange = async (id: number, status: string) => {
-    await window.api.invoke('suppliers:updateStatus', id, status);
+    const reply = await window.api.invoke('suppliers:updateStatus', id, status);
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', 'تم تحديث حالة المورد');
     fetchData();
   };

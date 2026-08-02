@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 import { UNIT_OPTIONS } from '../../../../shared/types';
 
 export function InventoryPage() {
@@ -82,11 +83,10 @@ export function InventoryPage() {
 
   const saveWh = async () => {
     if (!whForm.WarehouseName) { showToast('error', 'يرجى إدخال اسم المخزن'); return; }
-    if (editingWh) {
-      await window.api.invoke('warehouses:update', editingWh.WarehouseID, whForm);
-    } else {
-      await window.api.invoke('warehouses:create', whForm);
-    }
+    const reply = editingWh
+      ? await window.api.invoke('warehouses:update', editingWh.WarehouseID, whForm)
+      : await window.api.invoke('warehouses:create', whForm);
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     setShowWhModal(false);
     fetchData();
     showToast('success', 'تم الحفظ');
@@ -95,10 +95,12 @@ export function InventoryPage() {
   const saveCategory = async () => {
     if (!catForm.CategoryName.trim()) { showToast('error', 'أدخل اسم الفئة'); return; }
     if (editingCat) {
-      await window.api.invoke('categories:update', editingCat.CategoryID, catForm.CategoryName.trim());
+      const reply = await window.api.invoke('categories:update', editingCat.CategoryID, catForm.CategoryName.trim());
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم تحديث الفئة');
     } else {
-      await window.api.invoke('categories:create', catForm.CategoryName.trim());
+      const reply = await window.api.invoke('categories:create', catForm.CategoryName.trim());
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم إضافة الفئة');
     }
     setShowCatModal(false);

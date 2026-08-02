@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 type Tab = 'overview' | 'export' | 'backup' | 'network' | 'cloud';
 
@@ -121,7 +122,8 @@ export function DatabaseManagementPage() {
       cloud_url: cloudUrl,
       cloud_api_key: cloudApiKey,
     };
-    await window.api.invoke('db:saveCloudSettings', settings);
+    const reply = await window.api.invoke('db:saveCloudSettings', settings);
+    if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', 'تم حفظ إعدادات السحابة');
   };
 

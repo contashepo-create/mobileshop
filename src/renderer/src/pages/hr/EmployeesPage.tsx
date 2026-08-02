@@ -7,6 +7,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 export function EmployeesPage() {
   const navigate = useNavigate();
@@ -39,10 +40,12 @@ export function EmployeesPage() {
     if (!form.Name) { showToast('error', 'يرجى إدخال اسم الموظف'); return; }
     const data = { ...form, BaseSalary: parseFloat(form.BaseSalary) || 0, Allowances: parseFloat(form.Allowances) || 0 };
     if (editing) {
-      await window.api.invoke('employees:update', editing.EmployeeID, data);
+      const reply = await window.api.invoke('employees:update', editing.EmployeeID, data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم تحديث الموظف');
     } else {
-      await window.api.invoke('employees:create', data);
+      const reply = await window.api.invoke('employees:create', data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم إضافة الموظف');
     }
     setShowModal(false);

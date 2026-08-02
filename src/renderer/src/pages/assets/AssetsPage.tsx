@@ -47,10 +47,12 @@ export function AssetsPage() {
     if (!cashForm.AccountName) { showToast('error', 'يرجى إدخال اسم الحساب'); return; }
     const data = { ...cashForm, Balance: parseFloat(cashForm.Balance) || 0 };
     if (editing) {
-      await window.api.invoke('cashAccounts:update', editing.CashAccountID, data);
+      const reply = await window.api.invoke('cashAccounts:update', editing.CashAccountID, data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم تحديث الحساب');
     } else {
-      await window.api.invoke('cashAccounts:create', data);
+      const reply = await window.api.invoke('cashAccounts:create', data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم إضافة الحساب');
     }
     setShowModal(false);

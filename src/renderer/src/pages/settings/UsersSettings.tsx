@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
+import { isFailure, failureMessage } from '../../lib/ipc';
 
 interface UserRow {
   UserID: number;
@@ -103,7 +104,8 @@ export function UsersSettings() {
       roleId: parseInt(formRoleId),
     };
     if (editingUser) {
-      await window.api.invoke('users:update', editingUser.UserID, data);
+      const reply = await window.api.invoke('users:update', editingUser.UserID, data);
+      if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم تحديث المستخدم');
     } else {
       if (!formPassword) {
@@ -177,8 +179,10 @@ export function UsersSettings() {
       return;
     }
     if (editingRole) {
-      await window.api.invoke('roles:update', editingRole.RoleID, roleName.trim());
-      await window.api.invoke('permissions:setForRole', editingRole.RoleID, Array.from(rolePerms));
+      const rUpd = await window.api.invoke('roles:update', editingRole.RoleID, roleName.trim());
+      if (isFailure(rUpd)) { showToast('error', failureMessage(rUpd)); return; }
+      const rPerm = await window.api.invoke('permissions:setForRole', editingRole.RoleID, Array.from(rolePerms));
+      if (isFailure(rPerm)) { showToast('error', failureMessage(rPerm)); return; }
       showToast('success', 'تم تحديث المجموعة');
     } else {
       const result = await window.api.invoke('roles:create', roleName.trim());
@@ -186,7 +190,8 @@ export function UsersSettings() {
         showToast('error', result.message);
         return;
       }
-      await window.api.invoke('permissions:setForRole', result.id, Array.from(rolePerms));
+      const rPerm = await window.api.invoke('permissions:setForRole', result.id, Array.from(rolePerms));
+      if (isFailure(rPerm)) { showToast('error', failureMessage(rPerm)); return; }
       showToast('success', 'تم إنشاء المجموعة');
     }
     setShowRoleModal(false);

@@ -14,10 +14,20 @@ interface CartItem {
   ServiceCost?: number;
 }
 
-export function SalesPage() {
+/**
+ * `mode` lets the same screen serve two sidebar entries.
+ *
+ * Sales returns were a TAB inside this page, so "مرتجعات المبيعات" could not
+ * be a section of its own — the shop had to know it lived behind a tab on
+ * another screen. Passing the mode from the route makes it a real destination
+ * without duplicating the page: one implementation, two doors. The tab strip
+ * is hidden when a mode is fixed, because a tab that navigates away from the
+ * section you just opened is worse than no tab.
+ */
+export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
   const { showToast } = useToastStore();
   const [showSaleModal, setShowSaleModal] = useState(false);
-  const [tab, setTab] = useState<'sales' | 'returns'>('sales');
+  const [tab, setTab] = useState<'sales' | 'returns'>(mode ?? 'sales');
   const [returns, setReturns] = useState<any[]>([]);
   // Set while editing an existing invoice; null when creating a new one.
   const [editingSaleId, setEditingSaleId] = useState<number | null>(null);
@@ -493,11 +503,11 @@ export function SalesPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-slate-800 dark:text-white">المبيعات</h1>
+        <h1 className="text-2xl font-bold text-slate-800 dark:text-white">{mode === 'returns' ? 'مرتجعات المبيعات' : 'المبيعات'}</h1>
         <Button onClick={() => { resetForm(); setShowSaleModal(true); }} icon={<Plus size={16} />}>فاتورة جديدة</Button>
       </div>
 
-      <div className="flex gap-2 border-b border-slate-200 dark:border-slate-700">
+      <div className={`flex gap-2 border-b border-slate-200 dark:border-slate-700 ${mode ? 'hidden' : ''}`}>
         <button onClick={() => setTab('sales')}
           className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
             tab === 'sales' ? 'border-primary-600 text-primary-600'

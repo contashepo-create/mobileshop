@@ -37,10 +37,26 @@ interface SidebarState {
   getDisplayLabel: (key: string) => string;
 }
 
+/**
+ * The default sections.
+ *
+ * "الحسابات" used to hold eleven unrelated screens in one list — sales next to
+ * fiscal years next to stocktakes. That is a grouping by "these are all
+ * accounting", which is true and useless: nothing in it tells the shop where
+ * to look. These five follow how the work actually divides, so a section name
+ * answers "what am I doing" rather than "what is this software".
+ *
+ * They are DEFAULTS. Every one can be renamed, reordered, hidden or merged
+ * from the sidebar settings, and a shop that has already arranged its own
+ * layout keeps it — see `migrateAccountingSplit`.
+ */
 const defaultMainOrder = [
   'لوحة التحكم',
-  'الحسابات',
-  'المخازن والأصناف',
+  'المبيعات',
+  'المشتريات',
+  'السندات والرواتب والإيجارات',
+  'السنة المالية والأرصدة الافتتاحية',
+  'المخازن والتسوية الجردية',
   'الموارد البشرية',
   'الأصول',
   'التقارير',
@@ -49,22 +65,38 @@ const defaultMainOrder = [
 
 const standalonePaths: Record<string, string> = {
   'لوحة التحكم': '/',
-  'المخازن والأصناف': '/inventory',
 };
 
 const defaultChildrenOrder: Record<string, string[]> = {
-  'الحسابات': [
+  'المبيعات': [
     '/accounting/sales',
-    '/accounting/purchases',
+    '/accounting/services',
     '/accounting/maintenance',
-    '/accounting/vouchers',
+    // A separate destination, not a tab on the sales screen. Returns are their
+    // own task, often done by a different person, and hiding them behind a tab
+    // meant the shop had to know where they lived.
+    '/accounting/sale-returns',
+  ],
+  'المشتريات': [
+    '/accounting/purchases',
+    '/accounting/purchase-returns',
+  ],
+  'السندات والرواتب والإيجارات': [
+    // Receipts and payments are split: a shop thinks "money in" and "money
+    // out", and they are different daily tasks.
+    '/accounting/vouchers-receipt',
+    '/accounting/vouchers-payment',
     '/accounting/payroll',
     '/accounting/rents',
     '/accounting/rent-parties',
-    '/accounting/services',
+  ],
+  'السنة المالية والأرصدة الافتتاحية': [
     '/accounting/fiscal-year',
-    '/accounting/settlement',
     '/accounting/opening-balances',
+  ],
+  'المخازن والتسوية الجردية': [
+    '/inventory',
+    '/accounting/settlement',
   ],
   'الموارد البشرية': [
     '/hr/employees',
@@ -123,6 +155,49 @@ function migrateConfig(config: SidebarConfig): SidebarConfig {
   return { ...config, mainOrder: newMainOrder, childrenOrder: newChildrenOrder };
 }
 
+/**
+ * Upgrades a saved layout from the single "الحسابات" section to the five.
+ *
+ * A shop that has already arranged its sidebar has that arrangement in
+ * localStorage, and it names a section that no longer exists. Without this the
+ * saved config wins and the new structure is never seen — or worse, the new
+ * screens (returns, receipt/payment vouchers) appear nowhere at all, because
+ * nothing lists them.
+ *
+ * Runs ONCE, and only when the old section is present. Anything the shop moved
+ * elsewhere, renamed, or hid is left exactly as it is: this adds the new
+ * sections and the new destinations, it does not reset preferences.
+ */
+function migrateAccountingSplit(config: SidebarConfig): SidebarConfig {
+  if (!config.mainOrder.includes('الحسابات')) return config;
+
+  const newSections = [
+    'المبيعات',
+    'المشتريات',
+    'السندات والرواتب والإيجارات',
+    'السنة المالية والأرصدة الافتتاحية',
+    'المخازن والتسوية الجردية',
+  ];
+
+  // Put the five where the old one stood, so the sidebar does not reshuffle.
+  const at = config.mainOrder.indexOf('الحسابات');
+  const mainOrder = [...config.mainOrder];
+  mainOrder.splice(at, 1, ...newSections.filter((x) => !mainOrder.includes(x)));
+
+  // "المخازن والأصناف" was a standalone entry and is now a child of the
+  // stocktake section; leaving both would list the same screen twice.
+  const withoutInventory = mainOrder.filter((x) => x !== 'المخازن والأصناف');
+
+  const childrenOrder = { ...config.childrenOrder };
+  delete childrenOrder['الحسابات'];
+  for (const section of newSections) {
+    // Only seed a section the shop has not already built for itself.
+    if (!childrenOrder[section]) childrenOrder[section] = [...defaultChildrenOrder[section]];
+  }
+
+  return { ...config, mainOrder: withoutInventory, childrenOrder };
+}
+
 function loadConfig(): SidebarConfig {
   // First check if frozen defaults are set (for production builds)
   const frozen = getFrozenDefaults();
@@ -138,7 +213,7 @@ function loadConfig(): SidebarConfig {
         customSections: parsed.customSections || {},
         customLabels: parsed.customLabels || {},
       };
-      return migrateConfig(config);
+      return migrateAccountingSplit(migrateConfig(config));
     }
   } catch {}
   return {
@@ -348,6 +423,10 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
       '/accounting/payroll': 'رواتب وسلف',
       '/accounting/rents': 'إيجارات',
       '/accounting/rent-parties': 'المؤجرون والمستأجرون',
+      '/accounting/sale-returns': 'مرتجعات المبيعات',
+      '/accounting/purchase-returns': 'مرتجعات المشتريات',
+      '/accounting/vouchers-receipt': 'سندات القبض',
+      '/accounting/vouchers-payment': 'سندات الصرف',
       '/accounting/services': 'تحويل وشحن',
       '/accounting/fiscal-year': 'السنة المالية',
       '/accounting/settlement': 'التسوية الجردية',

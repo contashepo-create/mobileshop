@@ -125,6 +125,10 @@ export default function App() {
               <Route path="accounting/maintenance" element={<MaintenancePage />} />
               <Route path="accounting/vouchers" element={<VouchersPage />} />
               <Route path="accounting/payroll" element={<PayrollPage />} />
+              <Route path="accounting/sale-returns" element={<SalesPage mode="returns" />} />
+              <Route path="accounting/purchase-returns" element={<PurchasesPage mode="returns" />} />
+              <Route path="accounting/vouchers-receipt" element={<VouchersPage mode="receipt" />} />
+              <Route path="accounting/vouchers-payment" element={<VouchersPage mode="payment" />} />
               <Route path="accounting/rents" element={<RentPage />} />
               <Route path="accounting/rent-parties" element={<RentPartiesPage />} />
               <Route path="accounting/services" element={<ServicesPage />} />

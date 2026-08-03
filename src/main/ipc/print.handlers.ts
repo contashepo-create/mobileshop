@@ -362,8 +362,8 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       <title>${esc(titles[type] || 'فاتورة')}</title>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: ${fontFamily}; font-size: ${font}; color: #333; padding: ${bodyPad}; width: ${isThermal ? width : 'auto'}; max-width: ${isThermal ? width : '210mm'}; margin: 0 auto; }
-        @media print { body { width: auto; padding: 0; } @page { margin: ${pageMargin}; size: ${isThermal ? width + ' auto' : 'A4'}; } .no-print { display: none !important; } }
+        body { font-family: ${fontFamily}; font-size: ${font}; color: #333; padding: ${bodyPad}; width: ${isThermal ? width : 'auto'}; max-width: ${isThermal ? width : isA5 ? '148mm' : '210mm'}; margin: 0 auto; }
+        @media print { body { width: auto; padding: 0; } @page { margin: ${pageMargin}; size: ${isThermal ? width + ' auto' : isA5 ? 'A5' : 'A4'}; } .no-print { display: none !important; } }
         .invoice-header { text-align: center; margin-bottom: 8px; }
         .logo { max-height: ${logoMaxH}px; max-width: ${Math.round(logoMaxH * 3)}px; margin-bottom: 5px; }
         .printed-by { margin-top: 6px; padding-top: 4px; border-top: 1px dashed #bbb;
@@ -398,6 +398,10 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
         .voucher-box { margin: 15px 0; padding: 15px; border: 2px solid #333; border-radius: 5px; }
         .voucher-amount { font-size: 16px; margin-bottom: 8px; }
         .thank-you { text-align: center; margin-top: 10px; font-weight: bold; }
+        .sig-row { display: flex; justify-content: space-between; margin-top: 14mm; gap: 8mm; }
+        .sig-cell { flex: 1; text-align: center; }
+        .sig-line { border-top: 1px solid #64748b; margin-top: 12mm; padding-top: 2mm;
+                    font-size: 10px; color: #475569; }
         .footer { margin-top: 10px; text-align: center; font-size: 10px; color: #999; border-top: 1px dashed #ccc; padding-top: 5px; }
         .print-btn { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: ${primaryColor}; color: white; padding: 10px 30px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; font-family: inherit; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
         .print-btn:hover { opacity: 0.9; }
@@ -422,7 +426,27 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       ${partyInfo}
       ${itemsHTML}
       ${totalsHTML}
-      <div class="thank-you">${esc(companyInfo.invoice_thanks_note || 'شكراً لتعاملكم معنا')}</div>
+      ${/*
+         A closing courtesy belongs on a document handed to a customer. On a
+         purchase invoice the shop would be thanking itself for its own
+         purchase, and on a voucher or a statement it reads as filler on what
+         is meant to be evidence.
+      */ ''}
+      ${profile.showThanks
+        ? `<div class="thank-you">${esc(companyInfo.invoice_thanks_note || 'شكراً لتعاملكم معنا')}</div>`
+        : ''}
+      ${/*
+         Somewhere to sign. A voucher is a receipt for money and a statement is
+         a reconciliation — both are only worth anything once both sides have
+         signed. A till receipt needs none of this.
+      */ ''}
+      ${profile.showSignature ? `
+      <div class="sig-row">
+        <div class="sig-cell"><div class="sig-line">${esc(
+          type === 'purchase' ? 'المورد' : type === 'statement' ? 'الطرف الآخر' : 'المستلم',
+        )}</div></div>
+        <div class="sig-cell"><div class="sig-line">المحاسب</div></div>
+      </div>` : ''}
       ${companyInfo.invoice_terms ? `<div class="terms">${esc(companyInfo.invoice_terms)}</div>` : ''}
       ${profile.footerText ? `<div class="doc-footer-text">${esc(profile.footerText)}</div>` : ''}
       <div class="footer">

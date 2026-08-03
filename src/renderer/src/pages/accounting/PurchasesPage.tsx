@@ -10,7 +10,8 @@ import { currentUserId } from '../../stores/auth.store';
 
 interface PurchaseItem { ItemID: number; ItemName: string; IMEI?: string; Quantity: number; UnitCost: number; WarehouseID: number; }
 
-export function PurchasesPage() {
+/** See the note on SalesPage: one implementation, two sidebar destinations. */
+export function PurchasesPage({ mode }: { mode?: 'purchases' | 'returns' } = {}) {
   const { showToast } = useToastStore();
   const [purchases, setPurchases] = useState<any[]>([]);
   const [suppliers, setSuppliers] = useState<any[]>([]);
@@ -19,7 +20,7 @@ export function PurchasesPage() {
   const [cashAccounts, setCashAccounts] = useState<any[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
   const [showModal, setShowModal] = useState(false);
-  const [tab, setTab] = useState<'purchases' | 'returns'>('purchases');
+  const [tab, setTab] = useState<'purchases' | 'returns'>(mode ?? 'purchases');
   const [returns, setReturns] = useState<any[]>([]);
   // Purchase-return (debit note) workflow
   const [showReturnModal, setShowReturnModal] = useState(false);
@@ -211,11 +212,11 @@ export function PurchasesPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-slate-800 dark:text-white">المشتريات</h1>
+        <h1 className="text-2xl font-bold text-slate-800 dark:text-white">{mode === 'returns' ? 'مرتجعات المشتريات' : 'المشتريات'}</h1>
         <Button onClick={() => setShowModal(true)} icon={<Plus size={16} />}>فاتورة شراء</Button>
       </div>
 
-      <div className="flex gap-2 border-b border-slate-200 dark:border-slate-700">
+      <div className={`flex gap-2 border-b border-slate-200 dark:border-slate-700 ${mode ? 'hidden' : ''}`}>
         <button onClick={() => setTab('purchases')}
           className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
             tab === 'purchases' ? 'border-primary-600 text-primary-600'

@@ -10,10 +10,19 @@ import { isFailure, failureMessage } from '../../lib/ipc';
 import { AssetPicker, splitAssetValue, useAssets } from '../../components/shared/AssetPicker';
 import { currentUserId } from '../../stores/auth.store';
 
-export function VouchersPage() {
+/**
+ * `mode` splits receipts from payments into two sidebar entries.
+ *
+ * They were one screen with a filter, which reads as "vouchers" — but a shop
+ * thinks in terms of "money in" and "money out", and those are different
+ * daily tasks done by different people. The filter and the new-voucher form
+ * both follow the mode, so opening سندات الصرف and pressing "جديد" cannot
+ * accidentally create a receipt.
+ */
+export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
   const { showToast } = useToastStore();
   const [vouchers, setVouchers] = useState<any[]>([]);
-  const [typeFilter, setTypeFilter] = useState('all');
+  const [typeFilter, setTypeFilter] = useState(mode ?? 'all');
   const [showModal, setShowModal] = useState(false);
   const [cashAccounts, setCashAccounts] = useState<any[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
@@ -22,7 +31,7 @@ export function VouchersPage() {
   const [employees, setEmployees] = useState<any[]>([]);
 
   const [form, setForm] = useState({
-    VoucherType: 'receipt',
+    VoucherType: mode ?? 'receipt',
     Amount: '',
     PartyType: 'general',
     PartyID: '',
@@ -85,7 +94,7 @@ export function VouchersPage() {
     }
     showToast('success', `تم إنشاء السند - رقم: ${result.voucherNumber}`);
     setShowModal(false);
-    setForm({ VoucherType: 'receipt', Amount: '', PartyType: 'general', PartyID: '', PartyName: '', Description: '', AssetValue: '' });
+    setForm({ VoucherType: mode ?? 'receipt', Amount: '', PartyType: 'general', PartyID: '', PartyName: '', Description: '', AssetValue: '' });
     reloadAssets();
     fetchData();
   };
@@ -100,11 +109,11 @@ export function VouchersPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-slate-800 dark:text-white">السندات</h1>
-        <Button onClick={() => setShowModal(true)} icon={<Plus size={16} />}>سند جديد</Button>
+        <h1 className="text-2xl font-bold text-slate-800 dark:text-white">{mode === 'receipt' ? 'سندات القبض' : mode === 'payment' ? 'سندات الصرف' : 'السندات'}</h1>
+        <Button onClick={() => setShowModal(true)} icon={<Plus size={16} />}>{mode === 'payment' ? 'سند صرف جديد' : mode === 'receipt' ? 'سند قبض جديد' : 'سند جديد'}</Button>
       </div>
 
-      <div className="flex gap-2">
+      <div className={`flex gap-2 ${mode ? 'hidden' : ''}`}>
         <button onClick={() => setTypeFilter('all')} className={`px-4 py-2 rounded-lg text-sm font-medium ${typeFilter === 'all' ? 'bg-primary-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>الكل</button>
         <button onClick={() => setTypeFilter('receipt')} className={`px-4 py-2 rounded-lg text-sm font-medium ${typeFilter === 'receipt' ? 'bg-green-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>سندات قبض</button>
         <button onClick={() => setTypeFilter('payment')} className={`px-4 py-2 rounded-lg text-sm font-medium ${typeFilter === 'payment' ? 'bg-red-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>سندات صرف</button>
@@ -130,7 +139,11 @@ export function VouchersPage() {
         footer={<><Button variant="secondary" onClick={() => setShowModal(false)}>إلغاء</Button><Button onClick={handleSave}>حفظ</Button></>}
       >
         <div className="grid grid-cols-2 gap-4">
-          <Select label="نوع السند" value={form.VoucherType} onChange={(e) => setForm({ ...form, VoucherType: e.target.value })}>
+          {/* Fixed when the section is fixed. Opening سندات الصرف and being
+              able to switch the form to a receipt is how a payment ends up
+              filed as income. */}
+          <Select label="نوع السند" value={form.VoucherType} disabled={!!mode}
+            onChange={(e) => setForm({ ...form, VoucherType: e.target.value })}>
             <option value="receipt">سند قبض</option>
             <option value="payment">سند صرف</option>
           </Select>

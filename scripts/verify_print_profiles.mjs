@@ -280,6 +280,114 @@ console.log('\n[8] The settings screen and the printer share one implementation'
     /profileKeys\(docType\)/.test(ui) && !/\.\.\.rawSettings/.test(ui));
 }
 
+// ---------------------------------------------------------------- 9
+console.log('\n[9] Each document type has a PROFESSIONAL default');
+{
+  // Every type used to fall back to the same answer: 80mm thermal, a thanks
+  // note, and an items table with quantity and price. Right for a receipt
+  // handed to a customer; wrong for everything else.
+  const P2 = await import('../src/shared/printProfile.ts');
+
+  const sale = P2.resolveProfile({}, 'sale');
+  const purchase = P2.resolveProfile({}, 'purchase');
+  const receipt = P2.resolveProfile({}, 'voucher_receipt');
+  const statement = P2.resolveProfile({}, 'statement');
+
+  t('a sales receipt defaults to the thermal roll', sale.paper === '80mm', sale.paper);
+  t('a purchase invoice is an internal A4 record', purchase.paper === 'A4', purchase.paper);
+  t('a voucher is A5', receipt.paper === 'A5', receipt.paper);
+  t('a statement is A4', statement.paper === 'A4', statement.paper);
+
+  // Thanking yourself for your own purchase is nonsense; so is a courtesy
+  // line on a ledger.
+  t('only a customer document says thank you',
+    sale.showThanks === true && purchase.showThanks === false
+    && receipt.showThanks === false && statement.showThanks === false);
+  // A voucher and a statement are evidence, and evidence is signed.
+  t('evidence documents carry a signature line',
+    purchase.showSignature === true && receipt.showSignature === true
+    && statement.showSignature === true && sale.showSignature === false);
+
+  // A voucher has no line items at all — one amount, one party, one reason.
+  const vcols = P2.visibleColumns(receipt);
+  t('a voucher prints no quantity or price columns',
+    !vcols.includes('qty') && !vcols.includes('price'), vcols.join(','));
+  t('but it still names what the money was for', vcols.includes('name'));
+  t('a sale keeps its full item table',
+    P2.visibleColumns(sale).includes('qty') && P2.visibleColumns(sale).includes('price'));
+
+  // Two copies of a purchase: one filed, one signed by the supplier.
+  t('a purchase prints two copies', purchase.copies === 2, String(purchase.copies));
+  t('a sales receipt prints one', sale.copies === 1, String(sale.copies));
+  t('a voucher carries its own acknowledgement line',
+    /أقر باستلام/.test(receipt.footerText), receipt.footerText);
+
+  // THE PRECEDENCE CONTRACT. These are defaults, not rules.
+  t('a shop-wide paper choice still beats the type default',
+    P2.resolveProfile({ paper_size: 'A4' }, 'sale').paper === 'A4');
+  t('and a per-document setting beats everything',
+    P2.resolveProfile({ paper_size: 'A4', print_doc_purchase_paper: '80mm' }, 'purchase').paper === '80mm');
+  t('a column the shop hid globally stays hidden',
+    P2.resolveProfile({ print_col_qty: '0' }, 'sale').columns.qty === false);
+  t('and a column it explicitly SHOWS on a voucher is shown',
+    P2.resolveProfile({ print_doc_voucher_receipt_col_qty: '1' }, 'voucher_receipt').columns.qty === true);
+}
+
+// ---------------------------------------------------------------- 10
+console.log('\n[10] The rendered document matches the profile');
+{
+  // Structural agreement is not enough: the CSS has to carry it. A5 was
+  // resolvable as a paper size while `@page` was hardcoded to A4, so a voucher
+  // came out on the wrong sheet however it was configured.
+  const { build } = await import('esbuild');
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  const { createRequire } = await import('node:module');
+  const out = await build({
+    entryPoints: [join(ROOT, 'src/main/ipc/print.handlers.ts')],
+    bundle: true, platform: 'node', format: 'cjs', write: false,
+    external: ['electron'], logLevel: 'silent',
+  });
+  const dir = join(ROOT, 'node_modules', '.pdef-probe');
+  mkdirSync(join(dir, 'node_modules', 'electron'), { recursive: true });
+  writeFileSync(join(dir, 'node_modules', 'electron', 'package.json'),
+    '{"name":"electron","version":"0.0.0","main":"index.js"}');
+  writeFileSync(join(dir, 'node_modules', 'electron', 'index.js'),
+    'module.exports={ipcMain:{handle(){}},BrowserWindow:class{},app:{getPath:()=>"/tmp"},dialog:{}};');
+  const f = `pd${Date.now()}.cjs`;
+  writeFileSync(join(dir, f), out.outputFiles[0].text + '\nmodule.exports.__gen = generateInvoiceHTML;\n');
+  const gen = createRequire(join(dir, '/'))(join(dir, f)).__gen;
+
+  const doc = (type, companyInfo = {}) => gen({
+    type, companyInfo,
+    invoiceData: {
+      saleNumber: 'S1', purchaseNumber: 'P1', date: '2026-08-03',
+      items: [{ ItemName: 'شاشة', Quantity: 2, UnitPrice: 150 }],
+      subtotal: 300, totalAmount: 300, paidAmount: 300,
+      amount: 500, description: 'دفعة', partyName: 'محمد',
+      totalDebit: 100, totalCredit: 0, netBalance: 100,
+    },
+  }, false);
+  const sheet = (html) => (/@page \{[^}]*size: ([^;}]+)/.exec(html) || [])[1];
+
+  t('a sale really prints on the roll', sheet(doc('sale')) === '80mm auto', sheet(doc('sale')));
+  t('a purchase really prints on A4', sheet(doc('purchase')) === 'A4', sheet(doc('purchase')));
+  t('a voucher really prints on A5', sheet(doc('voucher_receipt')) === 'A5', sheet(doc('voucher_receipt')));
+  t('a statement really prints on A4', sheet(doc('statement')) === 'A4');
+
+  t('the thanks line appears only on the sale',
+    /class="thank-you"/.test(doc('sale')) && !/class="thank-you"/.test(doc('purchase')));
+  t('the signature line appears only where it belongs',
+    /class="sig-line"/.test(doc('purchase')) && !/class="sig-line"/.test(doc('sale')));
+  t('the purchase signature names the supplier', /المورد/.test(doc('purchase')));
+  t('a voucher prints no quantity column', !/<th>كمية<\/th>/.test(doc('voucher_receipt')));
+  t('a sale still prints one', /<th>كمية<\/th>/.test(doc('sale')));
+
+  // And the precedence survives all the way to the page.
+  t('a global A4 choice reaches the sheet', sheet(doc('sale', { paper_size: 'A4' })) === 'A4');
+  t('a per-document choice reaches it too',
+    sheet(doc('purchase', { print_doc_purchase_paper: '80mm' })) === '80mm auto');
+}
+
 console.log('\n' + '='.repeat(72));
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 console.log('='.repeat(72));

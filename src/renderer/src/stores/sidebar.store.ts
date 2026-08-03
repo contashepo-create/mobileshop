@@ -1,4 +1,13 @@
 import { create } from 'zustand';
+import {
+  NAV_TOP_ORDER,
+  DEFAULT_CHILDREN,
+  STANDALONE_PATHS,
+  LABEL_BY_PATH,
+  SECTION_BY_LABEL,
+  DESTINATION_BY_PATH as NAV_DESTINATIONS_BY_PATH,
+  reconcileLayout,
+} from '../lib/navCatalog';
 
 const STORAGE_KEY = 'sidebarConfig';
 
@@ -38,90 +47,23 @@ interface SidebarState {
 }
 
 /**
- * The default sections.
+ * The default layout.
  *
- * "الحسابات" used to hold eleven unrelated screens in one list — sales next to
- * fiscal years next to stocktakes. That is a grouping by "these are all
- * accounting", which is true and useless: nothing in it tells the shop where
- * to look. These five follow how the work actually divides, so a section name
- * answers "what am I doing" rather than "what is this software".
+ * These are DERIVED from `navCatalog.ts`, never restated. Restating them is
+ * exactly how the five accounting sections came to exist in this file while
+ * `Sidebar.tsx` had never heard of them and drew nothing for any of them.
  *
- * They are DEFAULTS. Every one can be renamed, reordered, hidden or merged
- * from the sidebar settings, and a shop that has already arranged its own
- * layout keeps it — see `migrateAccountingSplit`.
+ * They are defaults: every section can be renamed, reordered or merged from
+ * the sidebar settings, and a shop that has already arranged its own layout
+ * keeps it — see `reconcileLayout`.
  */
-const defaultMainOrder = [
-  'لوحة التحكم',
-  'المبيعات',
-  'المشتريات',
-  'السندات والرواتب والإيجارات',
-  'السنة المالية والأرصدة الافتتاحية',
-  'المخازن والتسوية الجردية',
-  'الموارد البشرية',
-  'الأصول',
-  'التقارير',
-  'الإعدادات',
-];
+const defaultMainOrder = [...NAV_TOP_ORDER];
 
-const standalonePaths: Record<string, string> = {
-  'لوحة التحكم': '/',
-};
+const standalonePaths: Record<string, string> = { ...STANDALONE_PATHS };
 
-const defaultChildrenOrder: Record<string, string[]> = {
-  'المبيعات': [
-    '/accounting/sales',
-    '/accounting/services',
-    '/accounting/maintenance',
-    // A separate destination, not a tab on the sales screen. Returns are their
-    // own task, often done by a different person, and hiding them behind a tab
-    // meant the shop had to know where they lived.
-    '/accounting/sale-returns',
-  ],
-  'المشتريات': [
-    '/accounting/purchases',
-    '/accounting/purchase-returns',
-  ],
-  'السندات والرواتب والإيجارات': [
-    // Receipts and payments are split: a shop thinks "money in" and "money
-    // out", and they are different daily tasks.
-    '/accounting/vouchers-receipt',
-    '/accounting/vouchers-payment',
-    '/accounting/payroll',
-    '/accounting/rents',
-    '/accounting/rent-parties',
-  ],
-  'السنة المالية والأرصدة الافتتاحية': [
-    '/accounting/fiscal-year',
-    '/accounting/opening-balances',
-  ],
-  'المخازن والتسوية الجردية': [
-    '/inventory',
-    '/accounting/settlement',
-  ],
-  'الموارد البشرية': [
-    '/hr/employees',
-    '/hr/customers',
-    '/hr/suppliers',
-  ],
-  'الأصول': [
-    '/assets',
-    '/assets/payment-methods',
-    '/assets/transfers',
-  ],
-  'التقارير': [
-    '/reports',
-    '/reports/customer-statement',
-    '/reports/supplier-statement',
-    '/reports/employee-statement',
-  ],
-  'الإعدادات': [
-    '/settings',
-    '/settings/database',
-    '/settings/license',
-    '/settings/backup',
-    '/about',
-  ],
-};
+const defaultChildrenOrder: Record<string, string[]> = Object.fromEntries(
+  Object.entries(DEFAULT_CHILDREN).map(([k, v]) => [k, [...v]]),
+);
 
 function getFrozenDefaults(): SidebarConfig | null {
   if (!FREEZE_DEFAULTS) return null;
@@ -158,16 +100,28 @@ function migrateConfig(config: SidebarConfig): SidebarConfig {
 /**
  * Upgrades a saved layout from the single "الحسابات" section to the five.
  *
- * A shop that has already arranged its sidebar has that arrangement in
- * localStorage, and it names a section that no longer exists. Without this the
- * saved config wins and the new structure is never seen — or worse, the new
- * screens (returns, receipt/payment vouchers) appear nowhere at all, because
- * nothing lists them.
+ * A shop that arranged its sidebar has that arrangement in localStorage, and
+ * it names a section that no longer exists. Without this the saved config wins
+ * and the new structure is never seen.
  *
- * Runs ONCE, and only when the old section is present. Anything the shop moved
- * elsewhere, renamed, or hid is left exactly as it is: this adds the new
- * sections and the new destinations, it does not reset preferences.
+ * This only handles the RENAME — the old section becoming five. Filling those
+ * sections is `reconcileLayout`'s job, so that a screen added tomorrow reaches
+ * the shop without another migration being written for it.
  */
+/**
+ * Where a retired screen goes when its old section disappears.
+ *
+ * These are not offered in the menu any more, but a shop can still be holding
+ * one in a saved layout. Losing it during the split would delete a row the
+ * shop can see — silently, which is the whole family of faults this file now
+ * exists to prevent.
+ */
+const RETIRED_SCREEN_HOMES: Record<string, string> = {
+  '/accounting/vouchers': 'السندات والرواتب والإيجارات',
+  '/inventory/warehouses': 'المخازن والتسوية الجردية',
+  '/inventory/items': 'المخازن والتسوية الجردية',
+};
+
 function migrateAccountingSplit(config: SidebarConfig): SidebarConfig {
   if (!config.mainOrder.includes('الحسابات')) return config;
 
@@ -189,10 +143,24 @@ function migrateAccountingSplit(config: SidebarConfig): SidebarConfig {
   const withoutInventory = mainOrder.filter((x) => x !== 'المخازن والأصناف');
 
   const childrenOrder = { ...config.childrenOrder };
+  // Everything the shop had filed under the old name keeps its place: each
+  // screen goes to the section that now owns it, in the order the shop had it.
+  const orphans = childrenOrder['الحسابات'] || [];
   delete childrenOrder['الحسابات'];
   for (const section of newSections) {
-    // Only seed a section the shop has not already built for itself.
-    if (!childrenOrder[section]) childrenOrder[section] = [...defaultChildrenOrder[section]];
+    if (!childrenOrder[section]) childrenOrder[section] = [];
+  }
+  for (const path of orphans) {
+    // A screen with a home goes to it. One without — the old combined سندات,
+    // which the split replaced — has nowhere to be filed, and dropping it here
+    // would erase a row the shop can see, along with any name it gave it. It
+    // goes to the section that took over its work, where it can be recognised
+    // and removed deliberately rather than vanishing.
+    const home = NAV_DESTINATIONS_BY_PATH[path]?.section
+      ?? RETIRED_SCREEN_HOMES[path];
+    if (home && childrenOrder[home] && !childrenOrder[home].includes(path)) {
+      childrenOrder[home].push(path);
+    }
   }
 
   return { ...config, mainOrder: withoutInventory, childrenOrder };
@@ -201,28 +169,87 @@ function migrateAccountingSplit(config: SidebarConfig): SidebarConfig {
 function loadConfig(): SidebarConfig {
   // First check if frozen defaults are set (for production builds)
   const frozen = getFrozenDefaults();
-  if (frozen) return frozen;
+  if (frozen) return reconcileLayout(frozen);
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
-      const config = {
-        mainOrder: parsed.mainOrder || [...defaultMainOrder],
-        childrenOrder: { ...defaultChildrenOrder, ...(parsed.childrenOrder || {}) },
+      const config: SidebarConfig = {
+        // A saved layout is authoritative about ORDER, never about
+        // COMPLETENESS. Spreading the defaults under it, as this used to do,
+        // looks like it fills the gaps but does not: a section present in the
+        // saved copy replaces the default list whole, so every screen added
+        // after the day the shop arranged its menu was silently dropped.
+        mainOrder: usableMainOrder(parsed.mainOrder, parsed.customSections),
+        childrenOrder: sanitiseChildren(parsed.childrenOrder),
         hidden: [], // hiding is no longer supported
         customSections: parsed.customSections || {},
         customLabels: parsed.customLabels || {},
       };
-      return migrateAccountingSplit(migrateConfig(config));
+      // Rename first, then put back anything that is missing. In that order a
+      // v1 layout gets the five sections AND everything that belongs in them.
+      return reconcileLayout(migrateAccountingSplit(migrateConfig(config)));
     }
   } catch {}
   return {
     mainOrder: [...defaultMainOrder],
-    childrenOrder: { ...defaultChildrenOrder },
+    childrenOrder: Object.fromEntries(
+      Object.entries(defaultChildrenOrder).map(([k, v]) => [k, [...v]]),
+    ),
     hidden: [],
     customSections: {},
     customLabels: {},
   };
+}
+
+/**
+ * Accepts a saved top-level order, and falls back when there is nothing to use.
+ *
+ * An empty or non-array `mainOrder` cannot be shown — it is a sidebar with no
+ * entries — so the defaults have to take over. But falling back to the bare
+ * defaults would throw away the sections the SHOP created, which are named
+ * nowhere else: their contents are in `childrenOrder` and their existence is
+ * in `customSections`, and with the order gone they would be unreachable with
+ * everything parked in them.
+ */
+function usableMainOrder(raw: unknown, customSections: unknown): string[] {
+  const list = Array.isArray(raw)
+    ? raw.filter((x: unknown): x is string => typeof x === 'string' && x.length > 0)
+    : [];
+  if (list.length > 0) return list;
+
+  const custom = customSections && typeof customSections === 'object'
+    ? Object.keys(customSections as Record<string, unknown>)
+    : [];
+  return [...defaultMainOrder, ...custom.filter((c) => !defaultMainOrder.includes(c))];
+}
+
+/**
+ * Accepts a saved childrenOrder only as far as it is actually usable.
+ *
+ * localStorage is editable by anyone at the keyboard and survives every
+ * upgrade, so it is the one input to this program that is guaranteed to be
+ * wrong eventually. A string where a list was expected used to reach the
+ * renderer and take the sidebar down with it.
+ */
+function sanitiseChildren(raw: unknown): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(value)) continue;
+    const seen = new Set<string>();
+    const list: string[] = [];
+    for (const item of value) {
+      // A path listed twice in one section draws twice; React then warns on
+      // the duplicate key and one of the two is unclickable.
+      if (typeof item === 'string' && item && !seen.has(item)) {
+        seen.add(item);
+        list.push(item);
+      }
+    }
+    out[key] = list;
+  }
+  return out;
 }
 
 function saveConfig(config: SidebarConfig) {
@@ -286,8 +313,18 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
     const newCustomSections = { ...cfg.customSections };
     delete newCustomSections[label];
     const newChildrenOrder = { ...cfg.childrenOrder };
+    // Deleting the folder must not delete the screens in it. This used to
+    // take them with it: park العملاء in a section, delete the section, and
+    // the customers screen was gone from the program until a factory reset.
+    // `reconcileLayout` sends each one back to the section that owns it.
     delete newChildrenOrder[label];
-    const result = { ...cfg, mainOrder: newMainOrder, hidden: [], customSections: newCustomSections, childrenOrder: newChildrenOrder };
+    const result = reconcileLayout({
+      ...cfg,
+      mainOrder: newMainOrder,
+      hidden: [],
+      customSections: newCustomSections,
+      childrenOrder: newChildrenOrder,
+    });
     saveConfig(result);
     set({ config: result });
   },
@@ -309,10 +346,18 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
 
   renameItem: (key: string, newLabel: string) => {
     const cfg = get().config;
-    // If key is a child path, store as custom label
-    const hasChild = defaultChildrenOrder && Object.values(defaultChildrenOrder).some((arr) => arr.includes(key));
+    // A path is renameable if it is a screen this program has; a section is
+    // renameable if it is one of ours. Asking the CATALOGUE rather than the
+    // saved layout means a screen the shop has moved elsewhere can still be
+    // renamed — the old test looked it up in the default section lists, so
+    // moving an item quietly took its rename button away.
+    // Any path the menu can NAME can be renamed — which includes the retired
+    // screens in NAV_ALIASES. A shop that still keeps the old combined سندات
+    // in a section could see it but not rename it, for no reason it could
+    // work out.
+    const isKnownPath = LABEL_BY_PATH[key] !== undefined;
     const isCustomSection = !!cfg.customSections[key];
-    const isDefaultSection = defaultMainOrder.includes(key) && !!defaultChildrenOrder[key];
+    const isDefaultSection = !!SECTION_BY_LABEL[key];
     const isStandalonePath = Object.values(standalonePaths).includes(key);
 
     if (isCustomSection) {
@@ -327,7 +372,7 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
       const result = { ...cfg, mainOrder: order, childrenOrder: children, customSections: sections, hidden, customLabels: labels };
       saveConfig(result);
       set({ config: result });
-    } else if (isDefaultSection || hasChild || isStandalonePath) {
+    } else if (isDefaultSection || isKnownPath || isStandalonePath) {
       const labels = { ...cfg.customLabels, [key]: newLabel };
       const result = { ...cfg, customLabels: labels };
       saveConfig(result);
@@ -398,13 +443,18 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
 
   resetConfig: () => {
     const frozen = getFrozenDefaults();
-    const newConfig = frozen || {
+    const newConfig = reconcileLayout(frozen || {
       mainOrder: [...defaultMainOrder],
-      childrenOrder: { ...defaultChildrenOrder },
+      // A shallow copy shares the ARRAYS with the module-level defaults, so the
+      // next reorder mutates the defaults themselves and "reset" stops
+      // returning to the factory layout.
+      childrenOrder: Object.fromEntries(
+        Object.entries(defaultChildrenOrder).map(([k, v]) => [k, [...v]]),
+      ),
       hidden: [],
       customSections: {},
       customLabels: {},
-    };
+    });
     saveConfig(newConfig);
     set({ config: newConfig });
   },
@@ -414,43 +464,9 @@ export const useSidebarStore = create<SidebarState>((set, get) => ({
   getDisplayLabel: (key: string) => {
     const cfg = get().config;
     if (cfg.customLabels[key]) return cfg.customLabels[key];
-    // Child paths -> look up default label
-    const childCatalog: Record<string, string> = {
-      '/accounting/sales': 'مبيعات',
-      '/accounting/purchases': 'مشتريات',
-      '/accounting/maintenance': 'صيانة',
-      '/accounting/vouchers': 'سندات',
-      '/accounting/payroll': 'رواتب وسلف',
-      '/accounting/rents': 'إيجارات',
-      '/accounting/rent-parties': 'المؤجرون والمستأجرون',
-      '/accounting/sale-returns': 'مرتجعات المبيعات',
-      '/accounting/purchase-returns': 'مرتجعات المشتريات',
-      '/accounting/vouchers-receipt': 'سندات القبض',
-      '/accounting/vouchers-payment': 'سندات الصرف',
-      '/accounting/services': 'تحويل وشحن',
-      '/accounting/fiscal-year': 'السنة المالية',
-      '/accounting/settlement': 'التسوية الجردية',
-      '/accounting/opening-balances': 'الأرصدة الافتتاحية',
-      '/hr/employees': 'الموظفين',
-      '/hr/customers': 'العملاء',
-      '/hr/suppliers': 'الموردين',
-      '/assets': 'البنوك والخزائن',
-      '/assets/payment-methods': 'ماكينات الدفع',
-      '/assets/transfers': 'تحويلات بين الحسابات',
-      '/reports': 'التقارير العامة',
-      '/reports/customer-statement': 'كشف حساب عميل',
-      '/reports/supplier-statement': 'كشف حساب مورد',
-      '/reports/employee-statement': 'كشف حساب موظف',
-      // Standalone paths (may appear as children when moved to a section)
-      '/': 'لوحة التحكم',
-      '/inventory': 'المخازن والأصناف',
-      '/settings': 'الإعدادات العامة',
-      '/settings/database': 'قاعدة البيانات',
-      '/settings/license': 'الترخيص والاشتراك',
-      '/settings/backup': 'النسخ الاحتياطي',
-      '/about': 'حول البرنامج',
-    };
-    if (childCatalog[key]) return childCatalog[key];
-    return key;
+    // A fourth restatement of the catalogue used to live here. It is now the
+    // one in navCatalog.ts, so a screen cannot be named in the menu and
+    // unnamed in the settings page.
+    return LABEL_BY_PATH[key] ?? key;
   },
 }));

@@ -1,36 +1,18 @@
 import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard,
-  Calculator,
-  Package,
-  Users,
-  Wallet,
-  FileText,
-  Settings,
   ChevronRight,
   ChevronLeft,
   ChevronDown,
-  ShoppingCart,
-  Wrench,
-  Receipt,
-  DollarSign,
-  UserCircle,
-  Truck,
-  Banknote,
-  CreditCard,
-  Calendar,
-  ClipboardCheck,
-  HardDrive,
-  Scale,
-  Database,
-  Info,
-  Smartphone,
-  ArrowRightLeft,
-  Shield,
   Folder,
+  CircleDot,
 } from 'lucide-react';
 import { useSidebarStore, type SidebarConfig } from '../../stores/sidebar.store';
+import {
+  DESTINATION_BY_PATH,
+  SECTION_BY_LABEL,
+  LABEL_BY_PATH,
+} from '../../lib/navCatalog';
 import type { LucideIcon } from 'lucide-react';
 
 interface MenuItem {
@@ -40,159 +22,93 @@ interface MenuItem {
   children?: { path: string; label: string; icon: LucideIcon }[];
 }
 
-const defaultItems: MenuItem[] = [
-  { path: '/', label: 'لوحة التحكم', icon: LayoutDashboard },
-  {
-    label: 'الحسابات',
-    icon: Calculator,
-    children: [
-      { path: '/accounting/sales', label: 'مبيعات', icon: ShoppingCart },
-      { path: '/accounting/purchases', label: 'مشتريات', icon: Truck },
-      { path: '/accounting/maintenance', label: 'صيانة', icon: Wrench },
-      { path: '/accounting/vouchers', label: 'سندات', icon: Receipt },
-      { path: '/accounting/payroll', label: 'رواتب وسلف', icon: DollarSign },
-      { path: '/accounting/rents', label: 'إيجارات', icon: Banknote },
-      { path: '/accounting/services', label: 'تحويل وشحن', icon: Smartphone },
-      { path: '/accounting/fiscal-year', label: 'السنة المالية', icon: Calendar },
-      { path: '/accounting/settlement', label: 'التسوية الجردية', icon: ClipboardCheck },
-      { path: '/accounting/opening-balances', label: 'الأرصدة الافتتاحية', icon: Scale },
-    ],
-  },
-  { path: '/inventory', label: 'المخازن والأصناف', icon: Package },
-  {
-    label: 'الموارد البشرية',
-    icon: Users,
-    children: [
-      { path: '/hr/employees', label: 'الموظفين', icon: UserCircle },
-      { path: '/hr/customers', label: 'العملاء', icon: Users },
-      { path: '/hr/suppliers', label: 'الموردين', icon: Truck },
-    ],
-  },
-  {
-    label: 'الأصول',
-    icon: Wallet,
-    children: [
-      { path: '/assets', label: 'البنوك والخزائن', icon: CreditCard },
-      { path: '/assets/payment-methods', label: 'ماكينات الدفع', icon: CreditCard },
-      { path: '/assets/transfers', label: 'تحويلات بين الحسابات', icon: ArrowRightLeft },
-    ],
-  },
-  {
-    label: 'التقارير',
-    icon: FileText,
-    children: [
-      { path: '/reports', label: 'التقارير العامة', icon: FileText },
-      { path: '/reports/customer-statement', label: 'كشف حساب عميل', icon: Users },
-      { path: '/reports/supplier-statement', label: 'كشف حساب مورد', icon: Truck },
-      { path: '/reports/employee-statement', label: 'كشف حساب موظف', icon: UserCircle },
-    ],
-  },
-  {
-    label: 'الإعدادات',
-    icon: Settings,
-    children: [
-      { path: '/settings', label: 'الإعدادات العامة', icon: Settings },
-      { path: '/settings/database', label: 'قاعدة البيانات', icon: Database },
-      { path: '/settings/license', label: 'الترخيص والاشتراك', icon: Shield },
-      { path: '/settings/backup', label: 'النسخ الاحتياطي', icon: HardDrive },
-      { path: '/about', label: 'حول البرنامج', icon: Info },
-    ],
-  },
-];
+/**
+ * Turns the saved layout into the menu that is drawn.
+ *
+ * THE BUG THIS REPLACES
+ * ---------------------
+ * This function used to consult a private `defaultItems` list that described
+ * one section called "الحسابات". When the store began defaulting to five
+ * sections instead, this list was not changed, so `itemMap.get(entry)` found
+ * nothing for any of the five, `if (!item) continue;` skipped them, and the
+ * sidebar drew four sections out of ten. Eleven screens left the program in
+ * one commit, with no error anywhere, because a `continue` on an unrecognised
+ * name is indistinguishable from ordinary defensive code.
+ *
+ * It now reads the same catalogue the store does, so "the store lists a
+ * section this cannot draw" is no longer a state that exists.
+ *
+ * Anything it still cannot place is reported instead of skipped — see the
+ * `unplaceable` return.
+ */
+export function buildOrderedMenu(config: SidebarConfig): {
+  menu: MenuItem[];
+  unplaceable: string[];
+} {
+  const menu: MenuItem[] = [];
+  const unplaceable: string[] = [];
+  const seen = new Set<string>();
 
-// Map of standalone labels to their path + icon
-const standaloneMeta: Record<string, { path: string; icon: LucideIcon; label: string }> = {
-  'لوحة التحكم': { path: '/', icon: LayoutDashboard, label: 'لوحة التحكم' },
-  'المخازن والأصناف': { path: '/inventory', icon: Package, label: 'المخازن والأصناف' },
-  'الإعدادات العامة': { path: '/settings', icon: Settings, label: 'الإعدادات العامة' },
-  'قاعدة البيانات': { path: '/settings/database', icon: Database, label: 'قاعدة البيانات' },
-  'الترخيص والاشتراك': { path: '/settings/license', icon: Shield, label: 'الترخيص والاشتراك' },
-  'النسخ الاحتياطي': { path: '/settings/backup', icon: HardDrive, label: 'النسخ الاحتياطي' },
-  'حول البرنامج': { path: '/about', icon: Info, label: 'حول البرنامج' },
-};
+  const childOf = (path: string) => {
+    const dest = DESTINATION_BY_PATH[path];
+    if (dest) return { path: dest.path, label: dest.label, icon: dest.icon };
+    // A route that is not offered in the menu can still be sitting in a saved
+    // layout — the shop may have put it there before it was retired. Draw it
+    // with the name it has rather than dropping it without a word.
+    const label = LABEL_BY_PATH[path];
+    if (label) return { path, label, icon: CircleDot };
+    return null;
+  };
 
-// Reverse map: path → standalone label
-const pathToStandalone: Record<string, string> = {};
-for (const [label, meta] of Object.entries(standaloneMeta)) {
-  pathToStandalone[meta.path] = label;
-}
-
-function buildOrderedMenu(config: SidebarConfig): MenuItem[] {
-  // Build catalog of ALL possible children
-  const allChildren = new Map<string, NonNullable<MenuItem['children']>[number]>();
-  for (const item of defaultItems) {
-    if (item.children) {
-      for (const c of item.children) allChildren.set(c.path, c);
-    }
-  }
-
-  const itemMap = new Map<string, MenuItem>();
-  for (const item of defaultItems) itemMap.set(item.label, item);
-
-  const ordered: MenuItem[] = [];
   for (const entry of config.mainOrder) {
-    // Check if entry is a promoted child path (starts with /)
-    const isPathEntry = entry.startsWith('/');
-    let item = isPathEntry ? null : itemMap.get(entry);
-    const isCustom = !item && !isPathEntry && config.customSections?.[entry];
+    if (seen.has(entry)) continue; // a name repeated in mainOrder draws twice
+    seen.add(entry);
 
-    if (!item && isCustom) {
-      item = { label: entry, icon: Folder, children: [] };
-    }
-
-    // If entry is a path (promoted child), find its default info
-    if (!item && isPathEntry) {
-      const childInfo = allChildren.get(entry);
-      if (childInfo) {
-        item = { path: childInfo.path, label: entry, icon: childInfo.icon };
-      } else {
-        // Could be a standalone path moved to main
-        const standLabel = pathToStandalone[entry];
-        if (standLabel) {
-          const meta = standaloneMeta[standLabel];
-          item = { path: meta.path, label: entry, icon: meta.icon };
-        }
-      }
-    }
-
-    if (!item) continue;
-
-    if (item.children !== undefined) {
-      const childOrder = config.childrenOrder[entry] || [];
+    // 1. A section: one of ours, or one the shop created.
+    const known = SECTION_BY_LABEL[entry];
+    const custom = config.customSections?.[entry];
+    if (known || custom) {
       const orderedChildren: NonNullable<MenuItem['children']> = [];
-
-      for (const childPath of childOrder) {
-        const child = allChildren.get(childPath);
+      const inSection = new Set<string>();
+      for (const childPath of config.childrenOrder[entry] || []) {
+        if (inSection.has(childPath)) continue;
+        const child = childOf(childPath);
         if (child) {
+          inSection.add(childPath);
           orderedChildren.push(child);
         } else {
-          // Check if childPath corresponds to a standalone item
-          const standLabel = pathToStandalone[childPath];
-          if (standLabel) {
-            const meta = standaloneMeta[standLabel];
-            orderedChildren.push({ path: meta.path, label: meta.label, icon: meta.icon });
-          }
+          unplaceable.push(childPath);
         }
       }
-
-      if (orderedChildren.length > 0 || !isCustom) {
-        ordered.push({ ...item, children: orderedChildren });
-      }
-    } else {
-      ordered.push(item);
+      menu.push({
+        label: entry,
+        icon: known ? known.icon : Folder,
+        children: orderedChildren,
+      });
+      continue;
     }
+
+    // 2. A destination promoted to the top level. It is stored as its path.
+    if (entry.startsWith('/')) {
+      const dest = childOf(entry);
+      if (dest) menu.push({ path: dest.path, label: entry, icon: dest.icon });
+      else unplaceable.push(entry);
+      continue;
+    }
+
+    // 3. A top-level link stored by its label, e.g. لوحة التحكم.
+    const byLabel = Object.values(DESTINATION_BY_PATH).find(
+      (d) => d.section === null && d.label === entry,
+    );
+    if (byLabel) {
+      menu.push({ path: byLabel.path, label: entry, icon: byLabel.icon });
+      continue;
+    }
+
+    unplaceable.push(entry);
   }
 
-  // Add default items that are in mainOrder but were missed (e.g. newly added by updates)
-  for (const item of defaultItems) {
-    if (
-      config.mainOrder.includes(item.label) &&
-      !ordered.some((o) => o.label === item.label)
-    ) {
-      ordered.push(item);
-    }
-  }
-  return ordered;
+  return { menu, unplaceable };
 }
 
 // One-time fix: clear all hidden items
@@ -233,7 +149,17 @@ export function Sidebar() {
     });
   };
 
-  const menuItems = buildOrderedMenu(config);
+  const { menu: menuItems, unplaceable } = buildOrderedMenu(config);
+
+  // A saved layout naming something this build does not have is not fatal, but
+  // it must not be silent either: silence is exactly how five sections went
+  // missing without anybody being told. It is reported in the console, and the
+  // shop is shown the way back in the menu itself.
+  useEffect(() => {
+    if (unplaceable.length > 0) {
+      console.warn('[الشريط الجانبي] عناصر محفوظة غير معروفة في هذه النسخة:', unplaceable);
+    }
+  }, [unplaceable.join('|')]);
 
   return (
     <aside
@@ -294,6 +220,13 @@ export function Sidebar() {
               </button>
               {!collapsed && expandedMenus.has(item.label) && (
                 <div className="mr-3 space-y-0.5 mt-0.5">
+                  {(item.children || []).length === 0 && (
+                    // An empty group opens onto nothing, which reads as a
+                    // broken program. Say what it is and where to fix it.
+                    <div className="mx-1 px-3 py-1.5 text-[10px] text-slate-500 italic">
+                      لا توجد عناصر — أضِفها من الإعدادات ← ترتيب القائمة
+                    </div>
+                  )}
                   {(item.children || []).map((child) => {
                     const ChildIcon = child.icon;
                     return (

@@ -2,58 +2,24 @@ import { useState } from 'react';
 import { RotateCcw, ChevronDown, ChevronLeft, Plus, Trash2, Folder, Edit3, ArrowUp, ArrowDown, MoveRight, Star, X, Check } from 'lucide-react';
 import { useSidebarStore } from '../../stores/sidebar.store';
 
-const defaultSections: { label: string; children: { path: string; label: string }[] }[] = [
-  {
-    label: 'الحسابات',
-    children: [
-      { path: '/accounting/sales', label: 'مبيعات' },
-      { path: '/accounting/purchases', label: 'مشتريات' },
-      { path: '/accounting/maintenance', label: 'صيانة' },
-      { path: '/accounting/vouchers', label: 'سندات' },
-      { path: '/accounting/payroll', label: 'رواتب وسلف' },
-      { path: '/accounting/rents', label: 'إيجارات' },
-      { path: '/accounting/services', label: 'تحويل وشحن' },
-      { path: '/accounting/fiscal-year', label: 'السنة المالية' },
-      { path: '/accounting/settlement', label: 'التسوية الجردية' },
-      { path: '/accounting/opening-balances', label: 'الأرصدة الافتتاحية' },
-    ],
-  },
-  {
-    label: 'الموارد البشرية',
-    children: [
-      { path: '/hr/employees', label: 'الموظفين' },
-      { path: '/hr/customers', label: 'العملاء' },
-      { path: '/hr/suppliers', label: 'الموردين' },
-    ],
-  },
-  {
-    label: 'الأصول',
-    children: [
-      { path: '/assets', label: 'البنوك والخزائن' },
-      { path: '/assets/payment-methods', label: 'ماكينات الدفع' },
-      { path: '/assets/transfers', label: 'تحويلات بين الحسابات' },
-    ],
-  },
-  {
-    label: 'التقارير',
-    children: [
-      { path: '/reports', label: 'التقارير العامة' },
-      { path: '/reports/customer-statement', label: 'كشف حساب عميل' },
-      { path: '/reports/supplier-statement', label: 'كشف حساب مورد' },
-      { path: '/reports/employee-statement', label: 'كشف حساب موظف' },
-    ],
-  },
-  {
-    label: 'الإعدادات',
-    children: [
-      { path: '/settings', label: 'الإعدادات العامة' },
-      { path: '/settings/database', label: 'قاعدة البيانات' },
-      { path: '/settings/license', label: 'الترخيص والاشتراك' },
-      { path: '/settings/backup', label: 'النسخ الاحتياطي' },
-      { path: '/about', label: 'حول البرنامج' },
-    ],
-  },
-];
+import { NAV_SECTIONS, DESTINATION_BY_PATH } from '../../lib/navCatalog';
+
+/**
+ * The sections offered here are the same ones the sidebar draws.
+ *
+ * This page used to keep its OWN copy of the list. That copy still described a
+ * single "الحسابات" long after the store had split it into five, so the five
+ * were unexpandable and unreorderable: the shop could see the section names
+ * but could not open them, could not move anything into or out of them, and
+ * had no way to tell that the reason was a stale list in this file.
+ */
+const defaultSections: { label: string; children: { path: string; label: string }[] }[] =
+  NAV_SECTIONS.map((section) => ({
+    label: section.label,
+    children: Object.values(DESTINATION_BY_PATH)
+      .filter((d) => d.section === section.label)
+      .map((d) => ({ path: d.path, label: d.label })),
+  }));
 
 export function SidebarSettings() {
   const { config, updateMainOrder, updateChildrenOrder, addCustomSection, removeCustomSection, moveChildToSection, renameItem, promoteChildToMain, demoteMainToChild, moveStandaloneToSection, resetConfig, getDisplayLabel } = useSidebarStore();

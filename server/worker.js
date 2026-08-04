@@ -208,6 +208,20 @@ async function ensureSchema(env) {
       birth_date    TEXT,
       registered_at TEXT
     )`),
+    // Published builds. `sha1` and `size` are what Squirrel checks the
+    // downloaded package against, so they are stored rather than recomputed:
+    // the Worker never sees the file, only R2 does.
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS releases (
+      platform     TEXT NOT NULL,
+      version      TEXT NOT NULL,
+      filename     TEXT NOT NULL,
+      sha1         TEXT NOT NULL,
+      size         INTEGER NOT NULL,
+      notes        TEXT,
+      published_at TEXT,
+      is_published INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (platform, version)
+    )`),
   ]);
 }
 
@@ -477,6 +491,219 @@ async function handleMessage(request, env) {
   `).bind(String(b.target || 'all'), String(b.title || ''), String(b.body || ''),
     String(b.severity || 'info'), new Date().toISOString(), b.expiresAt || null).run();
   return json({ ok: true, id: res.meta?.last_row_id });
+}
+
+// ---------------------------------------------------------------- updates
+//
+// PRIVATE AUTOMATIC UPDATES, ON THE SAME WORKER AS THE BOT.
+//
+// WHY NOT update.electronjs.org
+// -----------------------------
+// That free service requires a PUBLIC GitHub repository. This is a commercial
+// product: making the repository public would let anyone clone it, build it
+// and hand it out. So the update feed lives here instead, behind the same
+// X-Client-Key the heartbeat already uses.
+//
+// HOW SQUIRREL.WINDOWS ACTUALLY WORKS
+// -----------------------------------
+// `autoUpdater.setFeedURL({ url })` on Windows does NOT fetch `url`. Squirrel
+// appends `/RELEASES` and expects a plain-text NuGet manifest:
+//
+//     <SHA1>  <package-file-name>.nupkg  <size-in-bytes>
+//
+// It then downloads the .nupkg named there, RELATIVE to the same directory.
+// So two endpoints are needed, not one: the manifest, and the package itself.
+// A JSON "here is a URL" reply — the shape most people expect — is silently
+// ignored by Squirrel on Windows, and the update never happens.
+//
+// WHERE THE BINARY LIVES
+// ----------------------
+// The .nupkg is served from R2 (bucket binding `UPDATES`). R2 has no egress
+// fee, which matters because every customer downloads the whole package on
+// every release. If the bucket is not bound yet, the endpoints answer "no
+// update" rather than failing — an unconfigured server must never break a
+// shop that is trading.
+//
+// SUBSCRIPTION CONTROL
+// --------------------
+// A device whose licence has expired is told there is no update. It keeps
+// working exactly as before — nothing is taken away, it simply stops
+// receiving new versions. That is the commercial point of hosting this
+// ourselves rather than on a public GitHub release.
+
+/** The release currently being served, or null when none is published. */
+async function currentRelease(env, platform) {
+  const row = await env.DB.prepare(
+    `SELECT version, filename, sha1, size, notes, published_at
+       FROM releases WHERE platform = ? AND is_published = 1
+      ORDER BY published_at DESC LIMIT 1`,
+  ).bind(platform).first();
+  return row || null;
+}
+
+/**
+ * True when this device may receive new versions.
+ *
+ * An UNKNOWN device is allowed: a fresh install has not sent its first
+ * heartbeat yet, and refusing it would strand the very customers who most
+ * need the current build. Only an EXPLICITLY expired licence is refused.
+ */
+async function mayReceiveUpdates(env, deviceId) {
+  if (!deviceId) return true;
+  const row = await env.DB.prepare(
+    'SELECT license_status, license_expiry FROM devices WHERE device_id = ?',
+  ).bind(deviceId).first();
+  if (!row) return true;
+  if (row.license_expiry) {
+    // Dates are plain YYYY-MM-DD, so a string compare is a date compare.
+    if (row.license_expiry < daysToDate(todayDays())) return false;
+  }
+  return row.license_status !== 'expired' && row.license_status !== 'blocked';
+}
+
+/**
+ * "You are up to date."
+ *
+ * The body MUST be null, not '': the Fetch spec forbids a body on a 204 and
+ * both workerd and Node throw `Invalid response status code 204` if one is
+ * given. That throw was caught by the router's try/catch and returned to
+ * Squirrel as a 500, so every up-to-date client saw a server error instead of
+ * a quiet "nothing to do".
+ */
+const noUpdate = () => new Response(null, { status: 204 });
+
+/**
+ * `GET /update/win32-x64/<version>/RELEASES` — the manifest Squirrel reads.
+ *
+ * Answers 204 when there is nothing newer. Squirrel treats an empty body as
+ * "up to date", which is exactly the desired behaviour for a shop already on
+ * the current build.
+ */
+async function handleUpdateReleases(request, env, url) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return new Response('unauthorised', { status: 401 });
+  }
+  // /update/<platform>/<version>/RELEASES
+  const parts = url.pathname.split('/').filter(Boolean);
+  const platform = parts[1] || '';
+  const from = parts[2] || '0.0.0';
+  const deviceId = String(url.searchParams.get('device') || '').trim().toLowerCase();
+
+  if (!await mayReceiveUpdates(env, deviceId)) {
+    return noUpdate();
+  }
+
+  const rel = await currentRelease(env, platform);
+  // Nothing published, or the shop already has it. `compareVersions` is used
+  // rather than `!==` so a customer who somehow runs a NEWER build than the
+  // server is never dragged backwards.
+  if (!rel || compareVersions(rel.version, from) <= 0) {
+    return noUpdate();
+  }
+
+  // Exactly the NuGet manifest format: hash, filename, length.
+  const body = `${rel.sha1.toUpperCase()} ${rel.filename} ${rel.size}\n`;
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'no-cache' },
+  });
+}
+
+/** `GET /update/<platform>/<version>/<file>.nupkg` — the package itself. */
+async function handleUpdatePackage(request, env, url) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return new Response('unauthorised', { status: 401 });
+  }
+  if (!env.UPDATES) return new Response('no storage configured', { status: 503 });
+
+  const parts = url.pathname.split('/').filter(Boolean);
+  const platform = parts[1] || '';
+  const file = parts[parts.length - 1] || '';
+
+  // BOTH segments are attacker-controlled and BOTH are concatenated into the
+  // R2 key, so both must be validated.
+  //
+  // Checking only the filename is not enough, and this was measured: `URL`
+  // normalises `../` before the Worker ever sees the path, so
+  // `/update/win32-x64/1.0.0/../../SECRET/private.key.nupkg` arrives already
+  // collapsed to `/update/SECRET/private.key.nupkg`. The filename then looks
+  // perfectly ordinary — the traversal has moved into the PLATFORM segment —
+  // and the key becomes `SECRET/private.key.nupkg`, handing out any object in
+  // the bucket. An allow-list of known platforms closes it completely.
+  if (!/^(win32|darwin|linux)-(x64|arm64|ia32)$/.test(platform)) {
+    return new Response('bad platform', { status: 400 });
+  }
+  if (!/^[A-Za-z0-9._-]+\.nupkg$/.test(file) || file.includes('..')) {
+    return new Response('bad file', { status: 400 });
+  }
+
+  const obj = await env.UPDATES.get(`${platform}/${file}`);
+  if (!obj) return new Response('not found', { status: 404 });
+
+  return new Response(obj.body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(obj.size),
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    },
+  });
+}
+
+/** Compares two dotted versions. Returns >0 when a is newer than b. */
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/**
+ * `POST /release` — publish a build. Admin only.
+ *
+ * The developer's machine uploads the .nupkg to R2 and then calls this with
+ * its hash and size. Publishing is a separate, deliberate step so a
+ * half-uploaded package can never be advertised to customers.
+ */
+async function handleRelease(request, env) {
+  if (!safeEqual(request.headers.get('X-Admin-Key') || '', env.ADMIN_KEY || '')) {
+    return json({ ok: false, error: 'unauthorised' }, 401);
+  }
+  const b = await request.json().catch(() => null);
+  const version = String(b?.version || '').trim();
+  const filename = String(b?.filename || '').trim();
+  const sha1 = String(b?.sha1 || '').trim();
+  const size = Number(b?.size || 0);
+  const platform = String(b?.platform || 'win32-x64').trim();
+
+  if (!/^\d+\.\d+\.\d+/.test(version)) return json({ ok: false, error: 'bad version' }, 400);
+  if (!/^[A-Za-z0-9._-]+\.nupkg$/.test(filename)) return json({ ok: false, error: 'bad filename' }, 400);
+  if (!/^[A-Fa-f0-9]{40}$/.test(sha1)) return json({ ok: false, error: 'bad sha1' }, 400);
+  if (!Number.isFinite(size) || size <= 0) return json({ ok: false, error: 'bad size' }, 400);
+
+  await env.DB.prepare(`
+    INSERT INTO releases (platform, version, filename, sha1, size, notes, published_at, is_published)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(platform, version) DO UPDATE SET
+      filename = excluded.filename, sha1 = excluded.sha1, size = excluded.size,
+      notes = excluded.notes, published_at = excluded.published_at,
+      is_published = excluded.is_published
+  `).bind(platform, version, filename, sha1, size,
+    String(b?.notes || ''), new Date().toISOString(),
+    b?.publish === false ? 0 : 1).run();
+
+  // The About screen shows this, so the shop sees a new version exists even
+  // before Squirrel has finished downloading it.
+  await env.DB.prepare(`
+    INSERT INTO remote_config (key, target, value, updated_at) VALUES ('latest_version', 'all', ?, ?)
+    ON CONFLICT(key, target) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).bind(version, new Date().toISOString()).run();
+
+  await tg(env, `🚀 <b>إصدار جديد منشور</b>\nالإصدار: <b>${version}</b>\nالمنصة: ${platform}\nالحجم: ${(size / 1048576).toFixed(1)} MB`);
+  return json({ ok: true, version, platform });
 }
 
 // ---------------------------------------------------------------- telegram UI
@@ -993,10 +1220,22 @@ export default {
           case '/telegram':  return await handleTelegram(request, env);
           case '/database-reset': return await handleDatabaseReset(request, env);
           case '/registration':   return await handleRegistration(request, env);
+          case '/release':        return await handleRelease(request, env);
         }
       }
       if (request.method === 'GET' && url.pathname === '/devices') {
         return await handleDevices(request, env);
+      }
+      // Squirrel.Windows appends "/RELEASES" to the feed URL and then fetches
+      // the .nupkg named inside it, relative to the same directory. Both are
+      // plain GETs, so they are matched by shape rather than exact path.
+      if (request.method === 'GET' && url.pathname.startsWith('/update/')) {
+        if (url.pathname.endsWith('/RELEASES')) {
+          return await handleUpdateReleases(request, env, url);
+        }
+        if (url.pathname.endsWith('.nupkg')) {
+          return await handleUpdatePackage(request, env, url);
+        }
       }
       if (url.pathname === '/health') return json({ ok: true });
       return json({ ok: false, error: 'not found' }, 404);

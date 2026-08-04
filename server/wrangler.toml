@@ -14,6 +14,19 @@ binding = "DB"
 database_name = "mobileshop"
 database_id = "95a44a3e-923b-4df6-9bb7-645dd633946d"
 
+# Update packages (.nupkg) for the automatic updater.
+#
+# R2 rather than D1 because these are ~100 MB binaries, and R2 charges NOTHING
+# for egress — which matters when every customer downloads the whole package on
+# every release. Create it once with:
+#   npx wrangler r2 bucket create mobileshop-updates
+#
+# If this binding is absent the update endpoints answer "no update" instead of
+# failing, so the licensing API and the bot keep working either way.
+[[r2_buckets]]
+binding = "UPDATES"
+bucket_name = "mobileshop-updates"
+
 # Daily sweep at 09:00 UTC that warns about subscriptions expiring within a week.
 [triggers]
 crons = ["0 9 * * *"]

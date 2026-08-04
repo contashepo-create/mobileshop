@@ -38,15 +38,23 @@
  * licence system already follows this rule; so does this.
  */
 import { app, dialog, BrowserWindow } from 'electron';
+import { getDeviceId } from './security/deviceId';
 
 /**
  * Where releases are published.
  *
- * Change this if the repository moves. The updater reads
- * `https://update.electronjs.org/<owner>/<repo>/<platform>/<version>`, a free
- * service run by the Electron project that reads public GitHub Releases.
+ * NOT `update.electronjs.org`. That free service requires a PUBLIC GitHub
+ * repository, and this is a commercial product — a public repository is a
+ * repository anyone can clone, build and give away. The feed is therefore
+ * served by the same Cloudflare Worker that already runs the licensing API
+ * and the Telegram bot, behind the same client key.
+ *
+ * Both values come from the environment, exactly as the heartbeat's do, so a
+ * build with no configuration simply does not check for updates instead of
+ * pointing at somebody else's server.
  */
-const REPO = 'contashepo-create/mobileshop';
+const API_BASE = (process.env.MOBILESHOP_API_BASE || '').replace(/\/$/, '');
+const CLIENT_KEY = process.env.MOBILESHOP_CLIENT_KEY || '';
 
 /** Wait before the first check so start-up is never slowed by the network. */
 const FIRST_CHECK_DELAY_MS = 3 * 60 * 1000;
@@ -87,10 +95,33 @@ export function startUpdater(): void {
     return;
   }
 
-  const feed = `https://update.electronjs.org/${REPO}/win32-${process.arch}/${app.getVersion()}`;
+  // An unconfigured build must not check anywhere. Silent, because a shop
+  // running a build without cloud settings is a normal state, not a fault.
+  if (!API_BASE || !CLIENT_KEY) {
+    console.log('[Updater] no update server configured — automatic updates disabled');
+    return;
+  }
+
+  // The device id lets the server withhold new versions from a lapsed
+  // subscription. It is the same identifier the heartbeat already sends, and
+  // it is not a secret: it identifies the install, it does not authorise it.
+  let device = '';
+  try { device = getDeviceId(); } catch { /* not fatal — the server allows unknown devices */ }
+
+  // Squirrel appends "/RELEASES" to this and then fetches the .nupkg named
+  // there relative to the same directory, so the feed must be the DIRECTORY,
+  // never a file.
+  const feed = `${API_BASE}/update/win32-${process.arch}/${app.getVersion()}`
+    + (device ? `?device=${encodeURIComponent(device)}` : '');
 
   try {
-    autoUpdater.setFeedURL({ url: feed });
+    autoUpdater.setFeedURL({
+      url: feed,
+      // Sent on the /RELEASES request AND on the .nupkg download, which is
+      // why the package endpoint can require it too — otherwise the binary
+      // would be downloadable by anyone who guessed the filename.
+      headers: { 'X-Client-Key': CLIENT_KEY, 'Cache-Control': 'no-cache' },
+    });
   } catch (err) {
     console.log('[Updater] could not set feed:', (err as Error).message);
     return;

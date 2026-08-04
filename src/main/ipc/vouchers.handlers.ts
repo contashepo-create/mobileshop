@@ -62,6 +62,34 @@ export function registerVouchersHandlers() {
     if (!data.CashAccountID && !data.PaymentMethodID) {
       return { success: false, message: 'اختر الأصل الذي يخرج منه المبلغ أو يدخل إليه' };
     }
+    // A named party MUST exist.
+    //
+    // The ledger update below is a bare `UPDATE ... WHERE CustomerID = ?`.
+    // SQLite matches zero rows for an id that is not there and reports no
+    // error, so the voucher was written and the CASH moved while the debt it
+    // was supposed to settle was never touched.
+    //
+    // MEASURED: a receipt of 100 against customer 99999 raised net worth by
+    // 100 out of nothing — the shop's books gained money that no customer
+    // ever paid. A stale id is not exotic either: a second till deleting a
+    // customer while this one has the form open produces exactly this.
+    if (data.PartyID && data.PartyType) {
+      const table = data.PartyType === 'customer' ? 'customers'
+        : data.PartyType === 'supplier' ? 'suppliers'
+          : data.PartyType === 'employee' ? 'employees' : null;
+      if (table) {
+        const idCol = data.PartyType === 'customer' ? 'CustomerID'
+          : data.PartyType === 'supplier' ? 'SupplierID' : 'EmployeeID';
+        const exists = db.prepare(
+          `SELECT 1 AS ok FROM ${table} WHERE ${idCol} = ?`).get(data.PartyID) as any;
+        if (!exists) {
+          const label = data.PartyType === 'customer' ? 'العميل'
+            : data.PartyType === 'supplier' ? 'المورد' : 'الموظف';
+          return { success: false, message: `${label} غير موجود` };
+        }
+      }
+    }
+
     if (data.CashAccountID && data.PaymentMethodID) {
       return {
         success: false,

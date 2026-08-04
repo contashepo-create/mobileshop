@@ -191,9 +191,36 @@ export function registerMaintenanceHandlers() {
     const unitCost = (stockCost !== null && stockCost > 0)
       ? stockCost
       : (data.UnitCost ?? (db.prepare('SELECT CostPrice FROM items WHERE ItemID = ?').get(data.ItemID) as any)?.CostPrice ?? 0);
-    const salePrice = data.SalePrice ?? 0;
+    // What the CUSTOMER is charged for the part.
+    //
+    // This used to be `data.SalePrice ?? 0`, which stored a literal 0 whenever
+    // the screen did not send a price — and the screen usually does not,
+    // because the natural answer is "the item's normal selling price".
+    //
+    // A stored 0 then defeated the two places that try to recover from it:
+    //
+    //   1. `maintenance:deliver` computes the invoice total with
+    //      `COALESCE(mp.SalePrice, i.SalePrice, 0)`. COALESCE only skips NULL,
+    //      never 0, so the item's real price was never reached.
+    //   2. the invoice LINE fell back to `p.SalePrice || p.UnitCost`, which
+    //      does treat 0 as missing — and charged the customer the COST price.
+    //
+    // Two different fallbacks for the same missing value, disagreeing with
+    // each other. MEASURED on a two-part repair with a part costing 10 and
+    // selling at 20: the invoice header said 100 while its own lines added up
+    // to 120, and the shop billed 10 for a part it sells for 20 — its entire
+    // parts margin, on every repair, silently.
+    //
+    // Resolved at the source: fall back to the item's selling price here, so
+    // both readers see one figure. NULL is stored only when the item genuinely
+    // has no price, which is the case COALESCE was written for.
+    const itemSalePrice = (db.prepare('SELECT SalePrice FROM items WHERE ItemID = ?')
+      .get(data.ItemID) as any)?.SalePrice ?? null;
+    const salePrice = (data.SalePrice !== undefined && data.SalePrice !== null)
+      ? data.SalePrice
+      : itemSalePrice;
     const totalCost = unitCost * data.Quantity;
-    const totalSale = salePrice * data.Quantity;
+    const totalSale = (salePrice ?? 0) * data.Quantity;
 
     // Check sufficient stock (unless negative stock allowed)
     const allowNegStock = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_stock'").get() as any;
@@ -523,9 +550,16 @@ export function registerMaintenanceHandlers() {
       // from `maintenance_parts` by cancel/return. They intentionally carry a
       // NULL WarehouseID so the generic sale-reversal logic skips them and does
       // not credit the same parts to stock a second time.
-      const parts = db.prepare('SELECT mp.*, i.ItemName FROM maintenance_parts mp JOIN items i ON mp.ItemID = i.ItemID WHERE mp.TicketID = ?').all(data.TicketID) as any[];
+      const parts = db.prepare(`SELECT mp.*, i.ItemName, i.SalePrice AS ItemSalePrice
+        FROM maintenance_parts mp JOIN items i ON mp.ItemID = i.ItemID
+        WHERE mp.TicketID = ?`).all(data.TicketID) as any[];
       for (const p of parts) {
-        const unitPrice = isWarranty ? 0 : (p.SalePrice || p.UnitCost);
+        // The SAME fallback the invoice total uses — `COALESCE(mp.SalePrice,
+        // i.SalePrice, 0)` — so the header and its lines cannot disagree.
+        // `||` was used here and COALESCE there, which differ on 0, and that
+        // difference charged the customer cost price on every repair.
+        const grossUnit = p.SalePrice ?? p.ItemSalePrice ?? 0;
+        const unitPrice = isWarranty ? 0 : grossUnit;
         db.prepare(`
           INSERT INTO sale_details (SaleID, ItemID, Quantity, UnitPrice, UnitCost, Total, Description)
           VALUES (?, ?, ?, ?, ?, ?, ?)

@@ -230,8 +230,28 @@ export async function loadHandlers() {
 export async function call(channel, ...args) {
   const fn = handlers.get(channel);
   if (!fn) throw new Error(`channel not registered: ${channel}`);
-  // The real guard replaces any caller-supplied userId with the session's.
-  const stamped = args.map(a =>
-    a && typeof a === 'object' && !Array.isArray(a) ? { ...a, userId: session.userId } : a);
+  // Identity stamping, as the real guard does it.
+  //
+  // `installIpcGuard` OVERWRITES `userId` when the payload already carries one
+  // and adds nothing when it does not. But in the running app the renderer
+  // always sends `userId` for the channels that need it, so a handler that
+  // binds the payload straight to a named-parameter statement never sees a
+  // surprise key.
+  //
+  // The harness must reproduce BOTH halves of that:
+  //   - supply `userId` so handlers that need it work, exactly as the screens
+  //     supply it;
+  //   - never invent a key on a payload that is bound wholesale, or
+  //     better-sqlite3 rejects it with "Unknown named parameter 'userId'"
+  //     (which is what `customers:create` and `suppliers:create` do).
+  //
+  // A key is therefore added only when the handler is one that reads it.
+  const NEEDS_USER_ID = /^(sales|purchases|saleReturns|purchaseReturns|vouchers|advances|deductions|salaries|maintenance|transfers|settlements|serviceSales|delete|rents|rentPayments|warehouseTransfers|stock|serials|openingBalances):/;
+  const wantsUser = NEEDS_USER_ID.test(channel);
+  const stamped = args.map((a) => {
+    if (!a || typeof a !== 'object' || Array.isArray(a)) return a;
+    if ('userId' in a) return { ...a, userId: session.userId };
+    return wantsUser ? { ...a, userId: session.userId } : a;
+  });
   return fn({ sender: { id: 1 } }, ...stamped);
 }

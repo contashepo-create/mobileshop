@@ -40,8 +40,44 @@ export function identity(db, opening) {
   const payable = g('SELECT COALESCE(SUM(Balance),0) v FROM suppliers WHERE Balance > 0');
   const supplierCredit = g('SELECT COALESCE(SUM(-Balance),0) v FROM suppliers WHERE Balance < 0');
 
-  const assets = cash + wallets + stockValue + receivable + supplierCredit;
-  const liabilities = payable + customerCredit;
+  // Cash advanced to staff and not yet recovered from a salary.
+  //
+  // This is an ASSET — the money has left the drawer but the employee owes it
+  // back — and it was missing here, so `advances:create` looked like it
+  // destroyed value: cash fell by 500 and nothing rose to match it.
+  //
+  // The application was right and this check was wrong. `reports:
+  // financialPosition` has always counted it (`employeeAdvances`), and total
+  // assets are correctly unchanged by an advance; only this independent model
+  // was short an asset class, which would have hidden a genuine breach in
+  // payroll behind a permanent false alarm.
+  //
+  // It is NOT read from `employees.Balance`: that column carries the salary
+  // ACCRUAL (what the shop owes the employee), which is the opposite
+  // direction. The two must not be netted here or both would be wrong.
+  const staffAdvances = g(
+    'SELECT COALESCE(SUM(Amount),0) v FROM employee_advances WHERE IsDeducted = 0');
+
+  // What the shop owes staff for salaries already issued but not yet paid.
+  const staffOwed = g('SELECT COALESCE(SUM(Balance),0) v FROM employees WHERE Balance > 0');
+  const staffOverpaid = g('SELECT COALESCE(SUM(-Balance),0) v FROM employees WHERE Balance < 0');
+
+  // WORK IN PROGRESS: parts already taken out of the warehouse for a repair
+  // that has NOT been delivered yet.
+  //
+  // The stock is gone but nothing has been sold, so without this the value
+  // simply disappears between issuing the part and handing the device back —
+  // which can be days. It is still the shop's property, just sitting inside a
+  // customer's phone on the bench.
+  const workInProgress = g(`SELECT COALESCE(SUM(mp.TotalCost),0) v
+                            FROM maintenance_parts mp
+                            WHERE NOT EXISTS (
+                              SELECT 1 FROM maintenance_deliveries md
+                              WHERE md.TicketID = mp.TicketID AND md.VoidedSaleID IS NULL)`);
+
+  const assets = cash + wallets + stockValue + receivable + supplierCredit
+    + staffAdvances + staffOverpaid + workInProgress;
+  const liabilities = payable + customerCredit + staffOwed;
   const netWorth = assets - liabilities;
 
   // Profit realised so far: revenue less cost of what was sold, net of returns,
@@ -105,8 +141,48 @@ export function identity(db, opening) {
                         FROM sale_returns r
                         WHERE COALESCE(r.TransferCostBearer,'shop') = 'shop'`);
 
+  // Wages are an EXPENSE, recognised when the salary is issued rather than
+  // when it is paid — which is also when the handler books the liability on
+  // `employees.Balance`. Recognising it at payment instead would make the
+  // books drift for the whole period between issuing and paying.
+  //
+  // Booked GROSS: the advance a salary absorbs was already money out of the
+  // drawer and is carried as `staffAdvances` above, so netting it off here as
+  // well would count the same money twice.
+  const wages = g(`SELECT COALESCE(SUM(COALESCE(NetSalary,0) + COALESCE(AdvancesTotal,0)),0) v
+                   FROM salaries`);
+
+  // Money taken back off an employee for damage or a shortfall. It reduces the
+  // wage bill, so it is a credit against the expense, not income.
+  const staffDeductions = g(
+    'SELECT COALESCE(SUM(Amount),0) v FROM employee_deductions WHERE IsDeducted = 1');
+
+  // Repairs.
+  //
+  // A delivered repair becomes a `Source='maintenance'` sale, which the
+  // revenue and COGS queries above deliberately EXCLUDE — the money is
+  // recorded on `maintenance_deliveries` instead, and counting the sale row
+  // as well would double it. But excluding both sides while the spare part
+  // has genuinely left the warehouse made every repair look like destroyed
+  // value: measured at -20 on a two-part job.
+  //
+  // So the same two lines the application's own P&L uses are added here:
+  // the charge to the customer, and the cost of the parts consumed.
+  const repairRevenue = g(`SELECT COALESCE(SUM(TotalCost),0) v
+                           FROM maintenance_deliveries WHERE VoidedSaleID IS NULL`);
+  const repairRefunds = g('SELECT COALESCE(SUM(TotalRefund),0) v FROM maintenance_returns');
+  // Parts consumed by a DELIVERED repair. A part issued to a ticket that is
+  // still open has not been sold yet — it is work in progress, and it is
+  // counted as an asset below rather than as a cost here.
+  const repairPartsCost = g(`SELECT COALESCE(SUM(mp.TotalCost),0) v
+                             FROM maintenance_parts mp
+                             JOIN maintenance_deliveries md ON md.TicketID = mp.TicketID
+                             WHERE md.VoidedSaleID IS NULL`);
+
   const profit = (revenue - salesReturned) - (cogs - cogsReturned)
-    - absorbedFees - freightLost - refundFees - valuationAdjustments;
+    + (repairRevenue - repairRefunds) - repairPartsCost
+    - absorbedFees - freightLost - refundFees - valuationAdjustments
+    - wages + staffDeductions;
   const expected = opening + profit;
 
   return near(netWorth, expected)
@@ -116,7 +192,8 @@ export function identity(db, opening) {
       + `  opening ${r2(opening)} + profit ${r2(profit)} = ${r2(expected)}\n`
       + `  drift ${r2(netWorth - expected)}\n`
       + `  [cash ${r2(cash)} wallets ${r2(wallets)} stock ${r2(stockValue)} `
-      + `recv ${r2(receivable)} pay ${r2(payable)} credit ${r2(customerCredit)}]`;
+      + `recv ${r2(receivable)} pay ${r2(payable)} credit ${r2(customerCredit)} `
+      + `staffAdv ${r2(staffAdvances)} staffOwed ${r2(staffOwed)} wip ${r2(workInProgress)}]`;
 }
 
 /** An invoice header must equal the sum of its own lines. */

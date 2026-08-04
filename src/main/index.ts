@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { getDb, closeDb } from './database/connection';
@@ -99,6 +99,80 @@ const createWindow = () => {
 
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.error('[Renderer Crashed]', details.reason);
+  });
+
+  /**
+   * Nothing may navigate this window away from the application.
+   *
+   * Without this, anything that can set `location.href` — a cross-site
+   * scripting bug, a pasted value that reaches an anchor, a compromised
+   * dependency — replaces the whole app with a remote page that is still
+   * inside Electron and still has `window.api` in front of it. The attacker
+   * then calls every IPC channel the logged-in user is allowed to call.
+   *
+   * The renderer only ever loads its own bundle, so ANY navigation to a
+   * different document is illegitimate and is refused.
+   */
+  const isInternal = (target: string): boolean => {
+    if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+      // Dev server: same origin only. Vite's HMR reloads must keep working.
+      try {
+        return new URL(target).origin === new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin;
+      } catch { return false; }
+    }
+    // Packaged: the app is loaded from disk.
+    return target.startsWith('file://');
+  };
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!isInternal(url)) {
+      console.error('[Security] blocked navigation to', url);
+      event.preventDefault();
+    }
+  });
+
+  /**
+   * Popups.
+   *
+   * The print screens legitimately call `window.open('', '_blank')` and write
+   * the receipt into the blank document, so popups cannot simply be denied —
+   * that would silently stop every invoice from printing. A blank popup owns
+   * no remote content and is allowed; anything with a real URL is not.
+   */
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url === 'about:blank' || url === '') return { action: 'allow' };
+    // A genuine external link belongs in the user's browser, never in a
+    // window that has the preload bridge attached.
+    if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url);
+    } else {
+      console.error('[Security] blocked window.open for', url);
+    }
+    return { action: 'deny' };
+  });
+
+  /**
+   * A renderer must never be granted a device permission.
+   *
+   * This is an offline till: it has no use for the camera, the microphone or
+   * the user's location, so every request is refused rather than left to the
+   * default, which prompts and can be accepted by an unattended machine.
+   */
+  mainWindow.webContents.session.setPermissionRequestHandler((_wc, _perm, callback) => {
+    callback(false);
+  });
+
+  /**
+   * Refuse to attach a preload script the application did not ask for.
+   *
+   * Defence in depth: if anything ever manages to create a webview, this stops
+   * it arriving with Node integration and its own preload.
+   */
+  mainWindow.webContents.on('will-attach-webview', (event, webPreferences) => {
+    delete webPreferences.preload;
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    event.preventDefault();
   });
 
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {

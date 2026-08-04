@@ -181,7 +181,7 @@ export function Sidebar() {
                 key={item.label}
                 to={item.path!}
                 end={item.path === '/' || menuItems.some((m) => m.path !== item.path && m.path?.startsWith(item.path! + '/'))}
-                className={({ isActive }) =>
+                className={({ isActive }: { isActive: boolean }) =>
                   `flex items-center gap-3 mx-2 px-3 py-2.5 rounded-lg transition-colors ${
                     isActive
                       ? 'bg-slate-700/80 text-white shadow-sm'
@@ -234,7 +234,7 @@ export function Sidebar() {
                         key={child.path}
                         to={child.path}
                         end={item.children?.some((c) => c.path !== child.path && c.path.startsWith(child.path + '/')) ?? false}
-                        className={({ isActive }) =>
+                        className={({ isActive }: { isActive: boolean }) =>
                           `flex items-center gap-2 mx-1 px-3 py-1.5 rounded-lg text-xs transition-colors ${
                             isActive
                               ? 'bg-primary-600/80 text-white'

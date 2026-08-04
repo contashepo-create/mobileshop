@@ -143,7 +143,13 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
               able to switch the form to a receipt is how a payment ends up
               filed as income. */}
           <Select label="نوع السند" value={form.VoucherType} disabled={!!mode}
-            onChange={(e) => setForm({ ...form, VoucherType: e.target.value })}>
+            onChange={(e) => setForm({
+              ...form,
+              // Narrowed rather than cast: `e.target.value` is a plain string,
+              // and a voucher whose type is neither of these is money filed as
+              // nothing. Anything unexpected falls back to a receipt.
+              VoucherType: e.target.value === 'payment' ? 'payment' : 'receipt',
+            })}>
             <option value="receipt">سند قبض</option>
             <option value="payment">سند صرف</option>
           </Select>

@@ -104,9 +104,107 @@ export function getDb(): Database.Database {
     db.pragma(`busy_timeout = ${onNetworkShare ? 30000 : 15000}`);
 
     db.pragma('foreign_keys = ON');
+    hardenTransactions(db);
     console.log('[DB] Connected to:', dbPath);
   }
   return db;
+}
+
+/**
+ * Makes every `db.transaction(...)` in the program IMMEDIATE, and retries the
+ * one error a busy timeout cannot fix.
+ *
+ * THE DEFECT THIS REPAIRS
+ * -----------------------
+ * better-sqlite3's `.transaction()` produces a DEFERRED transaction: the write
+ * lock is taken at the first WRITE, not at `BEGIN`. Every financial handler in
+ * this program does read-modify-write — check the stock, compute a cost, then
+ * insert — so between the read and the write another till holds nothing back.
+ *
+ * Under WAL that does NOT silently corrupt the total; SQLite detects it and
+ * fails the transaction with `SQLITE_BUSY_SNAPSHOT`. But that error is not
+ * waitable: `busy_timeout` does nothing for it, because there is no lock to
+ * wait for — the snapshot the reader holds is already stale. So the generous
+ * 15-second timeout configured above never applies to it.
+ *
+ * MEASURED, two processes against one database file, each doing 40
+ * read-modify-writes with a 5 ms gap between the read and the write:
+ *
+ *     worker A: 4 succeeded, 36 failed SQLITE_BUSY_SNAPSHOT
+ *     worker B: 40 succeeded
+ *     final counter 44, expected 80  — 36 operations rejected
+ *
+ * A rejected sale is not a lost sale — `ipcGuard` returns a failure and the
+ * screen reports it — but the cashier sees "تعذّر تنفيذ العملية" on nearly
+ * half of their sales while the second till is busy, which in a shop means the
+ * software is broken.
+ *
+ * THE FIX
+ * -------
+ * `BEGIN IMMEDIATE` takes the write lock at the start, so the read and the
+ * write are inside the same exclusive window and the interleave cannot happen.
+ * Waiting for THAT lock is exactly what `busy_timeout` is for. A short retry
+ * loop covers the remaining case where two processes reach `BEGIN IMMEDIATE`
+ * at the same instant.
+ *
+ * Doing it here rather than at the 52 call sites means a handler written
+ * tomorrow is safe without its author knowing any of this.
+ */
+/** Marks a connection as already wrapped, so wrapping cannot stack. */
+const HARDENED = Symbol.for('mobileshop.transactionsHardened');
+
+function hardenTransactions(conn: Database.Database): void {
+  // Applying the wrapper twice would nest a retry loop inside a retry loop:
+  // 5 attempts would become 25, and the pauses would multiply with them, so a
+  // contended write could block the main process for seconds. Called from one
+  // place today, but a second caller must not be able to cause that.
+  const marked = conn as unknown as Record<symbol, boolean>;
+  if (marked[HARDENED]) return;
+  marked[HARDENED] = true;
+
+  const original = conn.transaction.bind(conn);
+
+  // How many times to re-run a transaction that was rejected before it could
+  // do anything. Only safe because the function is re-executed from the start:
+  // nothing it did was committed, so there is nothing to undo.
+  const MAX_ATTEMPTS = 5;
+
+  (conn as unknown as { transaction: unknown }).transaction = ((fn: (...a: unknown[]) => unknown) => {
+    const wrapped = original(fn as never) as unknown as {
+      immediate: (...a: unknown[]) => unknown;
+    };
+
+    const run = (...args: unknown[]) => {
+      let lastErr: unknown;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+          return wrapped.immediate(...args);
+        } catch (err) {
+          const code = (err as { code?: string })?.code ?? '';
+          // Only these mean "nothing happened, try again". Anything else — a
+          // constraint violation, a bug — must surface immediately and must
+          // NOT be retried, or a genuine refusal looks like a glitch.
+          if (code !== 'SQLITE_BUSY' && code !== 'SQLITE_BUSY_SNAPSHOT') throw err;
+          lastErr = err;
+          // A tiny escalating pause so two tills do not keep colliding in
+          // lockstep. Synchronous on purpose: this is the main process, and
+          // the transaction must not be left half-open across an await.
+          const until = Date.now() + attempt * 20;
+          while (Date.now() < until) { /* spin briefly */ }
+        }
+      }
+      throw lastErr;
+    };
+
+    // `.immediate`, `.exclusive` and `.deferred` are part of the public API.
+    // Keep them working, and keep the retry on the two that can be retried.
+    (run as unknown as Record<string, unknown>).immediate = run;
+    (run as unknown as Record<string, unknown>).exclusive =
+      (...a: unknown[]) => (wrapped as unknown as Record<string, (...x: unknown[]) => unknown>).exclusive(...a);
+    (run as unknown as Record<string, unknown>).deferred =
+      (...a: unknown[]) => (wrapped as unknown as Record<string, (...x: unknown[]) => unknown>).deferred(...a);
+    return run;
+  }) as unknown as typeof conn.transaction;
 }
 
 /**

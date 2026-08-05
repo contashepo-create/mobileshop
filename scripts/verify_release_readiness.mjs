@@ -74,6 +74,11 @@ console.log('\n── 1. every readiness axis has a suite, and it runs ──');
     ['security: password recovery', 'verify_password_recovery.mjs'],
     ['data: every channel executed', 'verify_all_channels.mjs'],
     ['data: database-level value guards', 'verify_db_constraints.mjs'],
+    // A refused write must never pass for a successful one. Added after a
+    // probe measured `hardenBinding` answering a refused `run()` with
+    // `{changes: 0}` and letting the enclosing transaction COMMIT — a document
+    // written with one of its parts missing, and no error anywhere.
+    ['data: a refused write is never silent', 'verify_write_integrity.mjs'],
     ['data: migrations are safe to re-run', 'verify_upgrade_safety.mjs'],
     ['data: concurrency across terminals', 'verify_trade_concurrency.mjs'],
     ['data: multi-terminal', 'verify_multi_terminal.mjs'],

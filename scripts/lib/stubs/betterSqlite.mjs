@@ -9,6 +9,31 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 
+/**
+ * True when a statement can CHANGE data.
+ *
+ * Byte-for-byte the same rule as `isWriteStatement` in
+ * src/main/database/connection.ts. It is duplicated rather than imported
+ * because this stub must stay loadable without the TypeScript source, and
+ * `verify_release_readiness.mjs` pins the two to the same behaviour so they
+ * cannot drift apart.
+ */
+function isWriteStatement(sql) {
+  const head = String(sql)
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .trim()
+    .slice(0, 400)
+    .toUpperCase();
+  if (/^\s*(SELECT|PRAGMA|EXPLAIN)\b/.test(head) && !/\b(INSERT|UPDATE|DELETE|REPLACE)\b/.test(head)) {
+    return false;
+  }
+  if (/^\s*WITH\b/.test(head)) {
+    return /\b(INSERT|UPDATE|DELETE|REPLACE)\b/.test(head);
+  }
+  return true;
+}
+
 class Wrapped {
   constructor(path, opts) {
     // node:sqlite rejects `undefined` for options, unlike better-sqlite3.
@@ -44,9 +69,19 @@ class Wrapped {
       }
       return false;
     };
+    // A refused WRITE throws; a refused READ answers empty. Mirrors the same
+    // split in `hardenBinding`, and for the same measured reason: a write that
+    // returns `{changes: 0}` lets the enclosing transaction COMMIT with one of
+    // its statements silently dropped, so the document and the balance
+    // disagree with nothing raised. See connection.ts for the measurement.
+    const writes = isWriteStatement(sql);
     const guard = (method, fn, empty) => (...a) => {
       if (bad(a)) {
-        console.error(`[DB] refused an unbindable parameter for: ${sql.slice(0, 90).replace(/\s+/g, ' ')}`);
+        const shortSql = sql.slice(0, 90).replace(/\s+/g, ' ');
+        console.error(`[DB] refused an unbindable parameter for: ${shortSql}`);
+        if (writes) {
+          throw new Error(`[DB] refused to run a write with an unbindable parameter: ${shortSql}`);
+        }
         return typeof empty === 'function' ? empty() : empty;
       }
       return fn(...a);

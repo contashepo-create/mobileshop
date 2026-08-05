@@ -2,7 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { checkAmount } from '../../shared/money';
 import {
-  requireText, optionalText, optionalId, optionalDate, oneOf,
+  requireText, optionalText, optionalId, requireId, optionalDate, oneOf,
   searchTerm, LIMITS, PARTY_STATUSES,
 } from '../../shared/validate';
 
@@ -173,9 +173,20 @@ export function registerHrHandlers() {
     return { success: true };
   });
 
+  /**
+   * Deactivates an employee.
+   *
+   * Validated before the write for the same two measured reasons as
+   * `cashAccounts:delete`: an unbindable id reached a WRITE statement, and a
+   * well-formed id that matched no row still answered `{ success: true }`.
+   */
   ipcMain.handle('employees:delete', async (_event, id: number) => {
     const db = getDb();
-    db.prepare('UPDATE employees SET IsActive = 0 WHERE EmployeeID = ?').run(id);
+    const rid = requireId(id, 'رقم الموظف');
+    if (!rid.ok) return { success: false, message: rid.message };
+    const exists = db.prepare('SELECT 1 AS ok FROM employees WHERE EmployeeID = ?').get(rid.value);
+    if (!exists) return { success: false, message: 'الموظف غير موجود' };
+    db.prepare('UPDATE employees SET IsActive = 0 WHERE EmployeeID = ?').run(rid.value);
     return { success: true };
   });
 

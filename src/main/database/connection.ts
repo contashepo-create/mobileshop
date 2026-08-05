@@ -186,14 +186,52 @@ const BIND_HARDENED = Symbol.for('mobileshop.bindHardened');
  * statement in the application, including any added later — the same reasoning
  * that put the transaction retry and the IPC guard where they are.
  *
- * A rejected bind returns EMPTY rather than throwing: `undefined` from `.get`,
- * `[]` from `.all`, and a no-op result from `.run`. That is the honest answer —
- * a row whose key is not a value cannot exist — and it is what the handlers
- * already expect when a lookup finds nothing, so they produce their own
- * "not found" message in Arabic instead of a crash.
+ * A REJECTED READ RETURNS EMPTY rather than throwing: `undefined` from `.get`,
+ * `[]` from `.all`. That is the honest answer — a row whose key is not a value
+ * cannot exist — and it is what the handlers already expect when a lookup
+ * finds nothing, so they produce their own "not found" message in Arabic
+ * instead of a crash.
  *
- * Deliberately NOT silent: the rejected value is logged with the statement, so
- * a caller passing rubbish is still visible to the developer.
+ * A REJECTED WRITE THROWS. This is the opposite decision, and it is deliberate.
+ *
+ * WHY A WRITE MUST NOT FAIL QUIETLY
+ * ---------------------------------
+ * The first version of this wrapper answered a refused `run()` with
+ * `{ changes: 0, lastInsertRowid: 0 }` and let execution continue. Measured
+ * consequence, driving the real code:
+ *
+ *     db.transaction(() => {
+ *       insert supplier A          -> committed
+ *       insert supplier B (undefined phone) -> refused, {changes: 0}
+ *     })()
+ *     transaction threw: no
+ *     suppliers 1 -> 2
+ *
+ * The transaction COMMITTED with one of its writes silently dropped. For a
+ * read that behaviour is a repair; for a write it converts a loud crash — which
+ * rolls the whole document back — into a quiet partial write that no report
+ * can detect.
+ *
+ * It matters most on the statement that actually moves money:
+ *
+ *     UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?
+ *
+ * MEASURED: with an unbindable amount the drawer stayed at 100,000, `run()`
+ * returned `{changes: 0}`, and nothing was raised. A foreign key cannot catch
+ * that — there is no child row and no missing parent, only an UPDATE that
+ * matched nothing. A scan of `src/main/ipc` found 106 balance-moving UPDATE
+ * statements, of which 103 never inspect `.changes`; from inside those
+ * handlers a dropped write is indistinguishable from a successful one. The
+ * invoice would say the customer paid and the drawer would disagree.
+ *
+ * So the two cases are separated by the VERB of the statement. Throwing is safe
+ * here because `installIpcGuard` wraps every channel in `runSafely`, which
+ * turns a throw into the structured Arabic failure the renderer already
+ * understands — and because the throw happens BEFORE the statement runs, so
+ * the enclosing transaction rolls back with nothing half-applied.
+ *
+ * Deliberately NOT silent in either case: the rejected value is logged with the
+ * statement, so a caller passing rubbish is still visible to the developer.
  */
 function hardenBinding(conn: Database.Database): void {
   const marked = conn as unknown as Record<symbol, boolean>;
@@ -231,16 +269,28 @@ function hardenBinding(conn: Database.Database): void {
 
   (conn as unknown as { prepare: unknown }).prepare = ((sql: string) => {
     const stmt = originalPrepare(sql) as unknown as Record<string, unknown>;
+    // Decided from the SQL, once per statement, not per call. A statement that
+    // changes rows must never be allowed to do nothing quietly; a statement
+    // that only reads may safely answer "nothing found".
+    const writes = isWriteStatement(sql);
     for (const method of ['get', 'all', 'run', 'iterate', 'pluck'] as const) {
       const fn = stmt[method];
       if (typeof fn !== 'function') continue;
       stmt[method] = function patched(this: unknown, ...args: unknown[]) {
         if (hasBadArg(args)) {
-          console.error(
-            `[DB] refused an unbindable parameter for: ${sql.slice(0, 90).replace(/\s+/g, ' ')}`,
-          );
+          const shortSql = sql.slice(0, 90).replace(/\s+/g, ' ');
+          console.error(`[DB] refused an unbindable parameter for: ${shortSql}`);
+          if (writes) {
+            // Loud on purpose. See the comment above `hardenBinding`: a
+            // dropped write inside a transaction commits the rest of the
+            // document and leaves the books wrong with nothing to show for it.
+            // `runSafely` in ipcGuard converts this into the structured Arabic
+            // failure the renderer already handles.
+            throw new Error(
+              `[DB] refused to run a write with an unbindable parameter: ${shortSql}`,
+            );
+          }
           if (method === 'all') return [];
-          if (method === 'run') return { changes: 0, lastInsertRowid: 0 };
           if (method === 'iterate') return [][Symbol.iterator]();
           return undefined;
         }
@@ -249,6 +299,33 @@ function hardenBinding(conn: Database.Database): void {
     }
     return stmt;
   }) as unknown as typeof conn.prepare;
+}
+
+/**
+ * True when a statement can CHANGE data.
+ *
+ * Leading comments and whitespace are stripped first: several statements in
+ * this project begin with a `--` explanation, and matching the raw text would
+ * class those as reads. `WITH ... INSERT` and `EXPLAIN` are handled by looking
+ * for the verb anywhere in the leading clause rather than only at position
+ * zero, and the fallback is WRITE — an unrecognised statement is treated as
+ * dangerous, because the cost of being wrong in that direction is an error
+ * message, while the other direction is a silent wrong balance.
+ */
+function isWriteStatement(sql: string): boolean {
+  const head = String(sql)
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .trim()
+    .slice(0, 400)
+    .toUpperCase();
+  if (/^\s*(SELECT|PRAGMA|EXPLAIN)\b/.test(head) && !/\b(INSERT|UPDATE|DELETE|REPLACE)\b/.test(head)) {
+    return false;
+  }
+  if (/^\s*WITH\b/.test(head)) {
+    return /\b(INSERT|UPDATE|DELETE|REPLACE)\b/.test(head);
+  }
+  return true;
 }
 
 function hardenTransactions(conn: Database.Database): void {

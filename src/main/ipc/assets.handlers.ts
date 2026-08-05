@@ -2,7 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { checkAmount } from '../../shared/money';
 import {
-  requireText, optionalText, optionalId, oneOf, requireFlag,
+  requireText, optionalText, optionalId, requireId, oneOf, requireFlag,
   LIMITS, CASH_ACCOUNT_TYPES,
 } from '../../shared/validate';
 
@@ -98,9 +98,27 @@ export function registerAssetsHandlers() {
     return { success: true };
   });
 
+  /**
+   * Deactivates a cash account.
+   *
+   * The id is validated and the row confirmed BEFORE the write, for two
+   * reasons measured on this handler:
+   *
+   *   - `cashAccounts:delete(undefined)` bound `undefined` straight into the
+   *     UPDATE. That is a write, and a write with an unbindable parameter is
+   *     now refused loudly (see `hardenBinding`), so the channel answered with
+   *     a technical error instead of a plain refusal.
+   *   - a well-formed id that matches nothing changed no rows and still
+   *     returned `{ success: true }`. The screen then reported "تم الحذف" for
+   *     an account that was never touched.
+   */
   ipcMain.handle('cashAccounts:delete', async (_event, id: number) => {
     const db = getDb();
-    db.prepare('UPDATE cash_accounts SET IsActive = 0 WHERE CashAccountID = ?').run(id);
+    const rid = requireId(id, 'رقم الخزينة');
+    if (!rid.ok) return { success: false, message: rid.message };
+    const exists = db.prepare('SELECT 1 AS ok FROM cash_accounts WHERE CashAccountID = ?').get(rid.value);
+    if (!exists) return { success: false, message: 'الخزينة غير موجودة' };
+    db.prepare('UPDATE cash_accounts SET IsActive = 0 WHERE CashAccountID = ?').run(rid.value);
     return { success: true };
   });
 
@@ -165,9 +183,14 @@ export function registerAssetsHandlers() {
     return { success: true };
   });
 
+  /** Deactivates a payment method. Same reasoning as `cashAccounts:delete`. */
   ipcMain.handle('paymentMethods:delete', async (_event, id: number) => {
     const db = getDb();
-    db.prepare('UPDATE payment_methods SET IsActive = 0 WHERE PaymentMethodID = ?').run(id);
+    const rid = requireId(id, 'رقم طريقة الدفع');
+    if (!rid.ok) return { success: false, message: rid.message };
+    const exists = db.prepare('SELECT 1 AS ok FROM payment_methods WHERE PaymentMethodID = ?').get(rid.value);
+    if (!exists) return { success: false, message: 'طريقة الدفع غير موجودة' };
+    db.prepare('UPDATE payment_methods SET IsActive = 0 WHERE PaymentMethodID = ?').run(rid.value);
     return { success: true };
   });
 }

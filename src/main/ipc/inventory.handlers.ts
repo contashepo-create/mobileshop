@@ -362,9 +362,20 @@ export function registerInventoryHandlers() {
     }
   });
 
+  /**
+   * Deactivates an item.
+   *
+   * Validated before the write for the same two measured reasons as
+   * `cashAccounts:delete`: an unbindable id reached a WRITE statement, and a
+   * well-formed id that matched no row still answered `{ success: true }`.
+   */
   ipcMain.handle('items:delete', async (_event, id: number) => {
     const db = getDb();
-    db.prepare('UPDATE items SET IsActive = 0 WHERE ItemID = ?').run(id);
+    const rid = requireId(id, 'رقم الصنف');
+    if (!rid.ok) return { success: false, message: rid.message };
+    const exists = db.prepare('SELECT 1 AS ok FROM items WHERE ItemID = ?').get(rid.value);
+    if (!exists) return { success: false, message: 'الصنف غير موجود' };
+    db.prepare('UPDATE items SET IsActive = 0 WHERE ItemID = ?').run(rid.value);
     return { success: true };
   });
 

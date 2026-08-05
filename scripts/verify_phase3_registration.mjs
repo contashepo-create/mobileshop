@@ -231,10 +231,33 @@ console.log('\n[4] The developer can look a shop up');
   t('the worker stores registrations', /CREATE TABLE IF NOT EXISTS registrations/.test(w));
   t('the endpoint exists and is routed', /case '\/registration'/.test(w));
   t('it is authenticated', /handleRegistration[\s\S]{0,400}X-Client-Key/.test(w));
-  t('a repeat registration updates rather than duplicating',
-    /handleRegistration[\s\S]{0,1200}ON CONFLICT\(device_id\) DO UPDATE/.test(w));
+  // A repeat registration must NOT update.
+  //
+  // This used to assert `ON CONFLICT ... DO UPDATE`, which is precisely the
+  // hole `verify_tenant_isolation.mjs` found: `CLIENT_KEY` is shipped in every
+  // copy of the app and the device id arrives in the request body, so the
+  // upsert let any caller rewrite another shop's row. MEASURED — company_name
+  // "محل خالد" was overwritten with "DEFACED", owner and phone with it.
+  //
+  // First writer wins now, and a re-run is accepted quietly so the customer
+  // never sees an error for running the wizard twice.
+  // Sliced to THIS handler only: a `[\s\S]*?` negative lookahead runs on past
+  // the function and finds the (legitimate) upserts in /config and /release,
+  // so it can never be satisfied.
+  const regHandler = (() => {
+    const i = w.indexOf('async function handleRegistration');
+    const j = w.indexOf('\nasync function ', i + 10);
+    return w.slice(i, j === -1 ? w.length : j);
+  })();
+  t('a repeat registration does NOT overwrite the stored row',
+    /ON CONFLICT\(device_id\) DO NOTHING/.test(regHandler)
+    && !/ON CONFLICT\(device_id\) DO UPDATE/.test(regHandler));
+  t('and an already-registered device is answered without an error',
+    /alreadyRegistered: true/.test(w));
+  // Sliced lazily rather than with a character budget: the handler grew when
+  // the isolation guards were added and a fixed lookahead stopped reaching.
   t('every field is length-capped before storage',
-    /handleRegistration[\s\S]{0,1400}cut\(b\?\.companyName, 80\)/.test(w));
+    /handleRegistration[\s\S]*?cut\(b\?\.companyName, 80\)/.test(w));
   t('a new registration is announced on Telegram',
     /handleRegistration[\s\S]{0,2000}await tg\(env,/.test(w));
   t('the device screen shows the details for support',

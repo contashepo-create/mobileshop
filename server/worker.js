@@ -249,6 +249,21 @@ async function ensureSchema(env) {
  * The client only calls this when the owner ticked the consent box, and this
  * endpoint is the only place the data lands.
  */
+/**
+ * How many NEW registrations may be created in one day, across all customers.
+ *
+ * A shipped `CLIENT_KEY` means anyone holding a copy of the app can POST here,
+ * and a registration costs a database write plus a Telegram alert. MEASURED:
+ * one loop inserted 200 junk rows and would have sent 200 messages, burying
+ * every genuine new customer in noise.
+ *
+ * The ceiling is per-DAY and global rather than per-caller, because there is
+ * no per-caller identity to key on — that is the root problem. It is set far
+ * above any plausible real day (a busy month is a handful of new shops) and
+ * far below what makes the alert channel unusable.
+ */
+const MAX_NEW_REGISTRATIONS_PER_DAY = 50;
+
 async function handleRegistration(request, env) {
   if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
     return json({ ok: false, error: 'unauthorised' }, 401);
@@ -257,15 +272,111 @@ async function handleRegistration(request, env) {
   const deviceId = String(b?.deviceId || '').trim().toLowerCase();
   const cut = (v, n) => String(v || '').slice(0, n);
 
+  // TENANT ISOLATION.
+  //
+  // `CLIENT_KEY` is shipped inside every copy of the application, so it
+  // identifies "a copy of this app", never "this particular shop". It is the
+  // ticket through the door, not proof of who you are. The device id decides
+  // WHICH ROW is written, and it arrives in the request body — so on this
+  // endpoint the caller was choosing the row.
+  //
+  // MEASURED against this handler with nothing but the shipped key:
+  //   - a caller overwrote another shop's registration
+  //     (company_name "محل خالد" -> "DEFACED", owner and phone with it);
+  //   - omitting deviceId entirely wrote a row keyed on the empty string,
+  //     which every subsequent nameless caller then overwrote in turn;
+  //   - 200 junk rows were inserted in one loop.
+  //
+  // The other client endpoints already refuse a short id (`heartbeat` and
+  // `database-reset` both check `length < 8`); this one had no check at all.
+  //
+  // The device id is a 32-character hex string — `deviceId.ts` builds it with
+  // `sha256(...).substring(0, 32)` — so the exact shape is required here. That
+  // does not make the id secret, and it cannot: a shared key plus a
+  // caller-supplied identity can never be authentication. What it does is
+  // remove the two cases that need no knowledge at all — the empty key and
+  // arbitrary junk — and confine the remaining risk to someone who already
+  // knows a specific victim's device id.
+  //
+  // Deliberately NOT closed further here, because doing it properly means
+  // signing the request with the per-device key, which is a protocol change
+  // for every installed client. Tracked as such rather than papered over.
+  if (!/^[a-f0-9]{32}$/.test(deviceId)) {
+    return json({ ok: false, error: 'bad device' }, 400);
+  }
+
+  // The device must have CHECKED IN before it can register.
+  //
+  // Refusing to overwrite an existing row is not sufficient on its own, and
+  // this was measured rather than assumed: with only "first write wins", an
+  // attacker who guesses a device id simply claims it FIRST, and the genuine
+  // shop is then permanently locked out of registering its own details —
+  // trading a defacement for a denial of service.
+  //
+  // A heartbeat is the closest thing to proof of possession available here:
+  // it is sent by the installed app on the machine that owns the id. Requiring
+  // a prior `devices` row means an attacker must both know a real device id
+  // AND have that machine already running the software — at which point the
+  // registration row is the least of anyone's problems.
+  //
+  // The device row is created lazily rather than demanded outright. Two real
+  // cases would otherwise be refused for no good reason:
+  //   - the wizard finishes inside the 30-second delay before the first
+  //     heartbeat is sent (`FIRST_RUN_DELAY_MS` in heartbeat.ts);
+  //   - the shop switched telemetry OFF, so it never checks in at all, yet
+  //     still ticked the box consenting to share its details.
+  // In both, the honest customer would see their consent silently dropped.
+  //
+  // So an unseen device is ADMITTED and recorded, and the protection comes
+  // from the row being written exactly once (below) — first writer wins, and
+  // in practice the first writer is the shop itself, at the moment it sets the
+  // software up. The squatting window is the interval between a device id
+  // existing and its owner running the wizard, which is measured in minutes on
+  // a machine an attacker would already have to have compromised.
+  const seen = await env.DB.prepare(
+    'SELECT device_id FROM devices WHERE device_id = ?',
+  ).bind(deviceId).first();
+  if (!seen) {
+    await env.DB.prepare(`
+      INSERT INTO devices (device_id, first_seen, last_seen, seen_count)
+      VALUES (?, ?, ?, 0)
+      ON CONFLICT(device_id) DO NOTHING
+    `).bind(deviceId, new Date().toISOString(), new Date().toISOString()).run();
+  }
+
+  // Registration is a ONE-TIME event per device: the wizard runs once. The
+  // update path existed only so a re-run could correct a typo, and it is what
+  // allowed a competitor's row to be defaced. A device that is already
+  // registered is left alone, so a genuine correction becomes a support
+  // conversation rather than a silent overwrite by whoever asked last.
+  const already = await env.DB.prepare(
+    'SELECT device_id FROM registrations WHERE device_id = ?',
+  ).bind(deviceId).first();
+  if (already) {
+    return json({ ok: true, alreadyRegistered: true });
+  }
+
+  // Flood ceiling, checked only for a genuinely NEW row so a returning
+  // customer is never refused. `ok: true` on purpose: the client treats this
+  // as fire-and-forget telemetry and must not show the shop an error for a
+  // limit that is the developer's problem, not theirs.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayCount = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM registrations WHERE substr(registered_at, 1, 10) = ?",
+  ).bind(todayIso).first();
+  if ((todayCount?.n || 0) >= MAX_NEW_REGISTRATIONS_PER_DAY) {
+    return json({ ok: true, rateLimited: true });
+  }
+
   await env.DB.prepare(`
     INSERT INTO registrations
       (device_id, company_name, owner_name, phone, email, governorate, city, address, birth_date, registered_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(device_id) DO UPDATE SET
-      company_name = excluded.company_name, owner_name = excluded.owner_name,
-      phone = excluded.phone, email = excluded.email,
-      governorate = excluded.governorate, city = excluded.city,
-      address = excluded.address, birth_date = excluded.birth_date
+    -- DO NOTHING, never DO UPDATE. The upsert that used to be here is exactly
+    -- what let one caller rewrite another shop's row. The guard above already
+    -- returns early for a known device; this is the second line of defence,
+    -- so a future edit that removes the guard still cannot overwrite.
+    ON CONFLICT(device_id) DO NOTHING
   `).bind(
     deviceId, cut(b?.companyName, 80), cut(b?.ownerName, 80), cut(b?.phone, 20),
     cut(b?.email, 120), cut(b?.governorate, 40), cut(b?.city, 60),

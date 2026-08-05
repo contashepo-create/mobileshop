@@ -79,6 +79,9 @@ console.log('\n── 1. every readiness axis has a suite, and it runs ──');
     // `{changes: 0}` and letting the enclosing transaction COMMIT — a document
     // written with one of its parts missing, and no error anywhere.
     ['data: a refused write is never silent', 'verify_write_integrity.mjs'],
+    // Closing the year was a label on a button: measured, `sales:create` and
+    // `purchases:create` both posted into a year stamped 'closed'.
+    ['accounting: a closed fiscal year refuses new documents', 'verify_fiscal_year_close.mjs'],
     // The only internet-facing component. Added after a measured exploit:
     // an anonymous POST to /telegram, with no credential of any kind, minted a
     // signed ten-year licence — the chat id it authenticated on is part of the

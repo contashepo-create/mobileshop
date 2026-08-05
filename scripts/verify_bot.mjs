@@ -87,6 +87,12 @@ const env = {
   LICENSE_PRIVATE_KEY: TEST_PRIVATE_KEY,
   TG_BOT_TOKEN: 'token',
   TG_ADMIN_CHAT: '7232305465',
+  // `/telegram` now demands Telegram's own `secret_token`, returned in the
+  // X-Telegram-Bot-Api-Secret-Token header on every genuine delivery. Without
+  // it the webhook refuses everything — which is the point: a measured exploit
+  // posted `{"chat":{"id":<owner>},"text":"/new <device> 3650"}` with no
+  // credential at all and got back a signed ten-year licence.
+  TG_WEBHOOK_SECRET: 'webhook-secret-for-the-test',
 };
 
 const post = (path, body, headers = {}) =>
@@ -95,12 +101,15 @@ const post = (path, body, headers = {}) =>
     body: JSON.stringify(body),
   }), env);
 
+/** A genuine Telegram delivery carries the registered secret. */
+const TG_HEADERS = { 'X-Telegram-Bot-Api-Secret-Token': env.TG_WEBHOOK_SECRET };
+
 const tap = data => post('/telegram', {
   callback_query: { id: 'q1', from: { id: 7232305465 }, data, message: { message_id: 500 } },
-});
+}, TG_HEADERS);
 const type = text => post('/telegram', {
   message: { chat: { id: 7232305465 }, text },
-});
+}, TG_HEADERS);
 
 console.log('='.repeat(70));
 console.log('TELEGRAM BOT MENU CHECKS');
@@ -277,14 +286,35 @@ console.log('\n[9] Telegram protocol constraints are respected');
 console.log('\n[10] Only the owner can drive the bot');
 {
   sent.length = 0;
-  await post('/telegram', { message: { chat: { id: 999999 }, text: '/start' } });
+  await post('/telegram', { message: { chat: { id: 999999 }, text: '/start' } }, TG_HEADERS);
   check('a stranger gets no reply at all', sent.length === 0);
 
   sent.length = 0;
   await post('/telegram', {
     callback_query: { id: 'x', from: { id: 999999 }, data: 'new', message: { message_id: 1 } },
-  });
+  }, TG_HEADERS);
   check('a stranger cannot tap buttons either', sent.length === 0);
+
+  // The layer BELOW the chat id: a request that never came from Telegram at
+  // all. The chat id lives in the body, so it proves nothing on its own —
+  // MEASURED, an anonymous POST claiming the owner's id minted a signed
+  // ten-year licence. Every delivery must carry the registered secret.
+  sent.length = 0;
+  await post('/telegram', {
+    message: { chat: { id: 7232305465 }, text: '/new deadbeefdeadbeef 3650' },
+  });   // no secret header
+  check('a forged webhook with no secret mints nothing', sent.length === 0);
+
+  sent.length = 0;
+  await post('/telegram', {
+    message: { chat: { id: 7232305465 }, text: '/new deadbeefdeadbeef 3650' },
+  }, { 'X-Telegram-Bot-Api-Secret-Token': 'wrong' });
+  check('a forged webhook with the wrong secret mints nothing', sent.length === 0);
+
+  // ...and the genuine path still works, or the guard has simply killed the bot.
+  sent.length = 0;
+  await type('/start');
+  check('the owner, over a genuine delivery, is still obeyed', sent.length > 0);
 }
 
 // ---------------------------------------------------------------- 11

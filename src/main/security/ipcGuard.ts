@@ -478,6 +478,10 @@ export function installIpcGuard() {
         }
       }
 
+      // Refuse to post into a fiscal year that has been closed.
+      const closedYear = refuseClosedYear(channel, args);
+      if (closedYear) return closedYear;
+
       // Any handler that throws is turned into the structured failure the
       // renderer already understands.
       //
@@ -511,6 +515,91 @@ export function installIpcGuard() {
       return runSafely(() => runGuarded(channel, () => listener(event, ...args)));
     });
   }) as typeof ipcMain.handle;
+}
+
+/**
+ * Refuses any document addressed to a CLOSED fiscal year.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * `fiscalYear:close` stamps `Status = 'closed'` and opens the next year. NO
+ * handler read that column. Measured, driving the real code — close 2026, then
+ * post into it:
+ *
+ *     sales:create      fiscalYearId 1 -> {"success":true,"totalAmount":750}
+ *     purchases:create  fiscalYearId 1 -> {"success":true,"totalAmount":250}
+ *
+ * Both documents landed in the closed year. "Closing the year" was a label.
+ *
+ * In accounting this is not a small thing. Once a year is closed its profit,
+ * its stock valuation and its balances are FINAL: they have been shown to the
+ * owner, they may have been filed, and they are the opening position of the
+ * year that follows. A sale backdated into a closed year silently changes a
+ * figure somebody already relied on, and the two years stop adding up to the
+ * whole. It is also the single easiest way to hide a theft — post the
+ * correction into a period nobody is looking at any more.
+ *
+ * WHY HERE RATHER THAN IN EACH HANDLER
+ * ------------------------------------
+ * Eighteen handlers across nine files accept a fiscal year from the caller.
+ * Editing all eighteen leaves the nineteenth — written next month — unguarded,
+ * which is exactly how the previous gaps in this project were created. The
+ * guard patches `ipcMain.handle`, so it applies to every channel that carries
+ * a year, including any added later.
+ *
+ * WHAT IS DELIBERATELY NOT BLOCKED
+ * --------------------------------
+ * Reads. A closed year must remain fully readable — its reports and statements
+ * are the reason it was closed. Only channels that WRITE are considered, and
+ * they are recognised by the same `isGuardedChannel` list the book guard uses,
+ * plus the create/update/delete naming the project already follows.
+ */
+function refuseClosedYear(channel: string, args: unknown[]): { success: false; message: string; code: string } | null {
+  // Only writes. `reports:*`, `statement:*` and every `:list`/`:get` must keep
+  // working against a closed year.
+  if (!/:(create|update|delete|pay|unpay|issue|cancel|return|deliver|apply|settle|add)/i.test(channel)) {
+    return null;
+  }
+
+  // Find the year the caller is addressing. Both spellings are in use.
+  let yearId: unknown;
+  for (const arg of args) {
+    if (!arg || typeof arg !== 'object' || Array.isArray(arg)) continue;
+    const o = arg as Record<string, unknown>;
+    if (o.fiscalYearId !== undefined) { yearId = o.fiscalYearId; break; }
+    if (o.FiscalYearID !== undefined) { yearId = o.FiscalYearID; break; }
+  }
+  if (yearId === undefined || yearId === null || yearId === '') return null;
+
+  const id = Number(yearId);
+  if (!Number.isInteger(id) || id <= 0) return null;   // the handler's own validation reports this
+
+  let db: { prepare: (s: string) => { get: (...a: unknown[]) => unknown } };
+  try {
+    // Synchronous require: this runs on the hot path of every write, and an
+    // await here would leave the check racing the handler it is meant to gate.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    db = require('../database/connection').getDb();
+  } catch {
+    return null;   // no database yet (first run) — nothing to protect
+  }
+
+  let row: { Status?: string; YearName?: string } | undefined;
+  try {
+    row = db.prepare('SELECT Status, YearName FROM fiscal_years WHERE FiscalYearID = ?')
+      .get(id) as { Status?: string; YearName?: string } | undefined;
+  } catch {
+    return null;   // table missing during a migration — do not block trading
+  }
+
+  if (!row || row.Status !== 'closed') return null;
+
+  console.error(`[IPC] "${channel}" refused: fiscal year ${id} is closed`);
+  return {
+    success: false,
+    code: 'FISCAL_YEAR_CLOSED',
+    message: `السنة المالية «${row.YearName || id}» مغلقة - لا يمكن تسجيل حركات فيها`,
+  };
 }
 
 /**

@@ -68,13 +68,32 @@ export function registerFiscalYearHandlers() {
       db.prepare('UPDATE fiscal_years SET Status = ?, ClosedAt = ?, ClosedByUserID = ? WHERE FiscalYearID = ?')
         .run('closed', dateStr, userId, fiscalYearId);
 
-      // Create new year starting the day after
+      // Create the new year, starting the day after this one ended.
+      //
+      // TWO DEFECTS MEASURED HERE, both from the same line.
+      //
+      // 1. THE NAME WAS A YEAR OUT. Closing 2026 (ending 2026-12-31) produced
+      //    a year running 2027-01-01 to 2028-01-01 called
+      //    «السنة المالية 2028». Every document posted in 2027 would carry a
+      //    year labelled 2028, and the owner reading a report would be looking
+      //    at the wrong caption on the right figures — or file under the wrong
+      //    year entirely. The name must come from the START of the period.
+      //
+      // 2. THE PERIOD WAS 366 DAYS. `setFullYear(+1)` on 2027-01-01 gives
+      //    2028-01-01, so the new year INCLUDES the first day of the year
+      //    after it. That day then belongs to two fiscal years at once, and
+      //    the ranges no longer partition time — a report bounded by
+      //    `BETWEEN StartDate AND EndDate` counts it twice.
+      //
+      // Both fixed by ending one day before the anniversary, which is what a
+      // twelve-month period actually is.
       const startDate = new Date(fy.EndDate);
       startDate.setDate(startDate.getDate() + 1);
       const endDate = new Date(startDate);
       endDate.setFullYear(endDate.getFullYear() + 1);
+      endDate.setDate(endDate.getDate() - 1);
 
-      const newYearName = `السنة المالية ${endDate.getFullYear()}`;
+      const newYearName = `السنة المالية ${startDate.getFullYear()}`;
       db.prepare('INSERT INTO fiscal_years (YearName, StartDate, EndDate, Status) VALUES (?, ?, ?, ?)').run(
         newYearName, startDate.toISOString().split('T')[0], endDate.toISOString().split('T')[0], 'open'
       );

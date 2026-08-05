@@ -379,7 +379,21 @@ export function DatabaseManagementPage() {
               ) : (
                 <>
                   <Input label="رابط الخادم" value={cloudUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCloudUrl(e.target.value)} placeholder="https://xxxx.supabase.co" />
-                  <Input label="مفتاح API (API Key)" type="password" value={cloudApiKey} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCloudApiKey(e.target.value)} placeholder="eyJhbGciOiJIUzI1NiIsInR5..." />
+                  {/*
+                    The box shows a MASK, never the stored key — the main
+                    process no longer sends it out. Leaving the mask alone
+                    keeps the saved credential; typing over it replaces it.
+                  */}
+                  <Input
+                    label="مفتاح API (API Key)"
+                    type="password"
+                    value={cloudApiKey}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCloudApiKey(e.target.value)}
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5..."
+                    hint={cloudSettings.hasCloudApiKey
+                      ? 'مفتاح محفوظ بالفعل — اتركه كما هو للإبقاء عليه، أو اكتب مفتاحاً جديداً لاستبداله'
+                      : 'لا يوجد مفتاح محفوظ'}
+                  />
                 </>
               )}
 

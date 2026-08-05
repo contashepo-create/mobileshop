@@ -28,6 +28,46 @@ scripts/issued-licenses.json
 
 # Runtime configuration — contains the client key that points the app at the
 # developer's Worker. Not an admin credential, but it should not be public.
+#
+# `.env*` with an exception for the template, rather than a list of names.
+# A list only covers the spellings someone thought of: `.env.production` and
+# `.env.prod` were both uncovered, and a file called any of those holds exactly
+# the same secrets as `.env`.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# Cloudflare Wrangler.
+#
+# `.dev.vars` is where Wrangler keeps the LOCAL copies of the Worker secrets —
+# ADMIN_KEY, CLIENT_KEY, LICENSE_PRIVATE_KEY, TG_BOT_TOKEN. It is created the
+# moment anyone runs `wrangler dev`, it sits inside server/ next to tracked
+# files, and it is a plain key=value file. Committing it would publish every
+# secret the Worker has, including the Ed25519 key that mints licences.
+.dev.vars
+server/.dev.vars
+.wrangler/
+
+# Package-registry credentials. `npm login` writes a token here, and a
+# project-local .npmrc sits in the repository root.
+.npmrc
+.netrc
+.git-credentials
+
+# Keys and certificates in any form. Code-signing a Windows build uses a .pfx
+# or .p12, and the password to it is usually nearby.
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+*.asc
+id_rsa
+id_ed25519
+id_ecdsa
+
+# Cloud provider credential files, in case any tooling writes them here.
+.aws/
+.gcloud/
+gha-creds-*.json

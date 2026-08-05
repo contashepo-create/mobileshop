@@ -318,11 +318,64 @@ export function registerDatabaseHandlers() {
   });
 
   // ===== CLOUD BACKUP SETTINGS =====
+  /**
+   * The sentinel the renderer sends back to mean "keep the key you already have".
+   *
+   * The cloud form has to render SOMETHING in the API-key box for a shop that
+   * has already configured one, or the field looks empty and the owner retypes
+   * a credential they should not have to handle again. Sending the real key
+   * out to do that is the bug this replaces. The screen therefore shows a mask,
+   * and if the mask comes back unchanged the stored value is left alone.
+   *
+   * It is deliberately not a plausible key: no real Supabase, WebDAV or bearer
+   * token is a run of bullets, so it can never collide with one a shop
+   * actually pastes.
+   */
+  const KEY_UNCHANGED = '••••••••••••';
+
+  /** Keys under cloud_/sync_ whose VALUE is a credential, not a setting. */
+  const isCloudSecretKey = (key: string): boolean =>
+    /key$|secret$|token$|password$/i.test(key);
+
+  /**
+   * Cloud configuration for the settings screen — WITHOUT the credential.
+   *
+   * WHAT WAS MEASURED
+   * -----------------
+   * This handler used to return every `cloud_%` and `sync_%` row verbatim:
+   *
+   *     { "cloud_api_key": "sbp_LIVE_SUPABASE_SERVICE_ROLE_KEY_abcdef123456",
+   *       "cloud_url": "https://xyz.supabase.co",
+   *       "sync_secret": "SYNC_SHARED_SECRET_9988" }
+   *
+   * A Supabase service-role key is not a scoped token — it bypasses row level
+   * security entirely and grants full read and write over the project,
+   * including the storage bucket holding every backup of the shop's books. It
+   * was being handed to the renderer on every visit to the settings screen,
+   * where it then lived in React state, in the DOM as an input value, in any
+   * renderer crash dump, and within reach of anything that can run script in
+   * that window — which, because `window.open` children inherit the preload
+   * bundle, includes markup injected through a printed statement.
+   *
+   * The sibling handler `telegram:getSettings` already got this right: it
+   * answers `hasToken` plus a `tokenHint` and never the token. This is the
+   * same shape, for the same reason. The renderer does not need the value —
+   * every operation that USES it (`db:testCloudConnection`, `db:uploadToCloud`)
+   * runs in the main process, which can read it from the database itself.
+   */
   ipcMain.handle('db:getCloudSettings', async () => {
     const db = getDb();
     const settings: any = {};
     const rows = db.prepare("SELECT Key, Value FROM settings WHERE Key LIKE 'cloud_%' OR Key LIKE 'sync_%'").all() as any[];
     for (const row of rows) {
+      if (isCloudSecretKey(row.Key)) {
+        // Presence, not content. `hasCloudApiKey` lets the screen say
+        // "configured" without ever holding the credential.
+        settings[`has${row.Key.replace(/(^|_)([a-z])/g, (_m: string, _s: string, c: string) => c.toUpperCase())}`] =
+          Boolean(row.Value);
+        settings[row.Key] = row.Value ? KEY_UNCHANGED : '';
+        continue;
+      }
       settings[row.Key] = row.Value;
     }
     return settings;
@@ -330,20 +383,65 @@ export function registerDatabaseHandlers() {
 
   ipcMain.handle('db:saveCloudSettings', async (_event, settings: Record<string, string>) => {
     const db = getDb();
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return { success: false, message: 'بيانات السحابة غير صالحة' };
+    }
+
+    // This handler wrote ANY key it was handed. It is reached from the cloud
+    // tab, so it must write `cloud_%` and `sync_%` and nothing else — otherwise
+    // it is a second, unguarded route to every setting in the table, next door
+    // to the allow-list `settings:set` now enforces.
+    for (const key of Object.keys(settings)) {
+      if (!/^(cloud|sync)_[a-z0-9_]+$/.test(key)) {
+        return { success: false, message: `مفتاح غير مسموح: ${key}` };
+      }
+    }
+
     const stmt = db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)");
+    const readOne = db.prepare('SELECT Value FROM settings WHERE Key = ?');
     const tx = db.transaction(() => {
       for (const [key, value] of Object.entries(settings)) {
-        stmt.run(key, value);
+        // The mask coming back means the owner did not touch the field.
+        // Writing it would replace a working credential with bullets and break
+        // every backup silently — the failure would only surface the next time
+        // the shop needed the backup, which is the worst possible moment.
+        if (isCloudSecretKey(key) && String(value ?? '') === KEY_UNCHANGED) {
+          const existing = readOne.get(key) as any;
+          if (existing) continue;          // leave the stored value untouched
+          stmt.run(key, '');               // nothing stored: the mask means nothing
+          continue;
+        }
+        stmt.run(key, String(value ?? ''));
       }
     });
     tx();
     return { success: true };
   });
 
+  /**
+   * The credential the shop has stored, read in the main process.
+   *
+   * Both `db:testCloudConnection` and `db:uploadToCloud` used to take the key
+   * from the renderer's payload. Now that `db:getCloudSettings` no longer hands
+   * it out, the renderer sends the mask instead — so the value is resolved
+   * here, from the database, which is where it lived all along. This is
+   * strictly better than the old arrangement even ignoring the leak: the key
+   * used for the upload is now provably the one that was saved, rather than
+   * whatever the window happened to be holding.
+   */
+  const resolveCloudApiKey = (supplied: unknown): string => {
+    const given = typeof supplied === 'string' ? supplied : '';
+    if (given && given !== KEY_UNCHANGED) return given;
+    const db = getDb();
+    const row = db.prepare("SELECT Value FROM settings WHERE Key = 'cloud_api_key'").get() as any;
+    return row?.Value || '';
+  };
+
   // Test cloud connection
   ipcMain.handle('db:testCloudConnection', async (_event, config: {
     type: string; url: string; apiKey: string; bucket?: string;
   }) => {
+    config = { ...config, apiKey: resolveCloudApiKey(config?.apiKey) };
     try {
       if (config.type === 'supabase') {
         // Test Supabase connection
@@ -382,6 +480,7 @@ export function registerDatabaseHandlers() {
 
   // Upload backup to cloud
   ipcMain.handle('db:uploadToCloud', async (_event, config: { type: string; url: string; apiKey: string }) => {
+    config = { ...config, apiKey: resolveCloudApiKey(config?.apiKey) };
     const db = getDb();
     const dbPath = db.name;
     const today = businessToday();

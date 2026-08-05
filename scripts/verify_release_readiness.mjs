@@ -77,6 +77,10 @@ console.log('\n── 1. every readiness axis has a suite, and it runs ──');
     // The log said "append-only in practice". Measured: six tampering attacks
     // all succeeded and DELETE FROM security_events emptied it.
     ['security: the audit trail cannot be rewritten or erased', 'verify_audit_trail.mjs'],
+    // The database is NOT encrypted, and this suite keeps that statement
+    // honest. Measured: PRAGMA key is silently accepted on this build and
+    // writes cleartext, so a one-line "fix" would fake protection.
+    ['security: nothing claims encryption the build cannot deliver', 'verify_db_encryption_claim.mjs'],
     // A refused write must never pass for a successful one. Added after a
     // probe measured `hardenBinding` answering a refused `run()` with
     // `{changes: 0}` and letting the enclosing transaction COMMIT — a document

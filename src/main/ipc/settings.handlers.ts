@@ -14,6 +14,7 @@ import { validateRegistration } from '../../shared/registration';
 import { notifyDeveloperOfRegistration } from '../security/resetNotify';
 import { notifyDatabaseReset, notifyDeveloperOfReset } from '../security/resetNotify';
 import { recordSecurityEvent } from '../security/securityLog';
+import { checkAttemptAllowed, recordAttemptFailure, recordAttemptSuccess, lockoutMessage } from '../security/loginThrottle';
 
 export function registerSettingsHandlers() {
   // ===== DEVELOPER AUTHENTICATION =====
@@ -465,12 +466,28 @@ export function registerSettingsHandlers() {
    */
   ipcMain.handle('settings:resetRequestCode', async (_event, data: { userId: number; password: string }) => {
     const db = getDb();
+    // BRUTE FORCE. Step 1 of wiping the shop's entire database. The password
+    // was compared with no counter: measured at ~13 guesses/second, unlimited.
+    // Shares the 'dangerous' scope with the export and reset-password prompts,
+    // so an attacker cannot simply move between them after being locked out of
+    // one.
+    const throttleId = `user:${data?.userId}`;
+    const locked = checkAttemptAllowed('dangerous', throttleId);
+    if (locked) {
+      return { success: false, code: 'LOCKED_OUT', message: lockoutMessage(locked.lockedForSec) };
+    }
+
     const user = db.prepare('SELECT UserID, Username, PasswordHash FROM users WHERE UserID = ?')
       .get(data?.userId) as any;
-    if (!user) return { success: false, message: 'المستخدم غير موجود' };
+    if (!user) {
+      recordAttemptFailure('dangerous', throttleId);
+      return { success: false, message: 'المستخدم غير موجود' };
+    }
     if (!bcrypt.compareSync(String(data?.password ?? ''), user.PasswordHash)) {
+      recordAttemptFailure('dangerous', throttleId);
       return { success: false, message: 'كلمة المرور غير صحيحة' };
     }
+    recordAttemptSuccess('dangerous', throttleId);
 
     const target = shopTelegram();
     if (!target) {
@@ -498,14 +515,30 @@ export function registerSettingsHandlers() {
   ipcMain.handle('settings:resetDatabase', async (_event, data: { userId: number; password: string; code?: string }) => {
     const db = getDb();
 
+    // BRUTE FORCE. Step 2 of wiping the database. Because each handler stands
+    // on its own and re-checks the password, this is a second unlimited
+    // password oracle — measured at ~13 guesses/second with no counter. The
+    // Telegram code below is attempt-limited, but only once the password has
+    // been passed, so the password itself needed its own guard.
+    const throttleId = `user:${data?.userId}`;
+    const locked = checkAttemptAllowed('dangerous', throttleId);
+    if (locked) {
+      return { success: false, code: 'LOCKED_OUT', message: lockoutMessage(locked.lockedForSec) };
+    }
+
     // Proof 1: the password, re-verified here. Step 1 is not trusted to have
     // happened — each handler must stand on its own.
     const user = db.prepare('SELECT UserID, Username, PasswordHash FROM users WHERE UserID = ?')
       .get(data?.userId) as any;
-    if (!user) return { success: false, message: 'المستخدم غير موجود' };
+    if (!user) {
+      recordAttemptFailure('dangerous', throttleId);
+      return { success: false, message: 'المستخدم غير موجود' };
+    }
     if (!bcrypt.compareSync(String(data?.password ?? ''), user.PasswordHash)) {
+      recordAttemptFailure('dangerous', throttleId);
       return { success: false, message: 'كلمة المرور غير صحيحة' };
     }
+    recordAttemptSuccess('dangerous', throttleId);
 
     // Proof 2: the Telegram code, bound to the user who requested it.
     const code = String(data?.code ?? '').trim();

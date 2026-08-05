@@ -268,8 +268,20 @@ console.log('\n[5] Authorisation — no route reachable without a check');
   const users = raw('src/main/ipc/users.handlers.ts');
   const dbh = raw('src/main/ipc/database.handlers.ts');
   const setg = raw('src/main/ipc/settings.handlers.ts');
-  t('db:exportForOwner demands a username and password',
-    /ipcMain\.handle\('db:exportForOwner'[\s\S]{0,900}bcrypt\.compareSync/.test(dbh));
+  {
+    // Slice the handler by brace depth rather than guessing a character
+    // budget: adding a guard should not break an unrelated assertion.
+    const i = dbh.indexOf("ipcMain.handle('db:exportForOwner'");
+    let j = dbh.indexOf('(', i), d = 0, e = dbh.length;
+    for (; j < dbh.length; j++) {
+      const c = dbh[j];
+      if (c === '(') d++; else if (c === ')') { d--; if (d === 0) { e = j; break; } }
+    }
+    const body = dbh.slice(i, e);
+    t('db:exportForOwner demands a username and password',
+      /bcrypt\.compareSync/.test(body) && /username/.test(body) && /password/.test(body));
+    t('and refuses a non-administrator', /RoleID !== 1/.test(body));
+  }
   t('users:resetByDev demands a developer token',
     /ipcMain\.handle\('users:resetByDev'[\s\S]{0,200}verifyDevToken/.test(users));
   t('recovery:requestCode is administrators only',
@@ -281,6 +293,71 @@ console.log('\n[5] Authorisation — no route reachable without a check');
   // it must close permanently once used.
   t('setup cannot be re-run once complete',
     /setup_completed[\s\S]{0,260}تم إعداد النظام بالفعل/.test(setg));
+}
+
+// ------------------------------------------------------------------ 5b
+console.log('\n[5b] Every credential-verifying endpoint is rate limited');
+{
+  /**
+   * Enumerated from source, not from a list kept by hand — a list would go
+   * stale the moment someone adds a channel, which is exactly the failure this
+   * check exists to prevent.
+   *
+   * A handler "verifies a secret" if it calls bcrypt.compareSync, checks a dev
+   * token, or verifies a one-time code. Each must either throttle itself, or
+   * delegate to something that does.
+   */
+  const { readdirSync } = await import('node:fs');
+  const dir = join(ROOT, 'src/main/ipc');
+  const VERIFIES = /compareSync|verifyDevToken|devLogin\b|devLoginSigned|verifyCodeV2|verifyCode\(|verifyResetCode|verifyPhoneViaTelegram|requestResetCode/;
+  const THROTTLED = /checkAttemptAllowed|checkLoginAllowed|isLockedOut/;
+  // Delegates that carry their own lockout, verified in [4] above.
+  const SELF_GUARDED = /devLogin\b|devLoginSigned|verifyCode\(|verifyResetCode|requestResetCode|verifyDevToken|verifyPhoneViaTelegram/;
+
+  const unprotected = [];
+  let checked = 0;
+  for (const f of readdirSync(dir).filter((x) => x.endsWith('.ts'))) {
+    const src = readFileSync(join(dir, f), 'utf-8');
+    const re = /ipcMain\.handle\(\s*'([^']+)'/g;
+    let m;
+    while ((m = re.exec(src))) {
+      // Slice by brace depth so one handler cannot bleed into the next.
+      let i = src.indexOf('(', m.index), depth = 0, end = src.length;
+      for (; i < src.length; i++) {
+        const c = src[i];
+        if (c === '(') depth++;
+        else if (c === ')') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      const body = src.slice(m.index, end);
+      if (!VERIFIES.test(body)) continue;
+      checked++;
+      if (THROTTLED.test(body) || SELF_GUARDED.test(body)) continue;
+      unprotected.push(`${m[1]} (${f}:${src.slice(0, m.index).split('\n').length})`);
+    }
+  }
+  t('every credential-verifying endpoint is throttled',
+    unprotected.length === 0, unprotected.join(', '));
+  t('and there are endpoints to check (the scan is not silently empty)',
+    checked >= 10, `${checked} endpoints scanned`);
+
+  // The four found unprotected in this audit, named so a regression is obvious.
+  for (const [chan, file] of [
+    ['db:exportForOwner', 'src/main/ipc/database.handlers.ts'],
+    ['users:adminResetPassword', 'src/main/ipc/users.handlers.ts'],
+    ['settings:resetRequestCode', 'src/main/ipc/settings.handlers.ts'],
+    ['settings:resetDatabase', 'src/main/ipc/settings.handlers.ts'],
+  ]) {
+    const src = readFileSync(join(ROOT, file), 'utf-8');
+    const i = src.indexOf(`ipcMain.handle('${chan}'`);
+    let j = src.indexOf('(', i), d = 0, e = src.length;
+    for (; j < src.length; j++) {
+      const c = src[j];
+      if (c === '(') d++; else if (c === ')') { d--; if (d === 0) { e = j; break; } }
+    }
+    const body = src.slice(i, e);
+    t(`${chan} checks the throttle`, /checkAttemptAllowed\(/.test(body));
+    t(`${chan} records a failure`, /recordAttemptFailure\(/.test(body));
+  }
 }
 
 // ------------------------------------------------------------------ 6
@@ -309,8 +386,14 @@ if (!BASE) {
     b.onLoad({ filter: /.*/, namespace: 'st' }, () => ({ contents: `
       module.exports = {
         ipcMain: { handle: (c, f) => { globalThis.__AUTH_H.set(c, f); }, removeHandler: () => {} },
-        app: { getPath: () => ${JSON.stringify(dir)} },
-        dialog: {}, shell: {}, BrowserWindow: class {},
+        app: { getPath: () => ${JSON.stringify(dir)}, getVersion: () => '1.0.0' },
+        dialog: {
+          showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+          showSaveDialog: async () => ({ canceled: true }),
+          showMessageBox: async () => ({ response: 1 }),
+          showErrorBox: () => {},
+        },
+        shell: {}, BrowserWindow: class {},
       };`, loader: 'js' }));
   } };
   const out = await build({
@@ -319,6 +402,7 @@ if (!BASE) {
       export { registerAuthHandlers } from '${join(ROOT, 'src/main/ipc/auth.handlers.ts')}';
       export { registerSettingsHandlers } from '${join(ROOT, 'src/main/ipc/settings.handlers.ts')}';
       export { registerUsersHandlers } from '${join(ROOT, 'src/main/ipc/users.handlers.ts')}';
+      export { registerDatabaseHandlers } from '${join(ROOT, 'src/main/ipc/database.handlers.ts')}';
       export { getSession } from '${join(ROOT, 'src/main/security/session.ts')}';
       export { __resetLoginThrottle } from '${join(ROOT, 'src/main/security/loginThrottle.ts')}';
       export { getDb } from '${join(ROOT, 'src/main/database/connection.ts')}';`,
@@ -337,6 +421,7 @@ if (!BASE) {
   mod.registerAuthHandlers();
   mod.registerSettingsHandlers();
   mod.registerUsersHandlers();
+  mod.registerDatabaseHandlers();
   const call = (c, wc, ...a) => globalThis.__AUTH_H.get(c)({ sender: { id: wc } }, ...a);
   const db = mod.getDb();
 
@@ -387,6 +472,105 @@ if (!BASE) {
     JSON.stringify(afterLock).slice(0, 100));
   t('and the shop is told how long to wait',
     /دقيقة/.test(String(afterLock?.message || '')), String(afterLock?.message || '').slice(0, 70));
+
+  // ---- the four dangerous endpoints, end to end -------------------------
+  console.log('\n[7d] The dangerous endpoints lock out too');
+  {
+    mod.__resetLoginThrottle();
+    db.prepare("UPDATE users SET PasswordHash = ? WHERE Username = 'mohamed'")
+      .run(bcrypt.hashSync('StrongPass123', 10));
+    const uid = db.prepare("SELECT UserID v FROM users WHERE Username='mohamed'").get().v;
+
+    // Each of these re-prompts for a password and, on success, does something
+    // far worse than log in: dump the database, set anyone's password, or wipe
+    // everything. All four had NO counter — ~13 guesses/second, unlimited.
+    const doors = [
+      ['db:exportForOwner', () =>
+        call('db:exportForOwner', 9, { username: 'mohamed', password: 'wrong' })],
+      ['users:adminResetPassword', () =>
+        call('users:adminResetPassword', 9,
+          { adminId: uid, adminPassword: 'wrong', targetUserId: uid, newPassword: 'Zzz12345' })],
+      ['settings:resetRequestCode', () =>
+        call('settings:resetRequestCode', 9, { userId: uid, password: 'wrong' })],
+      ['settings:resetDatabase', () =>
+        call('settings:resetDatabase', 9, { userId: uid, password: 'wrong', code: '000000' })],
+    ];
+
+    for (const [name, attempt] of doors) {
+      mod.__resetLoginThrottle();
+      let lockedAt = 0;
+      for (let i = 1; i <= 8; i++) {
+        const r = await attempt();
+        if (r?.code === 'LOCKED_OUT') { lockedAt = i; break; }
+      }
+      t(`${name} locks out after a few wrong passwords`,
+        lockedAt > 0 && lockedAt <= 6, lockedAt ? `locked on attempt ${lockedAt}` : 'never locked');
+    }
+
+    // NOTE ON REDUNDANCY, measured rather than assumed.
+    //
+    // `db:exportForOwner` checks the throttle TWICE: once by username before
+    // the row is read, and once by user id after. Removing either one alone
+    // does NOT fail this suite — the other still refuses — so those two
+    // mutants are equivalent, not gaps. Removing BOTH is caught, and that was
+    // verified by doing it.
+    //
+    // The redundancy is deliberate: the username key is the only thing
+    // available before the lookup, and the user-id key is the only thing that
+    // matches what the reset prompts count under. Keeping both is what makes
+    // the lockout follow the PERSON across all three doors.
+
+    // The scope is SHARED, so being locked out of one does not simply move the
+    // attacker to the next prompt.
+    mod.__resetLoginThrottle();
+    for (let i = 0; i < 6; i++) {
+      await call('db:exportForOwner', 9, { username: 'mohamed', password: 'x' + i });
+    }
+    const spill = await call('settings:resetRequestCode', 9, { userId: uid, password: 'x' });
+    t('a lockout on one dangerous door closes the others',
+      spill?.code === 'LOCKED_OUT', JSON.stringify(spill).slice(0, 80));
+
+    // ...but it must NOT stop the shop trading.
+    //
+    // This is the reason the scopes are separate. Someone fumbling the export
+    // password must not lock the till out of SELLING — the shop would be dead
+    // for fifteen minutes with customers at the counter, which is a far worse
+    // outcome than the attack being defended against.
+    mod.__resetLoginThrottle();
+    for (let i = 0; i < 6; i++) {
+      await call('db:exportForOwner', 9, { username: 'mohamed', password: 'x' + i });
+    }
+    const canSell = await call('auth:login', 10,
+      { username: 'mohamed', password: 'StrongPass123' });
+    t('and the till can still log in and sell', canSell?.success === true,
+      JSON.stringify(canSell).slice(0, 80));
+
+    // The reverse, too: failing at the export prompt must not consume the
+    // login allowance. Five wrong exports then five wrong logins must still
+    // leave the sixth LOGIN as the one that locks — not the first.
+    mod.__resetLoginThrottle();
+    for (let i = 0; i < 4; i++) {
+      await call('db:exportForOwner', 9, { username: 'mohamed', password: 'y' + i });
+    }
+    const loginAfter = await call('auth:login', 11,
+      { username: 'mohamed', password: 'StrongPass123' });
+    t('export failures do not consume the login allowance',
+      loginAfter?.success === true && loginAfter?.code !== 'LOCKED_OUT',
+      JSON.stringify(loginAfter).slice(0, 70));
+
+    // An honest mistake must not lock the owner out of their own data.
+    mod.__resetLoginThrottle();
+    for (let i = 0; i < 4; i++) {
+      await call('db:exportForOwner', 9, { username: 'mohamed', password: 'typo' + i });
+    }
+    const after4 = await call('db:exportForOwner', 9,
+      { username: 'mohamed', password: 'StrongPass123' });
+    t('four typos then the right password is accepted',
+      after4?.code !== 'LOCKED_OUT',
+      // The dialog is stubbed to cancel, so "not locked out" is the assertion:
+      // getting past the password is what matters here.
+      JSON.stringify(after4).slice(0, 80));
+  }
 
   // ---- revocation, end to end
   console.log('\n[7c] Revocation, through the real handlers');

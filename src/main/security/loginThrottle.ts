@@ -1,42 +1,51 @@
 /**
- * Brute-force protection for the shop login.
+ * Brute-force protection for every endpoint that verifies a secret.
  *
  * WHY THIS EXISTS
  * ---------------
  * `auth:login` had no rate limit of any kind. Measured against the real
  * handler: 100 wrong passwords in 7.8 seconds — about 13 guesses a second,
- * indefinitely, with no delay and no lockout. The developer console has had a
- * lockout since it was written (`devAuth.ts`); the door the shop actually uses
- * had none.
+ * indefinitely, with no delay and no lockout.
  *
- * bcrypt at cost 10 is the only thing slowing an attacker down, and that is a
- * budget, not a defence: a six-character lowercase password is ~300 million
- * combinations, but the passwords a shop actually chooses are not random. At
- * 13/sec a common-password list of 100,000 entries is exhausted in just over
- * two hours, unattended, against a till left on a counter.
+ * A later sweep of every channel that verifies a credential found four more
+ * on the same footing, and they are not minor doors:
  *
- * WHAT IT DOES
- * ------------
- * Per-username, in memory, in the main process:
+ *   db:exportForOwner         — dumps the whole database to a file
+ *   users:adminResetPassword  — sets any user's password
+ *   settings:resetRequestCode — step 1 of wiping the database
+ *   settings:resetDatabase    — step 2 of wiping the database
  *
- *   - after 5 consecutive failures the account is locked for 15 minutes;
- *   - a successful login clears the counter immediately;
- *   - the remaining time is reported, so an owner who genuinely forgot is not
- *     left staring at a generic refusal.
+ * All four called `bcrypt.compareSync` directly with no counter. Measured:
+ * ~13 attempts/second each, unlimited. bcrypt at cost 10 is the only thing
+ * slowing an attacker down, and that is a budget, not a defence: a list of
+ * 100,000 common passwords is exhausted in about two hours, unattended,
+ * against a till left on a counter overnight.
  *
- * WHY PER USERNAME, NOT PER WINDOW
- * --------------------------------
- * The attacker controls the renderer, so anything keyed on the window id is
- * defeated by opening another one. The username is the thing being attacked.
+ * Notably `auth:login` locking out did NOT protect them — each has its own
+ * password prompt, so an attacker simply guesses at one of the others.
+ *
+ * SCOPES
+ * ------
+ * Attempts are counted per (scope, identity). A wrong password on the export
+ * screen must not lock the till out of selling, and locking the export screen
+ * must not be avoidable by walking to the reset screen — so the destructive
+ * operations share one scope while ordinary login keeps its own.
+ *
+ * WHY PER IDENTITY, NOT PER CONNECTION
+ * ------------------------------------
+ * There is no network and no IP here: this is IPC inside one desktop process.
+ * The renderer is the caller and an attacker controls it, so anything keyed on
+ * a window id is defeated by opening another window. The account being
+ * attacked is the only stable key.
  *
  * WHY IN MEMORY
  * -------------
  * A restart clears it, which is a real limitation — but the alternative is a
  * database write on every failed attempt, which is itself a denial-of-service
- * lever and adds a write path to the one operation that must work when the
- * database is in trouble. Restarting an Electron app is not free or silent for
- * someone standing at the counter, and the developer-console lockout in
- * `devAuth.ts` makes the same trade for the same reason.
+ * lever and adds a write path to operations that must work when the database
+ * is in trouble (one of them is the database RESET). Restarting an Electron
+ * app is not free or silent for someone standing at the counter, and the
+ * developer-console lockout in `devAuth.ts` makes the same trade.
  *
  * WHY NOT SILENT
  * --------------
@@ -48,16 +57,28 @@
  * what is happening to their own till.
  */
 
-/** Consecutive failures before the account is locked. */
+/** Consecutive failures before the identity is locked. */
 const MAX_ATTEMPTS = 5;
 
 /** How long the lock lasts. Long enough to make guessing pointless, short
  *  enough that a shop that fat-fingered its own password can trade again. */
 const LOCKOUT_MS = 15 * 60 * 1000;
 
-/** Failures older than this are forgotten, so an honest typo weeks ago does
+/** Failures older than this are forgotten, so an honest typo last month does
  *  not count towards today's lockout. */
 const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * The buckets attempts are counted in.
+ *
+ * `login`     — the ordinary shop login.
+ * `dangerous` — operations that export, reset a password, or wipe the
+ *               database. Shared deliberately: they are all "prove you are the
+ *               owner", so guessing at one must count against all of them.
+ * `code`      — typed one-time codes, on top of the per-code attempt limit in
+ *               `confirmCode.ts`, which only guards a single outstanding code.
+ */
+export type ThrottleScope = 'login' | 'dangerous' | 'code';
 
 interface Entry {
   failures: number;
@@ -67,16 +88,19 @@ interface Entry {
 
 const entries = new Map<string, Entry>();
 
-/** Usernames are matched case-insensitively so `Admin` cannot dodge the lock. */
-const key = (username: string) => String(username ?? '').trim().toLowerCase();
+/** Identities are matched case-insensitively so `Admin` cannot dodge a lock. */
+const keyFor = (scope: ThrottleScope, identity: string | number) =>
+  `${scope}:${String(identity ?? '').trim().toLowerCase()}`;
 
 /**
- * Whether this username may attempt a login right now.
+ * Whether this identity may attempt again right now.
  *
  * @returns `null` when allowed, or the seconds remaining on the lock.
  */
-export function checkLoginAllowed(username: string): { lockedForSec: number } | null {
-  const k = key(username);
+export function checkAttemptAllowed(
+  scope: ThrottleScope, identity: string | number,
+): { lockedForSec: number } | null {
+  const k = keyFor(scope, identity);
   const e = entries.get(k);
   if (!e) return null;
 
@@ -84,17 +108,17 @@ export function checkLoginAllowed(username: string): { lockedForSec: number } | 
   if (e.lockedUntil > now) {
     return { lockedForSec: Math.ceil((e.lockedUntil - now) / 1000) };
   }
-  // The lock has expired, or the counting window has. Either way, start clean —
-  // otherwise a single old failure would make the next four fatal.
+  // The lock has expired, or the counting window has. Either way start clean —
+  // otherwise one stale failure would make the next four fatal.
   if (e.lockedUntil !== 0 || now - e.firstFailureAt > ATTEMPT_WINDOW_MS) {
     entries.delete(k);
   }
   return null;
 }
 
-/** Records a failed attempt, locking the account once the limit is reached. */
-export function recordLoginFailure(username: string): void {
-  const k = key(username);
+/** Records a failed attempt, locking the identity once the limit is reached. */
+export function recordAttemptFailure(scope: ThrottleScope, identity: string | number): void {
+  const k = keyFor(scope, identity);
   const now = Date.now();
   const e = entries.get(k);
 
@@ -111,10 +135,30 @@ export function recordLoginFailure(username: string): void {
   }
 }
 
-/** Clears the record. Called on a successful login. */
-export function recordLoginSuccess(username: string): void {
-  entries.delete(key(username));
+/** Clears the record. Called after a successful verification. */
+export function recordAttemptSuccess(scope: ThrottleScope, identity: string | number): void {
+  entries.delete(keyFor(scope, identity));
 }
+
+/**
+ * The Arabic refusal shown while an identity is locked.
+ *
+ * One wording for every endpoint, so the shop learns the behaviour once.
+ */
+export function lockoutMessage(lockedForSec: number): string {
+  const mins = Math.max(1, Math.ceil(lockedForSec / 60));
+  return `تم إيقاف المحاولات مؤقتاً بعد عدة محاولات خاطئة - أعد المحاولة بعد ${mins} دقيقة`;
+}
+
+// ---------------------------------------------------------------------------
+// Login-specific wrappers.
+//
+// `auth:login` was throttled first and reads more clearly with named helpers.
+// They are thin aliases so there is still exactly one implementation.
+// ---------------------------------------------------------------------------
+export const checkLoginAllowed = (username: string) => checkAttemptAllowed('login', username);
+export const recordLoginFailure = (username: string) => recordAttemptFailure('login', username);
+export const recordLoginSuccess = (username: string) => recordAttemptSuccess('login', username);
 
 /** Exposed so a suite can assert the limits rather than restate them. */
 export const LOGIN_THROTTLE = { maxAttempts: MAX_ATTEMPTS, lockoutMs: LOCKOUT_MS } as const;

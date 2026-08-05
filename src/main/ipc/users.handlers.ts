@@ -5,6 +5,7 @@ import { verifyDevToken } from '../security/devAuth';
 import { destroyAllSessionsForUser } from '../security/session';
 import { requestResetCode, verifyResetCode, notifyResetDone } from '../security/passwordRecovery';
 import { recordSecurityEvent } from '../security/securityLog';
+import { checkAttemptAllowed, recordAttemptFailure, recordAttemptSuccess, lockoutMessage } from '../security/loginThrottle';
 
 
 /**
@@ -222,11 +223,28 @@ export function registerUsersHandlers() {
   // Admin resets another user's password (requires admin's current password)
   ipcMain.handle('users:adminResetPassword', async (_event, data: { adminId: number; adminPassword: string; targetUserId: number; newPassword: string }) => {
     const db = getDb();
+
+    // BRUTE FORCE. This re-prompts for the administrator's password and, on
+    // success, sets ANY user's password — including another administrator's.
+    // It compared with no counter: measured at ~13 guesses/second, unlimited.
+    // Guessing here is strictly better for an attacker than guessing at the
+    // login screen, because it hands over the whole user table.
+    const throttleId = `user:${data?.adminId}`;
+    const locked = checkAttemptAllowed('dangerous', throttleId);
+    if (locked) {
+      return { success: false, code: 'LOCKED_OUT', message: lockoutMessage(locked.lockedForSec) };
+    }
+
     const admin = db.prepare('SELECT PasswordHash FROM users WHERE UserID = ?').get(data.adminId) as any;
-    if (!admin) return { success: false, message: 'المدير غير موجود' };
+    if (!admin) {
+      recordAttemptFailure('dangerous', throttleId);
+      return { success: false, message: 'المدير غير موجود' };
+    }
     if (!bcrypt.compareSync(data.adminPassword, admin.PasswordHash)) {
+      recordAttemptFailure('dangerous', throttleId);
       return { success: false, message: 'كلمة المرور الحالية غير صحيحة' };
     }
+    recordAttemptSuccess('dangerous', throttleId);
     if (typeof data.newPassword !== 'string' || data.newPassword.length < 6) {
       return { success: false, message: 'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل' };
     }

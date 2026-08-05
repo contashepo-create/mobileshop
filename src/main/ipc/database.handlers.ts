@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { businessToday } from '../../shared/businessDate';
 import bcrypt from 'bcryptjs';
 import { recordSecurityEvent } from '../security/securityLog';
+import { checkAttemptAllowed, recordAttemptFailure, recordAttemptSuccess, lockoutMessage } from '../security/loginThrottle';
 import {
   testTelegram, sendBackupToTelegram, looksLikeBotToken, looksLikeChatId,
 } from '../backup/telegramBackup';
@@ -594,21 +595,59 @@ export function registerDatabaseHandlers() {
       return { success: false, message: 'أدخل اسم المستخدم وكلمة المرور' };
     }
 
+    // BRUTE FORCE.
+    //
+    // This channel is PUBLIC (it exists so the owner can get their data out
+    // when they cannot log in) and it dumps the entire database. It compared
+    // the password with no counter at all: measured at ~13 guesses/second,
+    // unlimited. Throttling `auth:login` does not help here — this prompt is
+    // a separate door with its own password field.
+    //
+    // Checked before the row is fetched and before bcrypt runs, so a locked
+    // identity costs nothing to refuse and reveals nothing new.
+    // Keyed by the username here because the row has not been read yet; once
+    // it has, the USER ID is used, so this door shares an identity with the
+    // password-reset and database-reset prompts. Both keys are registered on
+    // failure, so a lockout follows the person rather than the field they
+    // happened to type into.
+    const locked = checkAttemptAllowed('dangerous', username);
+    if (locked) {
+      return { success: false, code: 'LOCKED_OUT', message: lockoutMessage(locked.lockedForSec) };
+    }
+
     const user = db.prepare(
       'SELECT UserID, Username, PasswordHash, RoleID, IsActive FROM users WHERE Username = ?',
     ).get(username) as any;
+    if (user) {
+      const byId = checkAttemptAllowed('dangerous', `user:${user.UserID}`);
+      if (byId) {
+        return { success: false, code: 'LOCKED_OUT', message: lockoutMessage(byId.lockedForSec) };
+      }
+    }
     // One uniform message, and a dummy compare, so this cannot be used to
     // discover which usernames exist while the app is otherwise locked.
     if (!user || !user.IsActive) {
       bcrypt.compareSync(password, '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvaliduO');
+      // Counted even for an unknown username, or guessing names is never
+      // slowed and the account that DOES exist is the one seen to lock.
+      recordAttemptFailure('dangerous', username);
       return { success: false, message: 'بيانات الدخول غير صحيحة' };
     }
     if (!bcrypt.compareSync(password, user.PasswordHash)) {
+      recordAttemptFailure('dangerous', username);
+      recordAttemptFailure('dangerous', `user:${user.UserID}`);
       return { success: false, message: 'بيانات الدخول غير صحيحة' };
     }
     if (user.RoleID !== 1) {
+      // A correct password on a non-admin account is still a failed attempt to
+      // reach this operation; otherwise a cashier's own password is a free,
+      // unlimited oracle for probing the rest.
+      recordAttemptFailure('dangerous', username);
+      recordAttemptFailure('dangerous', `user:${user.UserID}`);
       return { success: false, message: 'التصدير متاح لحساب المدير فقط' };
     }
+    recordAttemptSuccess('dangerous', username);
+    recordAttemptSuccess('dangerous', `user:${user.UserID}`);
 
     const result = await dialog.showOpenDialog({
       title: 'اختر مجلداً لحفظ بياناتك',

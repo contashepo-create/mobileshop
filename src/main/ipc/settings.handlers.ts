@@ -15,6 +15,7 @@ import { notifyDeveloperOfRegistration } from '../security/resetNotify';
 import { notifyDatabaseReset, notifyDeveloperOfReset } from '../security/resetNotify';
 import { recordSecurityEvent } from '../security/securityLog';
 import { checkAttemptAllowed, recordAttemptFailure, recordAttemptSuccess, lockoutMessage } from '../security/loginThrottle';
+import { stripControlChars, LIMITS } from '../../shared/validate';
 
 export function registerSettingsHandlers() {
   // ===== DEVELOPER AUTHENTICATION =====
@@ -139,9 +140,124 @@ export function registerSettingsHandlers() {
     return row?.Value ?? null;
   });
 
+  /**
+   * Keys the settings screens may NOT write.
+   *
+   * `settings:get` already refuses to READ these. Writing them was wide open,
+   * which is the asymmetry this closes: closing the door and leaving the
+   * window is not a control.
+   *
+   * MEASURED against the real handler — every one of these succeeded and was
+   * stored:
+   *
+   *   settings:set('db_path', 'PWNED')
+   *       Repoints the database. `db:switchToShared` writes this key
+   *       deliberately, after validating the folder and copying the file; a
+   *       raw write points the next launch at a path that does not exist.
+   *
+   *   settings:set('cloud_api_key', 'PWNED')
+   *   settings:set('telegram_bot_token', 'PWNED')
+   *       Bearer credentials. `settings:get` hides them behind `isSecretKey`
+   *       precisely because holding one is holding the account — but they
+   *       could be OVERWRITTEN, which silently breaks backups and, in the
+   *       Telegram case, lets a caller redirect the shop's alerts to a bot
+   *       they control.
+   *
+   *   settings:set('setup_completed', '0')
+   *       Re-opens `setup:complete`, which is unauthenticated by design.
+   *
+   *   settings:set('owner_capital', '999999')
+   *       The equity figure the balance sheet is built on. It has its own
+   *       permission-gated channel (`capital:set`); this bypassed it.
+   *
+   * Each of these has a proper channel that does the accompanying work. The
+   * generic key/value setter is for the ordinary preferences the settings
+   * screens edit, and that is now all it can reach.
+   *
+   * NOT IN THIS LIST, DELIBERATELY: the four `allow_negative_*` switches.
+   * They ARE dangerous — `allow_negative_stock` turns off the check that stops
+   * a sale of goods the shop does not have — but they are also four real
+   * checkboxes on the General Settings tab, owned by the shop and saved
+   * through `settings:setMany` behind the `settings.edit` permission. Blocking
+   * them here would have broken a working feature to close a hole that the
+   * permission already governs. What they get instead is a VALUE check below,
+   * so the switch can only ever hold "0" or "1" — an unrecognised value read
+   * by `allowNeg?.Value !== '1'` is not a third state, it is an accident
+   * waiting to be interpreted.
+   */
+  const UNWRITABLE_KEYS = new Set([
+    'db_path',
+    'setup_completed',
+    'owner_capital',
+    'phone_verified',
+    'phone_verified_at',
+    'registration_consent',
+    'registered_at',
+    'license_summary',
+  ]);
+
+  /**
+   * Keys whose value must be exactly "0" or "1".
+   *
+   * These drive `if (setting?.Value !== '1')` branches all over the trading
+   * handlers, so anything else silently means "off" while the checkbox that
+   * wrote it may well be showing as on.
+   */
+  const BOOLEAN_KEYS = new Set([
+    'allow_negative_stock',
+    'allow_negative_cash',
+    'allow_negative_customer',
+    'allow_negative_supplier',
+    'vat_enabled',
+  ]);
+
+  /**
+   * True for a key the generic setter must refuse.
+   *
+   * The `cloud_`, `sync_` and `telegram_` families are matched by PREFIX, the
+   * same way `isSecretKey` matches them for reading, so a credential added
+   * later is covered without anyone remembering to add it here.
+   */
+  const isUnwritableKey = (key: string): boolean =>
+    UNWRITABLE_KEYS.has(key)
+    || /^cloud_/.test(key) || /^sync_/.test(key) || /^telegram_/.test(key);
+
+  /**
+   * Validates one key/value pair for the generic setters.
+   *
+   * The key shape is restricted as well as the key NAME. Settings are read
+   * with `WHERE Key = ?` and rendered into the settings screens, and a key of
+   * 100,000 characters was measured being stored — that is a row nobody can
+   * see, delete or explain.
+   */
+  const checkSetting = (key: unknown, value: unknown): string | null => {
+    if (typeof key !== 'string' || !key.trim()) return 'مفتاح الإعداد مطلوب';
+    if (key.length > LIMITS.SETTING_KEY) return 'مفتاح الإعداد أطول من الحد المسموح';
+    if (!/^[a-zA-Z0-9_.-]+$/.test(key)) return 'مفتاح الإعداد غير صالح';
+    if (isUnwritableKey(key)) {
+      return 'هذا الإعداد لا يمكن تغييره من هنا - استخدم الشاشة المخصصة له';
+    }
+    if (value === null || value === undefined) return null;
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
+      return 'قيمة الإعداد يجب أن تكون نصاً';
+    }
+    if (String(value).length > LIMITS.SETTING_VALUE) {
+      return 'قيمة الإعداد أطول من الحد المسموح';
+    }
+    if (BOOLEAN_KEYS.has(key) && String(value) !== '0' && String(value) !== '1') {
+      return 'قيمة هذا الإعداد يجب أن تكون 0 أو 1';
+    }
+    return null;
+  };
+
   // Set setting
   ipcMain.handle('settings:set', async (_event, key: string, value: string) => {
     const db = getDb();
+    const problem = checkSetting(key, value);
+    if (problem) return { success: false, message: problem };
+    // Control characters are stripped for the same reason as everywhere else:
+    // these values are printed on invoices and written into CSV exports.
+    value = stripControlChars(String(value ?? ''));
     db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)').run(key, value);
     // Writing a key the developer currently controls would appear to work and
     // then silently revert on the next sync, so say so explicitly.
@@ -155,10 +271,26 @@ export function registerSettingsHandlers() {
   // Set multiple settings
   ipcMain.handle('settings:setMany', async (_event, settings: Record<string, string>) => {
     const db = getDb();
+    // The bulk setter is the same hole as the single one, reached in a loop —
+    // and it is the one the settings screens actually use, so it needed the
+    // identical rule rather than a weaker one.
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return { success: false, message: 'بيانات الإعدادات غير صالحة' };
+    }
+    const entries = Object.entries(settings);
+    if (entries.length > 200) {
+      return { success: false, message: 'عدد الإعدادات أكبر من الحد المسموح' };
+    }
+    // Every pair is checked BEFORE anything is written, so a rejected key
+    // cannot leave half the batch applied.
+    for (const [key, value] of entries) {
+      const problem = checkSetting(key, value);
+      if (problem) return { success: false, message: `${key}: ${problem}` };
+    }
     const stmt = db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)');
     const tx = db.transaction(() => {
-      for (const [key, value] of Object.entries(settings)) {
-        stmt.run(key, value);
+      for (const [key, value] of entries) {
+        stmt.run(key, stripControlChars(String(value ?? '')));
       }
     });
     tx();

@@ -88,7 +88,7 @@ const voucher = o => call('vouchers:create', {
   CashAccountID: 1, fiscalYearId: 1, userId: 1, ...o,
 });
 const service = o => call('serviceSales:create', {
-  ServiceType: 'transfer', Provider: 'v', TargetPhone: '0100',
+  ServiceType: 'balance_transfer', Provider: 'vodafone', TargetPhone: '0100',
   CustomerID: 1, CustomerName: 'Ahmed', CustomerPhone: '0100',
   PaymentMethod: 'cash', Notes: '', Amount: 1000, ServiceCost: 0,
   TransferCost: 5, ChargeAmount: 1020, Date: '2026-07-30', PaidAmount: 1020,

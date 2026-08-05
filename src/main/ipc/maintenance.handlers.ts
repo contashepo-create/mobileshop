@@ -4,6 +4,10 @@ import { getCallerUserId } from '../security/ipcGuard';
 import { nextDocNumber } from '../database/docNumber';
 import { deductStock, restoreStock } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
+import {
+  oneOf, requireText, optionalText, optionalNote, optionalDate,
+  LIMITS, MAINTENANCE_WORKFLOW_STATUSES,
+} from '../../shared/validate';
 
 const statusLabels: Record<string, string> = {
   received: 'مستلم', inspecting: 'فحص', in_progress: 'قيد العمل',
@@ -158,10 +162,63 @@ export function registerMaintenanceHandlers() {
   // Update ticket status - REQUIRES notes
   ipcMain.handle('maintenance:updateStatus', async (event, ticketId: number, status: string, notes: string, _userId?: number) => {
     const userId = getCallerUserId(event, _userId);
-    if (!notes.trim()) {
+    // `notes.trim()` on a non-string threw a TypeError that the guard turned
+    // into a generic "operation failed", hiding which field was wrong.
+    const note = requireText(notes, 'الملاحظات', LIMITS.NOTES);
+    if (!note.ok) {
       return { success: false, message: 'الملاحظات إجبارية عند تغيير الحالة' };
     }
+
+    // The status is a workflow position, and this handler may only move the
+    // ticket WITHIN the workshop.
+    //
+    // It accepted any string at all. Two separate failures came out of that:
+    //
+    //   1. An unrecognised value — measured with `'ANYTHING'` and with `''` —
+    //      was stored, and the ticket then matched no filter on the
+    //      maintenance screen. The device was in the shop and invisible.
+    //
+    //   2. Far worse, `'delivered'` was accepted. `maintenance:deliver` is the
+    //      handler that raises the invoice, banks the payment, books the
+    //      technician commission and consumes the parts, and it refuses a
+    //      ticket whose status is already `delivered`. So one call to THIS
+    //      channel marked the device handed over and permanently locked the
+    //      only path that bills for it. MEASURED on a ticket with an agreed
+    //      cost of 800: after `updateStatus(..., 'delivered', ...)`,
+    //      `maintenance:deliver` answered "تم تسليم هذه التذكرة بالفعل",
+    //      deliveries recorded 0, cash unchanged at 10,000, customer balance
+    //      0. The repair was done, the phone was gone, and the 800 could never
+    //      be charged.
+    //
+    // `delivered`, `cancelled` and `returned` are therefore reachable only
+    // through `maintenance:deliver`, `:cancel` and `:return`, each of which
+    // writes the money side in the same transaction as the status.
+    const st = oneOf(status, 'حالة التذكرة', MAINTENANCE_WORKFLOW_STATUSES);
+    if (!st.ok) {
+      return {
+        success: false,
+        message: 'حالة التذكرة غير صالحة. التسليم والإلغاء والإرجاع تتم من '
+          + 'أزرارها الخاصة حتى تُسجَّل الفاتورة والمبالغ معها.',
+      };
+    }
+    status = st.value;
+    notes = note.value;
+
     const db = getDb();
+
+    // A ticket that has already been delivered, cancelled or returned is
+    // finished. Moving it back to `in_progress` would let it be delivered a
+    // SECOND time — a second invoice and a second payment for one repair.
+    const current = db.prepare(
+      'SELECT Status FROM maintenance_tickets WHERE TicketID = ?').get(ticketId) as any;
+    if (!current) return { success: false, message: 'التذكرة غير موجودة' };
+    if (current.Status === 'delivered' || current.Status === 'cancelled') {
+      return {
+        success: false,
+        message: `التذكرة ${statusLabels[current.Status] || current.Status} - لا يمكن تغيير حالتها`,
+      };
+    }
+
     db.transaction(() => {
       db.prepare('UPDATE maintenance_tickets SET Status = ? WHERE TicketID = ?').run(status, ticketId);
       db.prepare(`

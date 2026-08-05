@@ -3,6 +3,24 @@ import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
 import { checkAmounts } from '../../shared/money';
+import { oneOf, requireText, optionalText, optionalId, LIMITS } from '../../shared/validate';
+
+/**
+ * The service kinds and providers the screen offers.
+ *
+ * Copied from `serviceTypes` / `providers` in ServicesPage.tsx, which is the
+ * only caller. MEASURED before the allow-list: `ServiceType: 'ALIEN'` was
+ * accepted and stored, and the list screen renders the type through
+ * `typeLabels[type] || type` — so the raw string is printed to the user, and
+ * the customer statement shows it as the transaction description
+ * (`COALESCE(ss.ServiceType, 'خدمة')` in statement.handlers.ts:394).
+ */
+const SERVICE_TYPES = [
+  'balance_transfer', 'bill_payment', 'topup', 'electronic_payment', 'other',
+] as const;
+const SERVICE_PROVIDERS = [
+  'vodafone', 'orange', 'etisalat', 'instapay', 'fawry', 'other',
+] as const;
 
 export function registerServicesHandlers() {
   // List service sales
@@ -57,6 +75,45 @@ export function registerServicesHandlers() {
       [data.TransferCost ?? 0, 'رسوم التحويل'],
     ]);
     if (badMoney) return { success: false, message: badMoney };
+
+    const sType = oneOf(data.ServiceType, 'نوع الخدمة', SERVICE_TYPES);
+    if (!sType.ok) return { success: false, message: sType.message };
+    const sProvider = oneOf(data.Provider || 'other', 'المزوّد', SERVICE_PROVIDERS);
+    if (!sProvider.ok) return { success: false, message: sProvider.message };
+
+    // The destination number is what the shop is paid to send money TO. An
+    // empty one was accepted and stored, leaving a transfer nobody can prove
+    // was made and no way to chase it with the provider.
+    const target = requireText(data.TargetPhone, 'رقم الوجهة', LIMITS.PHONE);
+    if (!target.ok) return { success: false, message: target.message };
+
+    const sNotes = optionalText(data.Notes, 'ملاحظات', LIMITS.NOTES);
+    if (!sNotes.ok) return { success: false, message: sNotes.message };
+    const sCustName = optionalText(data.CustomerName, 'اسم العميل', LIMITS.NAME);
+    if (!sCustName.ok) return { success: false, message: sCustName.message };
+    const sCustPhone = optionalText(data.CustomerPhone, 'هاتف العميل', LIMITS.PHONE);
+    if (!sCustPhone.ok) return { success: false, message: sCustPhone.message };
+
+    // A named customer must exist: the balance update below is a bare
+    // `UPDATE ... WHERE CustomerID = ?`, which matches zero rows in silence
+    // and leaves the unpaid remainder owed by nobody.
+    const sCustId = optionalId(data.CustomerID, 'العميل');
+    if (!sCustId.ok) return { success: false, message: sCustId.message };
+    if (sCustId.value !== null) {
+      const exists = db.prepare('SELECT 1 AS ok FROM customers WHERE CustomerID = ?').get(sCustId.value);
+      if (!exists) return { success: false, message: 'العميل غير موجود' };
+    }
+
+    data = {
+      ...data,
+      ServiceType: sType.value,
+      Provider: sProvider.value,
+      TargetPhone: target.value,
+      Notes: sNotes.value ?? undefined,
+      CustomerName: sCustName.value ?? undefined,
+      CustomerPhone: sCustPhone.value ?? undefined,
+      CustomerID: sCustId.value ?? undefined,
+    };
 
     try {
       const dateStr = businessToday();

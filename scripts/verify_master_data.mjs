@@ -64,8 +64,17 @@ const newAccount = o => raw('cashAccounts:create', {
   AccountName: 'Acc', AccountType: 'safe', Balance: 0,
   BankName: null, AccountNumber: null, ...o,
 });
+// ItemType is 'phone', 'accessory' or 'service' — the values the rest of the
+// codebase compares against. This fixture said 'part', which matches NOTHING:
+// `items:create` defaults an absent type to 'accessory', and the type decides
+// whether an item is serial-tracked and how it is costed, so a row saved as
+// 'part' was neither a phone nor an accessory to any reader.
+//
+// `items:create` now validates the value against that list, so the fixture has
+// to state a real one. Found by running this suite after the validation was
+// added — the fixture had been quietly wrong the whole time.
 const newItem = o => raw('items:create', {
-  ItemName: 'Item', ItemType: 'part', IsSerialized: 0, SalePrice: 100,
+  ItemName: 'Item', ItemType: 'accessory', IsSerialized: 0, SalePrice: 100,
   MinStock: 0, Barcode: '', CategoryID: null, Unit: 'قطعة', ...o,
 });
 // RentType is 'expense' or 'income' — the two values every reader in the
@@ -167,8 +176,12 @@ console.log('\n[3] Rent is an amount of money, so it follows the same rule');
 console.log('\n[4] A payment machine always starts empty');
 {
   seed();
+  // MethodType is 'pos_machine', 'digital_wallet' or 'transfer' — the three
+  // `<option>` values in PaymentMethodsPage.tsx. This fixture said 'wallet',
+  // which the form cannot produce and the list badge does not recognise.
+  // `paymentMethods:create` now validates it, so the fixture has to be real.
   await raw('paymentMethods:create', {
-    MethodName: 'Wallet', MethodType: 'wallet', Provider: null, PhoneNumber: null,
+    MethodName: 'Wallet', MethodType: 'digital_wallet', Provider: null, PhoneNumber: null,
   });
   // The INSERT hardcodes 0 rather than reading the payload, which is the
   // strongest possible guard. Pinned so it stays that way.

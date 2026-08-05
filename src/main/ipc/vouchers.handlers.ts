@@ -4,6 +4,10 @@ import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
 import { applyToInstalment, remainingOn } from './rentSettle';
 import { checkAmounts } from '../../shared/money';
+import {
+  oneOf, optionalOneOf, requireText, optionalText,
+  LIMITS, VOUCHER_TYPES, PARTY_TYPES,
+} from '../../shared/validate';
 
 export function registerVouchersHandlers() {
   ipcMain.handle('vouchers:get', async (_event, voucherId: number) => {
@@ -50,6 +54,49 @@ export function registerVouchersHandlers() {
     // that was the exact opposite of the truth.
     const badAmount = checkAmounts([[data.Amount, 'مبلغ السند', { allowZero: false }]]);
     if (badAmount) return { success: false, message: badAmount };
+
+    // The TYPE decides which way the money goes, so it is the one field that
+    // must be exactly one of two words.
+    //
+    // Nothing checked it. `sign` below is `VoucherType === 'receipt' ? 1 : -1`,
+    // so ANY other string — including `'RECEIPT'` with capitals — fell to the
+    // -1 branch and took the amount OUT of the till while the document read as
+    // money coming in. Worse, every report and statement filters
+    // `WHERE VoucherType = 'receipt'` or `= 'payment'` exactly, so the row
+    // matched neither and became invisible.
+    //
+    // MEASURED: `VoucherType: 'RECEIPT'`, 5,000 EGP. The safe went from 10,000
+    // to 5,000, `SELECT COUNT(*) WHERE VoucherType IN ('receipt','payment')`
+    // returned 0 of 1, and the profit-and-loss statement showed no expense.
+    // Five thousand pounds left the shop and no report in the system could say
+    // where it went.
+    const vType = oneOf(data.VoucherType, 'نوع السند', VOUCHER_TYPES);
+    if (!vType.ok) return { success: false, message: vType.message };
+
+    // The party type selects the ledger table updated further down. An
+    // unrecognised value matched no branch, so the voucher moved the cash and
+    // updated nobody's balance — the same silent half-operation as an
+    // unrecognised VoucherType, one table along.
+    const pType = optionalOneOf(data.PartyType, 'نوع الطرف', PARTY_TYPES);
+    if (!pType.ok) return { success: false, message: pType.message };
+
+    // The description is printed on the voucher the customer is handed, and
+    // was measured storing 1,000,000 characters.
+    const desc = requireText(data.Description, 'بيان السند', LIMITS.DESCRIPTION);
+    if (!desc.ok) return { success: false, message: desc.message };
+    const pName = optionalText(data.PartyName, 'اسم الطرف', LIMITS.NAME);
+    if (!pName.ok) return { success: false, message: pName.message };
+
+    // Bind the checked values back, so everything below this point — the
+    // INSERT, the sign, the ledger branch — reads the validated form rather
+    // than the raw payload.
+    data = {
+      ...data,
+      VoucherType: vType.value,
+      PartyType: pType.value ?? undefined,
+      Description: desc.value,
+      PartyName: pName.value ?? undefined,
+    };
 
     // A voucher MUST name exactly one asset.
     //

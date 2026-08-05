@@ -105,7 +105,7 @@ async function opDeleteVoucher() {
 async function opService() {
   const amount = between(50, 2000);
   await call('serviceSales:create', {
-    ServiceType: 'transfer', Provider: 'v', TargetPhone: '0100',
+    ServiceType: 'balance_transfer', Provider: 'vodafone', TargetPhone: '0100',
     CustomerID: pick([1, 2]), CustomerName: 'A', CustomerPhone: '0100',
     PaymentMethod: 'cash', Notes: '', Amount: amount,
     ServiceCost: between(0, 10), TransferCost: between(0, 10),

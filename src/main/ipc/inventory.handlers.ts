@@ -4,6 +4,10 @@ import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
 import { moveLots } from '../database/stock';
 import { checkAmount } from '../../shared/money';
+import {
+  requireText, optionalText, optionalId, oneOf, requireFlag, searchTerm,
+  LIMITS, ITEM_TYPES, WAREHOUSE_TYPES,
+} from '../../shared/validate';
 
 export function registerInventoryHandlers() {
   // ===== WAREHOUSES =====
@@ -12,21 +16,41 @@ export function registerInventoryHandlers() {
     return db.prepare('SELECT * FROM warehouses WHERE IsActive = 1 ORDER BY WarehouseName ASC').all();
   });
 
+  /**
+   * MEASURED before these checks: `WarehouseName: ''` was stored, producing a
+   * nameless entry in every warehouse dropdown in the application, and
+   * `WarehouseType: 'ANY_STRING'` was stored — the maintenance workflow looks
+   * for the `'maintenance'` type, so an unrecognised one silently means
+   * "not the maintenance store".
+   */
   ipcMain.handle('warehouses:create', async (_event, data: { WarehouseName: string; WarehouseType: string }) => {
     const db = getDb();
-    const result = db.prepare('INSERT INTO warehouses (WarehouseName, WarehouseType, IsActive) VALUES (?, ?, 1)').run(data.WarehouseName, data.WarehouseType || 'main');
+    const name = requireText(data?.WarehouseName, 'اسم المخزن', LIMITS.NAME);
+    if (!name.ok) return { success: false, message: name.message };
+    const type = oneOf(data?.WarehouseType || 'main', 'نوع المخزن', WAREHOUSE_TYPES);
+    if (!type.ok) return { success: false, message: type.message };
+    const result = db.prepare('INSERT INTO warehouses (WarehouseName, WarehouseType, IsActive) VALUES (?, ?, 1)').run(name.value, type.value);
     return { success: true, id: result.lastInsertRowid };
   });
 
   ipcMain.handle('warehouses:update', async (_event, id: number, data: { WarehouseName: string; WarehouseType: string }) => {
     const db = getDb();
-    db.prepare('UPDATE warehouses SET WarehouseName = ?, WarehouseType = ? WHERE WarehouseID = ?').run(data.WarehouseName, data.WarehouseType, id);
+    const rid = optionalId(id, 'رقم المخزن');
+    if (!rid.ok || rid.value === null) return { success: false, message: 'رقم المخزن غير صالح' };
+    const name = requireText(data?.WarehouseName, 'اسم المخزن', LIMITS.NAME);
+    if (!name.ok) return { success: false, message: name.message };
+    const type = oneOf(data?.WarehouseType || 'main', 'نوع المخزن', WAREHOUSE_TYPES);
+    if (!type.ok) return { success: false, message: type.message };
+    const info = db.prepare('UPDATE warehouses SET WarehouseName = ?, WarehouseType = ? WHERE WarehouseID = ?').run(name.value, type.value, rid.value);
+    if (info.changes === 0) return { success: false, message: 'المخزن غير موجود' };
     return { success: true };
   });
 
   ipcMain.handle('warehouses:delete', async (_event, id: number) => {
     const db = getDb();
-    db.prepare('UPDATE warehouses SET IsActive = 0 WHERE WarehouseID = ?').run(id);
+    const rid = optionalId(id, 'رقم المخزن');
+    if (!rid.ok || rid.value === null) return { success: false, message: 'رقم المخزن غير صالح' };
+    db.prepare('UPDATE warehouses SET IsActive = 0 WHERE WarehouseID = ?').run(rid.value);
     return { success: true };
   });
 
@@ -36,15 +60,30 @@ export function registerInventoryHandlers() {
     return db.prepare('SELECT * FROM categories ORDER BY CategoryName ASC').all();
   });
 
+  // MEASURED: `''` and a 200,000-character name were both stored.
   ipcMain.handle('categories:create', async (_event, name: string, parentId?: number) => {
     const db = getDb();
-    const result = db.prepare('INSERT INTO categories (CategoryName, ParentID) VALUES (?, ?)').run(name, parentId ?? null);
+    const n = requireText(name, 'اسم الفئة', LIMITS.NAME);
+    if (!n.ok) return { success: false, message: n.message };
+    const pid = optionalId(parentId, 'الفئة الأصل');
+    if (!pid.ok) return { success: false, message: pid.message };
+    // A parent that does not exist orphans the category in the tree view.
+    if (pid.value !== null) {
+      const parent = db.prepare('SELECT 1 AS ok FROM categories WHERE CategoryID = ?').get(pid.value);
+      if (!parent) return { success: false, message: 'الفئة الأصل غير موجودة' };
+    }
+    const result = db.prepare('INSERT INTO categories (CategoryName, ParentID) VALUES (?, ?)').run(n.value, pid.value);
     return { success: true, id: result.lastInsertRowid };
   });
 
   ipcMain.handle('categories:update', async (_event, id: number, name: string) => {
     const db = getDb();
-    db.prepare('UPDATE categories SET CategoryName = ? WHERE CategoryID = ?').run(name, id);
+    const rid = optionalId(id, 'رقم الفئة');
+    if (!rid.ok || rid.value === null) return { success: false, message: 'رقم الفئة غير صالح' };
+    const n = requireText(name, 'اسم الفئة', LIMITS.NAME);
+    if (!n.ok) return { success: false, message: n.message };
+    const info = db.prepare('UPDATE categories SET CategoryName = ? WHERE CategoryID = ?').run(n.value, rid.value);
+    if (info.changes === 0) return { success: false, message: 'الفئة غير موجودة' };
     return { success: true };
   });
 
@@ -71,9 +110,14 @@ export function registerInventoryHandlers() {
       WHERE 1=1
     `;
     const params: any[] = [];
-    if (filters?.search) {
-      query += ' AND (i.ItemName LIKE ? OR i.Barcode LIKE ?)';
-      params.push(`%${filters.search}%`, `%${filters.search}%`);
+    // A search of `%` returned the whole catalogue regardless of the type and
+    // category filters the user had set, and a 60,000-character term made
+    // SQLite throw "LIKE or GLOB pattern too complex" — which surfaced as an
+    // empty inventory screen with no explanation.
+    const term = searchTerm(filters?.search);
+    if (term) {
+      query += " AND (i.ItemName LIKE ? ESCAPE '\\' OR i.Barcode LIKE ? ESCAPE '\\')";
+      params.push(`%${term}%`, `%${term}%`);
     }
     if (filters?.type && filters.type !== 'all') {
       query += ' AND i.ItemType = ?';
@@ -125,17 +169,28 @@ export function registerInventoryHandlers() {
   // Auto-create item from barcode (quick add) - CostPrice no longer required (auto-calculated from purchases)
   ipcMain.handle('items:quickCreate', async (_event, data: { Barcode: string; ItemName?: string; ItemType?: string; CostPrice?: number; SalePrice?: number }) => {
     const db = getDb();
-    const existing = db.prepare('SELECT * FROM items WHERE Barcode = ?').get(data.Barcode) as any;
+    // This is the barcode-scanner path, so the barcode is the one REQUIRED
+    // field — it is both the lookup key and the fallback name.
+    const barcode = requireText(data?.Barcode, 'الباركود', LIMITS.CODE);
+    if (!barcode.ok) return { success: false, message: barcode.message };
+    const itemType = oneOf(data?.ItemType || 'accessory', 'نوع الصنف', ITEM_TYPES);
+    if (!itemType.ok) return { success: false, message: itemType.message };
+    const price = checkAmount(data?.SalePrice ?? 0, 'سعر البيع');
+    if (!price.ok) return { success: false, message: price.message };
+    const supplied = optionalText(data?.ItemName, 'اسم الصنف', LIMITS.NAME);
+    if (!supplied.ok) return { success: false, message: supplied.message };
+
+    const existing = db.prepare('SELECT * FROM items WHERE Barcode = ?').get(barcode.value) as any;
     if (existing) return { success: false, message: 'الباركود موجود بالفعل', item: existing };
 
     const result = db.prepare(`
       INSERT INTO items (ItemName, Barcode, ItemType, IsSerialized, CostPrice, SalePrice, IsActive, Unit)
       VALUES (?, ?, ?, 0, 0, ?, 1, 'قطعة')
     `).run(
-      data.ItemName || `صنف ${data.Barcode}`,
-      data.Barcode,
-      data.ItemType || 'accessory',
-      data.SalePrice || 0,
+      supplied.value || `صنف ${barcode.value}`,
+      barcode.value,
+      itemType.value,
+      price.value,
     );
     return { success: true, id: result.lastInsertRowid };
   });
@@ -173,16 +228,42 @@ export function registerInventoryHandlers() {
     const minStock = checkAmount(data.MinStock, 'حد التنبيه');
     if (!minStock.ok) return { success: false, message: minStock.message };
 
+    // The text and enum fields, which nothing checked.
+    //
+    // MEASURED: `ItemName: ''` created a nameless item that still appeared in
+    // the sale search and could be added to a cart; `ItemType: 'WEAPON'` was
+    // stored, and the type decides whether the item is tracked by serial and
+    // how it is costed; `IsSerialized: 99` was stored, which is truthy to one
+    // branch and `!== 1` to another, so the same item both had and did not
+    // have serial tracking depending on which handler asked.
+    const itemName = requireText(data.ItemName, 'اسم الصنف', LIMITS.NAME);
+    if (!itemName.ok) return { success: false, message: itemName.message };
+    const itemType = oneOf(data.ItemType, 'نوع الصنف', ITEM_TYPES);
+    if (!itemType.ok) return { success: false, message: itemType.message };
+    const serialized = requireFlag(data.IsSerialized, 'ترقيم تسلسلي',
+      itemType.value === 'phone' ? 1 : 0);
+    if (!serialized.ok) return { success: false, message: serialized.message };
+    const barcode = optionalText(data.Barcode, 'الباركود', LIMITS.CODE);
+    if (!barcode.ok) return { success: false, message: barcode.message };
+    const unit = optionalText(data.Unit, 'الوحدة', 32);
+    if (!unit.ok) return { success: false, message: unit.message };
+    const categoryId = optionalId(data.CategoryID, 'الفئة');
+    if (!categoryId.ok) return { success: false, message: categoryId.message };
+    if (categoryId.value !== null) {
+      const cat = db.prepare('SELECT 1 AS ok FROM categories WHERE CategoryID = ?').get(categoryId.value);
+      if (!cat) return { success: false, message: 'الفئة غير موجودة' };
+    }
+
     const safeData = {
-      ItemName: data.ItemName,
-      CategoryID: data.CategoryID,
-      Barcode: data.Barcode,
-      ItemType: data.ItemType,
-      IsSerialized: data.IsSerialized,
-      SalePrice: data.SalePrice,
+      ItemName: itemName.value,
+      CategoryID: categoryId.value,
+      Barcode: barcode.value,
+      ItemType: itemType.value,
+      IsSerialized: serialized.value,
+      SalePrice: price.value,
       CostPrice: 0,
-      MinStock: data.MinStock,
-      Unit: data.Unit,
+      MinStock: minStock.value,
+      Unit: unit.value ?? 'قطعة',
     };
 
     try {
@@ -202,9 +283,33 @@ export function registerInventoryHandlers() {
   ipcMain.handle('items:update', async (_event, id: number, data: any) => {
     const db = getDb();
 
-    if (!data.Barcode || data.Barcode.trim() === '') {
-      data.Barcode = null;
-    } else {
+    const rid = optionalId(id, 'رقم الصنف');
+    if (!rid.ok || rid.value === null) return { success: false, message: 'رقم الصنف غير صالح' };
+    id = rid.value;
+
+    // Same checks as `items:create`. An edit could previously blank the name
+    // of an item that already has stock and sales history against it.
+    const itemNameU = requireText(data?.ItemName, 'اسم الصنف', LIMITS.NAME);
+    if (!itemNameU.ok) return { success: false, message: itemNameU.message };
+    const priceU = checkAmount(data?.SalePrice ?? 0, 'سعر البيع');
+    if (!priceU.ok) return { success: false, message: priceU.message };
+    const minStockU = checkAmount(data?.MinStock ?? 0, 'حد التنبيه');
+    if (!minStockU.ok) return { success: false, message: minStockU.message };
+    const barcodeU = optionalText(data?.Barcode, 'الباركود', LIMITS.CODE);
+    if (!barcodeU.ok) return { success: false, message: barcodeU.message };
+    const unitU = optionalText(data?.Unit, 'الوحدة', 32);
+    if (!unitU.ok) return { success: false, message: unitU.message };
+    const catU = optionalId(data?.CategoryID, 'الفئة');
+    if (!catU.ok) return { success: false, message: catU.message };
+    if (catU.value !== null) {
+      const cat = db.prepare('SELECT 1 AS ok FROM categories WHERE CategoryID = ?').get(catU.value);
+      if (!cat) return { success: false, message: 'الفئة غير موجودة' };
+    }
+    const activeU = requireFlag(data?.IsActive, 'نشط', 1);
+    if (!activeU.ok) return { success: false, message: activeU.message };
+
+    data.Barcode = barcodeU.value;
+    if (data.Barcode) {
       const existing = db.prepare('SELECT ItemID FROM items WHERE Barcode = ? AND ItemID != ?').get(data.Barcode, id) as any;
       if (existing) {
         return { success: false, message: 'الباركود مستخدم بواسطة صنف آخر' };
@@ -213,17 +318,23 @@ export function registerInventoryHandlers() {
 
     // Preserve existing ItemType and CostPrice if not provided (no longer in form)
     const current = db.prepare('SELECT ItemType, CostPrice FROM items WHERE ItemID = ?').get(id) as any;
+    if (!current) return { success: false, message: 'الصنف غير موجود' };
+    const typeU = oneOf(data?.ItemType ?? current.ItemType ?? 'accessory', 'نوع الصنف', ITEM_TYPES);
+    if (!typeU.ok) return { success: false, message: typeU.message };
+    const serU = requireFlag(data?.IsSerialized, 'ترقيم تسلسلي', 0);
+    if (!serU.ok) return { success: false, message: serU.message };
+
     const params = {
-      ItemName: data.ItemName,
-      CategoryID: data.CategoryID,
-      Barcode: data.Barcode,
-      ItemType: data.ItemType ?? (current?.ItemType || 'accessory'),
-      IsSerialized: data.IsSerialized ?? 0,
-      SalePrice: data.SalePrice ?? 0,
+      ItemName: itemNameU.value,
+      CategoryID: catU.value,
+      Barcode: barcodeU.value,
+      ItemType: typeU.value,
+      IsSerialized: serU.value,
+      SalePrice: priceU.value,
       CostPrice: data.CostPrice ?? (current?.CostPrice || 0),
-      IsActive: data.IsActive ?? 1,
-      MinStock: data.MinStock ?? 0,
-      Unit: data.Unit || 'قطعة',
+      IsActive: activeU.value,
+      MinStock: minStockU.value,
+      Unit: unitU.value ?? 'قطعة',
       id: id,
     };
 

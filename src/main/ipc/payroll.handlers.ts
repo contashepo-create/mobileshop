@@ -2,6 +2,40 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { businessToday } from '../../shared/businessDate';
 import { checkAmounts } from '../../shared/money';
+import { requireId, optionalText, optionalId, LIMITS } from '../../shared/validate';
+
+/**
+ * Confirms a payroll record names a real employee and a real cash box.
+ *
+ * MEASURED before this existed: `EmployeeID: 99999` threw
+ * "FOREIGN KEY constraint failed" out of the transaction. The IPC guard turns
+ * that into the generic "تعذّر تنفيذ العملية - راجع سجل الأخطاء", so the
+ * person at the till is told the operation failed and not which field is
+ * wrong. A stale id is ordinary: a second terminal deactivating an employee
+ * while this one has the form open produces exactly it.
+ */
+function checkPayrollParties(
+  db: ReturnType<typeof getDb>,
+  employeeId: unknown,
+  cashAccountId?: unknown,
+): { ok: true; employeeId: number; cashAccountId: number | null } | { ok: false; message: string } {
+  const emp = requireId(employeeId, 'الموظف');
+  if (!emp.ok) return { ok: false, message: emp.message };
+  const exists = db.prepare('SELECT 1 AS ok FROM employees WHERE EmployeeID = ?').get(emp.value);
+  if (!exists) return { ok: false, message: 'الموظف غير موجود' };
+
+  let cash: number | null = null;
+  if (cashAccountId !== undefined) {
+    const c = optionalId(cashAccountId, 'الخزينة');
+    if (!c.ok) return { ok: false, message: c.message };
+    if (c.value !== null) {
+      const acc = db.prepare('SELECT 1 AS ok FROM cash_accounts WHERE CashAccountID = ?').get(c.value);
+      if (!acc) return { ok: false, message: 'الخزينة غير موجودة' };
+    }
+    cash = c.value;
+  }
+  return { ok: true, employeeId: emp.value, cashAccountId: cash };
+}
 
 export function registerPayrollHandlers() {
   // ===== SALARIES =====
@@ -398,6 +432,20 @@ export function registerPayrollHandlers() {
     const badAdv = checkAmounts([[data.Amount, 'مبلغ السلفة', { allowZero: false }]]);
     if (badAdv) return { success: false, message: badAdv };
 
+    const parties = checkPayrollParties(db, data.EmployeeID, data.CashAccountID);
+    if (!parties.ok) return { success: false, message: parties.message };
+    if (parties.cashAccountId === null) {
+      return { success: false, message: 'اختر الخزينة التي تخرج منها السلفة' };
+    }
+    const advReason = optionalText(data.Reason, 'سبب السلفة', LIMITS.DESCRIPTION);
+    if (!advReason.ok) return { success: false, message: advReason.message };
+    data = {
+      ...data,
+      EmployeeID: parties.employeeId,
+      CashAccountID: parties.cashAccountId,
+      Reason: advReason.value ?? undefined,
+    };
+
     // Check sufficient balance (unless negative cash allowed)
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
     if (allowNegCash?.Value !== '1') {
@@ -446,6 +494,27 @@ export function registerPayrollHandlers() {
     // A negative deduction is a bonus nobody authorised.
     const badDed = checkAmounts([[data.Amount, 'مبلغ الخصم', { allowZero: false }]]);
     if (badDed) return { success: false, message: badDed };
+
+    const dedParties = checkPayrollParties(db, data.EmployeeID);
+    if (!dedParties.ok) return { success: false, message: dedParties.message };
+    const dedNotes = optionalText(data.Notes, 'ملاحظات', LIMITS.NOTES);
+    if (!dedNotes.ok) return { success: false, message: dedNotes.message };
+    // `Reason` selects the damage-costing branch below, so it decides how much
+    // is taken from the employee.
+    //
+    // The list is read off `deductionReasons` in PayrollPage.tsx rather than
+    // guessed. A first draft of this line invented 'late' and 'penalty' and
+    // omitted 'negligence', which would have refused a reason the dropdown
+    // actually offers — a validator that rejects the shop's own form is worse
+    // than no validator, because the screen gives no way to proceed.
+    const DEDUCTION_REASONS = ['absence', 'negligence', 'damage', 'other'] as const;
+    if (!DEDUCTION_REASONS.includes(String(data.Reason ?? '') as any)) {
+      return {
+        success: false,
+        message: `سبب الخصم غير صالح — القيم المسموحة: ${DEDUCTION_REASONS.join('، ')}`,
+      };
+    }
+    data = { ...data, EmployeeID: dedParties.employeeId, Notes: dedNotes.value ?? undefined };
 
     let amount = data.Amount;
     if (data.Reason === 'damage' && data.DamagedItemID) {

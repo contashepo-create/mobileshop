@@ -202,7 +202,7 @@ console.log('\n[1] SECTION BY SECTION — each one, against the FULL book');
       StartDate: '2026-01-01', EndDate: '2026-12-31',
     })],
     ['الأصناف', async () => call('items:create', {
-      ItemName: 'سماعة', ItemType: 'part', Barcode: null, CategoryID: null,
+      ItemName: 'سماعة', ItemType: 'accessory', Barcode: null, CategoryID: null,
       IsSerialized: 0, CostPrice: 30, SalePrice: 60, MinStock: 0, Unit: 'قطعة',
     })],
     ['العملاء', async () => call('customers:create', {

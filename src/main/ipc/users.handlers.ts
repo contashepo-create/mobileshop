@@ -6,6 +6,7 @@ import { destroyAllSessionsForUser } from '../security/session';
 import { requestResetCode, verifyResetCode, notifyResetDone } from '../security/passwordRecovery';
 import { recordSecurityEvent } from '../security/securityLog';
 import { checkAttemptAllowed, recordAttemptFailure, recordAttemptSuccess, lockoutMessage } from '../security/loginThrottle';
+import { requireText, optionalId, requireFlag, LIMITS } from '../../shared/validate';
 
 
 /**
@@ -40,7 +41,54 @@ function checkPassword(pw: unknown): string | null {
   if (pw.length < MIN_PASSWORD_LENGTH) {
     return `كلمة المرور يجب أن تكون ${MIN_PASSWORD_LENGTH} أحرف على الأقل`;
   }
+  // bcrypt silently truncates at 72 BYTES. A password longer than that is not
+  // stronger, and an attacker who knows the first 72 bytes holds the account —
+  // so a user who believes their 200-character passphrase is protecting them
+  // is wrong in a way nothing tells them. Arabic is 2 bytes per character in
+  // UTF-8, so the byte length is what must be measured, not the character
+  // count.
+  if (Buffer.byteLength(pw, 'utf8') > 72) {
+    return 'كلمة المرور أطول من الحد المسموح (٧٢ بايت)';
+  }
   return null;
+}
+
+/**
+ * Normalises and checks a username.
+ *
+ * MEASURED before this existed, against the real `users:create`:
+ *
+ *   - `'kareem'`, `'kareem '` and `'KAREEM'` were all accepted and coexisted.
+ *     The duplicate check is `WHERE Username = ?`, which is case-sensitive and
+ *     space-sensitive, while `auth:login` looks up the same way — so three
+ *     accounts existed that a human reading the users list cannot tell apart,
+ *     and an administrator revoking "kareem" would leave two live back doors.
+ *   - a 100,000-character username was stored.
+ *
+ * The stored form is trimmed and lower-cased. Lower-casing is safe here
+ * because this application's usernames are Latin identifiers chosen by the
+ * shop; it removes an entire class of impersonation for no loss of meaning.
+ */
+function normaliseUsername(raw: unknown): { ok: true; value: string } | { ok: false; message: string } {
+  const u = requireText(raw, 'اسم المستخدم', LIMITS.USERNAME);
+  if (!u.ok) return { ok: false, message: u.message };
+  // Lower-cased, but NOT silently stripped of spaces.
+  //
+  // An earlier version deleted internal whitespace, so "ahmed ali" was quietly
+  // saved as "ahmedali". That is a different string from the one the
+  // administrator typed and the one they will try to log in with, and it fails
+  // at the login screen with "wrong username or password" — a validator that
+  // rewrites the input is worse than one that refuses it, because the refusal
+  // is at least visible. The character allow-list below rejects the space and
+  // says so.
+  const value = u.value.toLowerCase();
+  if (!/^[a-z0-9._@-]+$/.test(value)) {
+    return {
+      ok: false,
+      message: 'اسم المستخدم يجب أن يحتوي على حروف إنجليزية وأرقام والرموز . _ - @ فقط بدون مسافات',
+    };
+  }
+  return { ok: true, value };
 }
 
 const ADMIN_ROLE_ID = 1;
@@ -70,13 +118,30 @@ export function registerUsersHandlers() {
   // Create user
   ipcMain.handle('users:create', async (_event, data: { username: string; password: string; employeeId?: number; roleId: number }) => {
     const db = getDb();
-    if (typeof data?.username !== 'string' || !data.username.trim()) {
-      return { success: false, message: 'اسم المستخدم مطلوب' };
-    }
+    const uname = normaliseUsername(data?.username);
+    if (!uname.ok) return { success: false, message: uname.message };
     const pwProblem = checkPassword(data?.password);
     if (pwProblem) return { success: false, message: pwProblem };
 
-    const existing = db.prepare('SELECT UserID FROM users WHERE Username = ?').get(data.username);
+    // A role that does not exist would be caught by the foreign key as an
+    // opaque "constraint failed"; naming the problem is more useful. More
+    // importantly the role decides what the account may DO, so it is not a
+    // field to accept unchecked.
+    const roleId = optionalId(data?.roleId, 'الدور');
+    if (!roleId.ok || roleId.value === null) return { success: false, message: 'الدور مطلوب' };
+    const role = db.prepare('SELECT 1 AS ok FROM roles WHERE RoleID = ?').get(roleId.value);
+    if (!role) return { success: false, message: 'الدور غير موجود' };
+
+    const employeeId = optionalId(data?.employeeId, 'الموظف');
+    if (!employeeId.ok) return { success: false, message: employeeId.message };
+    if (employeeId.value !== null) {
+      const emp = db.prepare('SELECT 1 AS ok FROM employees WHERE EmployeeID = ?').get(employeeId.value);
+      if (!emp) return { success: false, message: 'الموظف غير موجود' };
+    }
+
+    // Compared against the NORMALISED form, so "Ahmed" can no longer be
+    // created alongside "ahmed".
+    const existing = db.prepare('SELECT UserID FROM users WHERE LOWER(TRIM(Username)) = ?').get(uname.value);
     if (existing) {
       return { success: false, message: 'اسم المستخدم موجود بالفعل' };
     }
@@ -84,7 +149,7 @@ export function registerUsersHandlers() {
     const result = db.prepare(`
       INSERT INTO users (Username, PasswordHash, EmployeeID, RoleID, IsActive)
       VALUES (?, ?, ?, ?, 1)
-    `).run(data.username, hash, data.employeeId ?? null, data.roleId);
+    `).run(uname.value, hash, employeeId.value, roleId.value);
     return { success: true, id: result.lastInsertRowid };
   });
 
@@ -95,10 +160,50 @@ export function registerUsersHandlers() {
     // The same lockout applies to an EDIT: demoting the last administrator to
     // a salesperson, or switching them inactive, removes the last account that
     // can manage the system just as surely as deleting it.
-    const current = db.prepare('SELECT RoleID, IsActive FROM users WHERE UserID = ?').get(id) as any;
+    const rid = optionalId(id, 'رقم المستخدم');
+    if (!rid.ok || rid.value === null) return { success: false, message: 'رقم المستخدم غير صالح' };
+    id = rid.value;
+
+    const current = db.prepare('SELECT RoleID, IsActive, Username FROM users WHERE UserID = ?').get(id) as any;
     if (!current) return { success: false, message: 'المستخدم غير موجود' };
-    const nextRole = data.roleId ?? 1;
-    const nextActive = data.isActive ?? 1;
+
+    // The same normalisation as `users:create`. An EDIT could otherwise
+    // introduce the collision that create now prevents: renaming "sara" to
+    // "Ahmed" while "ahmed" exists produced two accounts that look identical
+    // in the list and are distinct to every lookup.
+    //
+    // The username was also written straight through with no check at all, so
+    // an edit could blank it — `UPDATE users SET Username = undefined` binds
+    // NULL, and an account with no username cannot be logged into or revoked
+    // by name.
+    let nextUsername = current.Username;
+    if (data.username !== undefined) {
+      const uname = normaliseUsername(data.username);
+      if (!uname.ok) return { success: false, message: uname.message };
+      const clash = db.prepare(
+        'SELECT UserID FROM users WHERE LOWER(TRIM(Username)) = ? AND UserID != ?',
+      ).get(uname.value, id) as any;
+      if (clash) return { success: false, message: 'اسم المستخدم موجود بالفعل' };
+      nextUsername = uname.value;
+    }
+
+    const roleCheck = optionalId(data.roleId ?? 1, 'الدور');
+    if (!roleCheck.ok || roleCheck.value === null) return { success: false, message: 'الدور غير صالح' };
+    const roleRow = db.prepare('SELECT 1 AS ok FROM roles WHERE RoleID = ?').get(roleCheck.value);
+    if (!roleRow) return { success: false, message: 'الدور غير موجود' };
+
+    const empCheck = optionalId(data.employeeId, 'الموظف');
+    if (!empCheck.ok) return { success: false, message: empCheck.message };
+    if (empCheck.value !== null) {
+      const emp = db.prepare('SELECT 1 AS ok FROM employees WHERE EmployeeID = ?').get(empCheck.value);
+      if (!emp) return { success: false, message: 'الموظف غير موجود' };
+    }
+
+    const activeCheck = requireFlag(data.isActive, 'نشط', 1);
+    if (!activeCheck.ok) return { success: false, message: activeCheck.message };
+
+    const nextRole = roleCheck.value;
+    const nextActive = activeCheck.value;
     const wasAdmin = current.RoleID === ADMIN_ROLE_ID && current.IsActive;
     const staysAdmin = nextRole === ADMIN_ROLE_ID && nextActive;
     if (wasAdmin && !staysAdmin && otherActiveAdmins(db, id) === 0) {
@@ -117,12 +222,12 @@ export function registerUsersHandlers() {
       db.prepare(`
         UPDATE users SET Username = ?, PasswordHash = ?, EmployeeID = ?, RoleID = ?, IsActive = ?
         WHERE UserID = ?
-      `).run(data.username, hash, data.employeeId ?? null, data.roleId ?? 1, data.isActive ?? 1, id);
+      `).run(nextUsername, hash, empCheck.value, nextRole, nextActive, id);
     } else {
       db.prepare(`
         UPDATE users SET Username = ?, EmployeeID = ?, RoleID = ?, IsActive = ?
         WHERE UserID = ?
-      `).run(data.username, data.employeeId ?? null, data.roleId ?? 1, data.isActive ?? 1, id);
+      `).run(nextUsername, empCheck.value, nextRole, nextActive, id);
     }
 
     // A session caches the permission SET it was created with, so a change of
@@ -169,9 +274,17 @@ export function registerUsersHandlers() {
     return db.prepare('SELECT * FROM roles ORDER BY RoleID ASC').all();
   });
 
+  // MEASURED: `''` and a 50,000-character role name were both stored. A role
+  // is chosen from a dropdown when creating a user, so a blank one is a
+  // permission set nobody can identify.
   ipcMain.handle('roles:create', async (_event, name: string) => {
     const db = getDb();
-    const result = db.prepare('INSERT INTO roles (RoleName, IsSystem) VALUES (?, 0)').run(name);
+    const n = requireText(name, 'اسم الدور', LIMITS.NAME);
+    if (!n.ok) return { success: false, message: n.message };
+    const clash = db.prepare('SELECT 1 AS ok FROM roles WHERE LOWER(TRIM(RoleName)) = ?')
+      .get(n.value.toLowerCase());
+    if (clash) return { success: false, message: 'اسم الدور موجود بالفعل' };
+    const result = db.prepare('INSERT INTO roles (RoleName, IsSystem) VALUES (?, 0)').run(n.value);
     return { success: true, id: result.lastInsertRowid };
   });
 
@@ -188,11 +301,50 @@ export function registerUsersHandlers() {
 
   ipcMain.handle('permissions:setForRole', async (_event, roleId: number, permissionIds: number[]) => {
     const db = getDb();
-    db.prepare('DELETE FROM role_permissions WHERE RoleID = ?').run(roleId);
+    const rid = optionalId(roleId, 'الدور');
+    if (!rid.ok || rid.value === null) return { success: false, message: 'الدور غير صالح' };
+    const role = db.prepare('SELECT 1 AS ok FROM roles WHERE RoleID = ?').get(rid.value);
+    if (!role) return { success: false, message: 'الدور غير موجود' };
+
+    // This handler DELETES the role's whole permission set before inserting
+    // the new one. A payload that is not an array — `undefined` from a screen
+    // that failed to build it, say — made the `for...of` throw AFTER the
+    // delete, and because the delete ran outside the transaction the role was
+    // left with NO permissions at all. Every user holding it lost access with
+    // no error shown.
+    if (!Array.isArray(permissionIds)) {
+      return { success: false, message: 'قائمة الصلاحيات غير صالحة' };
+    }
+    // De-duplicated, because `role_permissions` has
+    // `PRIMARY KEY (RoleID, PermissionID)`. MEASURED: `[1, 2, 1]` threw
+    // "UNIQUE constraint failed" from inside the loop. A list arriving with a
+    // repeat is a screen bug, not an attack, and the honest response is to
+    // save the set the administrator meant rather than to fail the save.
+    const ids: number[] = [];
+    const seen = new Set<number>();
+    for (const raw of permissionIds) {
+      const pid = optionalId(raw, 'الصلاحية');
+      if (!pid.ok || pid.value === null) return { success: false, message: 'رقم صلاحية غير صالح' };
+      if (seen.has(pid.value)) continue;
+      seen.add(pid.value);
+      ids.push(pid.value);
+    }
+    if (ids.length > 500) return { success: false, message: 'عدد الصلاحيات أكبر من الحد المسموح' };
+    // Verified before anything is deleted, so an unknown id cannot leave the
+    // role stripped.
+    const known = new Set(
+      (db.prepare('SELECT PermissionID FROM permissions').all() as any[]).map(r => r.PermissionID),
+    );
+    for (const pid of ids) {
+      if (!known.has(pid)) return { success: false, message: `الصلاحية ${pid} غير موجودة` };
+    }
+
     const stmt = db.prepare('INSERT INTO role_permissions (RoleID, PermissionID) VALUES (?, ?)');
+    // The delete moved INSIDE the transaction so a failure restores the set.
     const tx = db.transaction(() => {
-      for (const pid of permissionIds) {
-        stmt.run(roleId, pid);
+      db.prepare('DELETE FROM role_permissions WHERE RoleID = ?').run(rid.value);
+      for (const pid of ids) {
+        stmt.run(rid.value, pid);
       }
     });
     tx();
@@ -207,16 +359,46 @@ export function registerUsersHandlers() {
 
   ipcMain.handle('permissions:setOverride', async (_event, userId: number, permissionId: number, type: 'grant' | 'deny') => {
     const db = getDb();
-    // Remove existing override for this user+permission
-    db.prepare('DELETE FROM user_overrides WHERE UserID = ? AND PermissionID = ?').run(userId, permissionId);
-    // Insert new
-    db.prepare('INSERT INTO user_overrides (UserID, PermissionID, Type) VALUES (?, ?, ?)').run(userId, permissionId, type);
+    const uid = optionalId(userId, 'المستخدم');
+    if (!uid.ok || uid.value === null) return { success: false, message: 'المستخدم غير صالح' };
+    const pid = optionalId(permissionId, 'الصلاحية');
+    if (!pid.ok || pid.value === null) return { success: false, message: 'الصلاحية غير صالحة' };
+
+    // `loadPermissions` reads this column as
+    //   if (Type === 'grant') add; else if (Type === 'deny') remove;
+    // so ANY third value is a silent no-op. An administrator who denied a
+    // permission would be shown an override in the list and the user would
+    // keep the permission — the screen and the enforcement disagreeing is the
+    // worst possible outcome for an access-control setting.
+    if (type !== 'grant' && type !== 'deny') {
+      return { success: false, message: 'نوع الاستثناء يجب أن يكون منح أو منع' };
+    }
+    const user = db.prepare('SELECT 1 AS ok FROM users WHERE UserID = ?').get(uid.value);
+    if (!user) return { success: false, message: 'المستخدم غير موجود' };
+    const perm = db.prepare('SELECT 1 AS ok FROM permissions WHERE PermissionID = ?').get(pid.value);
+    if (!perm) return { success: false, message: 'الصلاحية غير موجودة' };
+
+    db.transaction(() => {
+      db.prepare('DELETE FROM user_overrides WHERE UserID = ? AND PermissionID = ?').run(uid.value, pid.value);
+      db.prepare('INSERT INTO user_overrides (UserID, PermissionID, Type) VALUES (?, ?, ?)').run(uid.value, pid.value, type);
+    })();
+    // The session caches the permission set it was built with, so an override
+    // applied to a signed-in user had no effect until they happened to log
+    // out. Revoking access must take effect immediately.
+    destroyAllSessionsForUser(uid.value);
     return { success: true };
   });
 
   ipcMain.handle('permissions:removeOverride', async (_event, userId: number, permissionId: number) => {
     const db = getDb();
-    db.prepare('DELETE FROM user_overrides WHERE UserID = ? AND PermissionID = ?').run(userId, permissionId);
+    const uid = optionalId(userId, 'المستخدم');
+    if (!uid.ok || uid.value === null) return { success: false, message: 'المستخدم غير صالح' };
+    const pid = optionalId(permissionId, 'الصلاحية');
+    if (!pid.ok || pid.value === null) return { success: false, message: 'الصلاحية غير صالحة' };
+    db.prepare('DELETE FROM user_overrides WHERE UserID = ? AND PermissionID = ?').run(uid.value, pid.value);
+    // Removing a 'grant' override takes a permission AWAY, so the cached
+    // session must be ended for the same reason as `setOverride`.
+    destroyAllSessionsForUser(uid.value);
     return { success: true };
   });
 
@@ -438,7 +620,16 @@ export function registerUsersHandlers() {
   // Update role name
   ipcMain.handle('roles:update', async (_event, roleId: number, name: string) => {
     const db = getDb();
-    db.prepare('UPDATE roles SET RoleName = ? WHERE RoleID = ?').run(name, roleId);
+    const rid = optionalId(roleId, 'رقم الدور');
+    if (!rid.ok || rid.value === null) return { success: false, message: 'رقم الدور غير صالح' };
+    const n = requireText(name, 'اسم الدور', LIMITS.NAME);
+    if (!n.ok) return { success: false, message: n.message };
+    const clash = db.prepare(
+      'SELECT 1 AS ok FROM roles WHERE LOWER(TRIM(RoleName)) = ? AND RoleID != ?',
+    ).get(n.value.toLowerCase(), rid.value);
+    if (clash) return { success: false, message: 'اسم الدور موجود بالفعل' };
+    const info = db.prepare('UPDATE roles SET RoleName = ? WHERE RoleID = ?').run(n.value, rid.value);
+    if (info.changes === 0) return { success: false, message: 'الدور غير موجود' };
     return { success: true };
   });
 }

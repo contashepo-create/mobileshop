@@ -19,9 +19,24 @@ window.api?.onSessionExpired?.(() => {
   if (isAuthenticated) void logout();
 });
 
+/**
+ * NO `future` PROP — that is the one breaking change in the v6 -> v7 upgrade.
+ *
+ * On v6 this router carried `future={{ v7_startTransition: true,
+ * v7_relativeSplatPath: true }}`. Those flags existed so a v6 app could opt
+ * into v7 behaviour early; in v7 the behaviour IS the default and the prop was
+ * removed from `HashRouterProps` altogether. Leaving it in place fails the
+ * typecheck with "Property 'future' does not exist" and, in plain JavaScript,
+ * would be silently ignored.
+ *
+ * Because both flags were already enabled here, the upgrade changes no runtime
+ * behaviour at all: navigation was already wrapped in `React.startTransition`
+ * and splat paths already resolved relatively. That is exactly the migration
+ * path React Router documents — turn the flags on under v6, then bump.
+ */
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+    <HashRouter>
       <App />
     </HashRouter>
   </React.StrictMode>

@@ -11,7 +11,7 @@
     "make": "electron-forge make",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
-    "verify": "node scripts/verify_build.mjs && python3 scripts/verify_accounting.py && python3 scripts/verify_security.py && node --experimental-strip-types scripts/verify_ipc_guard_runtime.mjs && python3 scripts/verify_ipc_coverage.py && python3 scripts/verify_migrations.py && python3 scripts/audit_accounting_engine.py && node scripts/verify_licensing.js && node --experimental-strip-types scripts/verify_license_ed25519.mjs && node --experimental-strip-types scripts/verify_trial_anchor.mjs && node --experimental-strip-types scripts/verify_phase2_hardening.mjs && node --experimental-strip-types scripts/verify_phase3_registration.mjs && node --experimental-strip-types scripts/verify_multi_device.mjs && node --experimental-strip-types scripts/verify_phone_verify.mjs && node scripts/verify_remote.js && node scripts/verify_bot.mjs && node --experimental-strip-types scripts/verify_notices.mjs && node --experimental-strip-types scripts/verify_notifications.mjs && TZ=Africa/Cairo node --experimental-strip-types scripts/verify_clock.mjs && python3 scripts/audit_accounting_2026-07-28.py && python3 scripts/audit_dashboard.py && python3 scripts/audit_sales.py && python3 scripts/audit_sales_lifecycle.py && python3 scripts/audit_purchases.py && python3 scripts/audit_purchase_returns.py && python3 scripts/audit_return_settlement.py && python3 scripts/audit_trade_cycle.py && node --experimental-strip-types scripts/verify_trade_hostile.mjs && node --experimental-strip-types scripts/verify_trade_concurrency.mjs && node --experimental-strip-types scripts/verify_trade_ledger_model.mjs && node --experimental-strip-types scripts/verify_trade_reports_agree.mjs && node --experimental-strip-types scripts/verify_trade_metamorphic.mjs && node --experimental-strip-types scripts/verify_maintenance.mjs && node --experimental-strip-types scripts/verify_transfers.mjs && node --experimental-strip-types scripts/verify_renderer_crash.mjs && node scripts/verify_backup_integrity.mjs && node --experimental-strip-types scripts/verify_book_guard.mjs && node --experimental-strip-types scripts/verify_back_office.mjs && node --experimental-strip-types scripts/verify_statements.mjs && node --experimental-strip-types scripts/verify_fuzz_back_office.mjs && node --experimental-strip-types scripts/verify_upgrade_safety.mjs && node --experimental-strip-types scripts/verify_serial_costing.mjs && node --experimental-strip-types scripts/verify_stock_lots.mjs && node --experimental-strip-types scripts/verify_reports_money.mjs && node --experimental-strip-types scripts/verify_master_data.mjs && node --experimental-strip-types scripts/verify_users_access.mjs && node --experimental-strip-types scripts/verify_auth_audit.mjs && node --experimental-strip-types scripts/verify_transfers_deletes.mjs && node --experimental-strip-types scripts/verify_password_recovery.mjs && node --experimental-strip-types scripts/verify_print_escaping.mjs && node --experimental-strip-types scripts/verify_print_profiles.mjs && node --experimental-strip-types scripts/verify_sidebar_nav.mjs && node --experimental-strip-types scripts/verify_concurrency_hardening.mjs && node --experimental-strip-types scripts/verify_update_server.mjs && node --experimental-strip-types scripts/verify_tenant_isolation.mjs && node --experimental-strip-types scripts/verify_scale_load.mjs && node --experimental-strip-types scripts/verify_disaster_recovery.mjs && node --experimental-strip-types scripts/verify_multi_terminal.mjs && node --experimental-strip-types scripts/verify_input_hostility.mjs && node --experimental-strip-types scripts/verify_server_side_validation.mjs && node --experimental-strip-types scripts/verify_no_secrets.mjs && node --experimental-strip-types scripts/verify_cross_section.mjs && node --experimental-strip-types scripts/verify_logo_branding.mjs && node --experimental-strip-types scripts/verify_save_feedback.mjs && node --experimental-strip-types scripts/verify_settings_header.mjs && node --experimental-strip-types scripts/verify_rent.mjs && node --experimental-strip-types scripts/verify_rent_parties.mjs && node --experimental-strip-types scripts/verify_asset_picker.mjs && node --experimental-strip-types scripts/verify_audit_fixes.mjs && node --experimental-strip-types scripts/verify_telegram_backup.mjs && node --experimental-strip-types scripts/verify_reset_database.mjs && node --experimental-strip-types scripts/verify_trade_mutation.mjs && node --experimental-strip-types scripts/verify_trade_behaviour.mjs && node --experimental-strip-types scripts/verify_fuzz_regressions.mjs && node --experimental-strip-types scripts/verify_fuzz_sweep.mjs",
+    "verify": "node scripts/verify_build.mjs && python3 scripts/verify_accounting.py && python3 scripts/verify_security.py && node --experimental-strip-types scripts/verify_ipc_guard_runtime.mjs && python3 scripts/verify_ipc_coverage.py && python3 scripts/verify_migrations.py && python3 scripts/audit_accounting_engine.py && node scripts/verify_licensing.js && node --experimental-strip-types scripts/verify_license_ed25519.mjs && node --experimental-strip-types scripts/verify_trial_anchor.mjs && node --experimental-strip-types scripts/verify_phase2_hardening.mjs && node --experimental-strip-types scripts/verify_phase3_registration.mjs && node --experimental-strip-types scripts/verify_multi_device.mjs && node --experimental-strip-types scripts/verify_phone_verify.mjs && node scripts/verify_remote.js && node scripts/verify_bot.mjs && node --experimental-strip-types scripts/verify_notices.mjs && node --experimental-strip-types scripts/verify_notifications.mjs && TZ=Africa/Cairo node --experimental-strip-types scripts/verify_clock.mjs && python3 scripts/audit_accounting_2026-07-28.py && python3 scripts/audit_dashboard.py && python3 scripts/audit_sales.py && python3 scripts/audit_sales_lifecycle.py && python3 scripts/audit_purchases.py && python3 scripts/audit_purchase_returns.py && python3 scripts/audit_return_settlement.py && python3 scripts/audit_trade_cycle.py && node --experimental-strip-types scripts/verify_trade_hostile.mjs && node --experimental-strip-types scripts/verify_trade_concurrency.mjs && node --experimental-strip-types scripts/verify_trade_ledger_model.mjs && node --experimental-strip-types scripts/verify_trade_reports_agree.mjs && node --experimental-strip-types scripts/verify_trade_metamorphic.mjs && node --experimental-strip-types scripts/verify_maintenance.mjs && node --experimental-strip-types scripts/verify_transfers.mjs && node --experimental-strip-types scripts/verify_renderer_crash.mjs && node scripts/verify_backup_integrity.mjs && node --experimental-strip-types scripts/verify_book_guard.mjs && node --experimental-strip-types scripts/verify_back_office.mjs && node --experimental-strip-types scripts/verify_statements.mjs && node --experimental-strip-types scripts/verify_fuzz_back_office.mjs && node --experimental-strip-types scripts/verify_upgrade_safety.mjs && node --experimental-strip-types scripts/verify_serial_costing.mjs && node --experimental-strip-types scripts/verify_stock_lots.mjs && node --experimental-strip-types scripts/verify_reports_money.mjs && node --experimental-strip-types scripts/verify_master_data.mjs && node --experimental-strip-types scripts/verify_users_access.mjs && node --experimental-strip-types scripts/verify_auth_audit.mjs && node --experimental-strip-types scripts/verify_transfers_deletes.mjs && node --experimental-strip-types scripts/verify_password_recovery.mjs && node --experimental-strip-types scripts/verify_print_escaping.mjs && node --experimental-strip-types scripts/verify_print_profiles.mjs && node --experimental-strip-types scripts/verify_sidebar_nav.mjs && node --experimental-strip-types scripts/verify_concurrency_hardening.mjs && node --experimental-strip-types scripts/verify_update_server.mjs && node --experimental-strip-types scripts/verify_tenant_isolation.mjs && node --experimental-strip-types scripts/verify_scale_load.mjs && node --experimental-strip-types scripts/verify_disaster_recovery.mjs && node --experimental-strip-types scripts/verify_multi_terminal.mjs && node --experimental-strip-types scripts/verify_input_hostility.mjs && node --experimental-strip-types scripts/verify_server_side_validation.mjs && node --experimental-strip-types scripts/verify_no_secrets.mjs && node --experimental-strip-types scripts/verify_dependency_security.mjs && node --experimental-strip-types scripts/verify_cross_section.mjs && node --experimental-strip-types scripts/verify_logo_branding.mjs && node --experimental-strip-types scripts/verify_save_feedback.mjs && node --experimental-strip-types scripts/verify_settings_header.mjs && node --experimental-strip-types scripts/verify_rent.mjs && node --experimental-strip-types scripts/verify_rent_parties.mjs && node --experimental-strip-types scripts/verify_asset_picker.mjs && node --experimental-strip-types scripts/verify_audit_fixes.mjs && node --experimental-strip-types scripts/verify_telegram_backup.mjs && node --experimental-strip-types scripts/verify_reset_database.mjs && node --experimental-strip-types scripts/verify_trade_mutation.mjs && node --experimental-strip-types scripts/verify_trade_behaviour.mjs && node --experimental-strip-types scripts/verify_fuzz_regressions.mjs && node --experimental-strip-types scripts/verify_fuzz_sweep.mjs",
     "license": "node scripts/license-keygen.js",
     "build_check": "node scripts/verify_build.mjs",
     "license:init": "node scripts/license-keygen.js --init",
@@ -25,34 +25,42 @@
     "verify:scale": "SCALE=full node --experimental-strip-types scripts/verify_scale_load.mjs"
   },
   "devDependencies": {
-    "@electron-forge/cli": "^7.4.0",
-    "@electron-forge/maker-deb": "^7.4.0",
-    "@electron-forge/maker-rpm": "^7.4.0",
-    "@electron-forge/maker-squirrel": "^7.4.0",
-    "@electron-forge/maker-zip": "^7.4.0",
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-deb": "^7.11.2",
+    "@electron-forge/maker-rpm": "^7.11.2",
+    "@electron-forge/maker-squirrel": "^7.11.2",
+    "@electron-forge/maker-zip": "^7.11.2",
     "@electron-forge/plugin-auto-unpack-natives": "^7.11.2",
-    "@electron-forge/plugin-vite": "^7.4.0",
+    "@electron-forge/plugin-vite": "^7.11.2",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.10",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
-    "electron": "^32.3.3",
+    "electron": "^43.3.0",
     "eslint": "^8.57.0",
     "postcss": "^8.4.39",
     "tailwindcss": "^3.4.6",
     "typescript": "^5.5.3",
-    "vite": "^5.3.4"
+    "vite": "^6.4.3"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.1.2",
+    "better-sqlite3": "^12.4.1",
     "lucide-react": "^0.408.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.25.1",
+    "react-router-dom": "^7.18.2",
     "recharts": "^2.12.7",
     "zustand": "^4.5.4"
+  },
+  "overrides": {
+    "tar": "^7.5.22",
+    "brace-expansion": "^2.1.4",
+    "tmp": "^0.2.7",
+    "fast-uri": "^3.1.5",
+    "cacache": "^19.0.1",
+    "make-fetch-happen": "^14.0.3"
   }
 }

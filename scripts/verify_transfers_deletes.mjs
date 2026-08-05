@@ -54,7 +54,7 @@ function seed() {
   db.exec("INSERT INTO warehouses(WarehouseID,WarehouseName) VALUES(1,'Main')");
   db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'Safe','safe',100000,1)");
   db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(2,'Bank','bank',50000,1)");
-  db.exec("INSERT INTO payment_methods(PaymentMethodID,MethodName,MethodType,Balance,IsActive) VALUES(1,'Wallet','wallet',30000,1)");
+  db.exec("INSERT INTO payment_methods(PaymentMethodID,MethodName,MethodType,Balance,IsActive) VALUES(1,'Wallet','digital_wallet',30000,1)");
   db.exec("INSERT INTO employees(EmployeeID,Name,BaseSalary,Allowances,Balance,IsActive) VALUES(1,'Tech',3000,0,0,1)");
   return db;
 }

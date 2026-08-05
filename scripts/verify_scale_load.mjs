@@ -117,7 +117,7 @@ const fillStart = Date.now();
   const insCustomer = makeInserter('customers',
     { Name: '', Phone: '', Balance: 0, Status: 'active', CreditLimit: 0 });
   const insItem = makeInserter('items',
-    { ItemName: '', ItemType: 'product', Barcode: '', CostPrice: 0, SalePrice: 0, IsActive: 1 });
+    { ItemName: '', ItemType: 'accessory', Barcode: '', CostPrice: 0, SalePrice: 0, IsActive: 1 });
   const insSale = makeInserter('sales', {
     SaleNumber: '', FiscalYearID: 1, CustomerID: null, Date: '', Subtotal: 0,
     TotalAmount: 0, PaidAmount: 0, Discount: 0, UserID: 1, IsVoided: 0,
@@ -159,7 +159,7 @@ const fillStart = Date.now();
         Balance: 0, Status: 'active', CreditLimit: 5000 });
     }
     for (let i = 1; i <= ITEMS; i++) {
-      insItem({ ItemName: `صنف ${i}`, ItemType: 'product', Barcode: `BC${1000000 + i}`,
+      insItem({ ItemName: `صنف ${i}`, ItemType: 'accessory', Barcode: `BC${1000000 + i}`,
         CostPrice: 100 + (i % 900), SalePrice: 150 + (i % 1200), IsActive: 1 });
     }
   });

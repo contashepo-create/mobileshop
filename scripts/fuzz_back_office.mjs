@@ -62,15 +62,15 @@ function seedDb() {
   db.exec("INSERT INTO warehouses(WarehouseID,WarehouseName) VALUES(2,'Second')");
   db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'Safe','safe',500000,1)");
   db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(2,'Bank','bank',500000,1)");
-  db.exec("INSERT INTO payment_methods(PaymentMethodID,MethodName,MethodType,Balance,IsActive) VALUES(1,'W','wallet',200000,1)");
+  db.exec("INSERT INTO payment_methods(PaymentMethodID,MethodName,MethodType,Balance,IsActive) VALUES(1,'W','digital_wallet',200000,1)");
   db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'A',0,'active')");
   db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(2,'B',0,'active')");
   db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'S1',0,'active')");
   db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(2,'S2',0,'active')");
   db.exec("INSERT INTO employees(EmployeeID,Name,BaseSalary,Allowances,Balance,IsActive) VALUES(1,'E1',3000,500,0,1)");
   db.exec("INSERT INTO employees(EmployeeID,Name,BaseSalary,Allowances,Balance,IsActive) VALUES(2,'E2',2000,0,0,1)");
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'P1','part',0,100,200,1)");
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'P2','part',0,50,120,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'P1','accessory',0,100,200,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'P2','accessory',0,50,120,1)");
   db.exec("INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,500,100)");
   db.exec("INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(2,1,500,50)");
   db.exec("INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,2,200,100)");

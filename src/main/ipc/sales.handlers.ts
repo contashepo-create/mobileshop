@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { safeFailure, safeMessage } from '../security/errorResponse';
+import { requireId } from '../../shared/validate';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, deductStock, deductStockAtCost, restoreStock, restoreStockAtCost, totalStock, planStockAllocation, recordValuationResidual } from '../database/stock';
 import type { StockShortage } from '../database/stock';
@@ -107,6 +108,18 @@ export function registerSalesHandlers() {
         }
       }
 
+      // Normalised onto `data`, not merely read into locals.
+      //
+      // The checks below use `data.X ?? 0`, but the INSERT binds `data.X` RAW.
+      // An omitted Discount validated as 0 then reached better-sqlite3 as
+      // `undefined`, throwing out of the handler. Same defect as purchases.
+      data = {
+        ...data,
+        Discount: num(data.Discount ?? 0),
+        TaxAmount: num(data.TaxAmount ?? 0),
+        TaxRate: num((data as any).TaxRate ?? 0),
+        PaidAmount: num(data.PaidAmount ?? 0),
+      };
       const discountIn = num(data.Discount ?? 0);
       const taxIn = num(data.TaxAmount ?? 0);
       const paidIn = num(data.PaidAmount ?? 0);
@@ -909,6 +922,9 @@ export function registerSalesHandlers() {
     CashAccountID?: number; PaymentMethodID?: number;
     Notes?: string; userId: number;
   }) => {
+    const _sid = requireId(data?.SaleID, 'رقم الفاتورة');
+    if (!_sid.ok) return { success: false, message: _sid.message };
+    data = { ...data, SaleID: _sid.value };
     const db = getDb();
     try {
       const original = db.prepare('SELECT * FROM sales WHERE SaleID = ?').get(data.SaleID) as any;
@@ -945,6 +961,18 @@ export function registerSalesHandlers() {
           return { success: false, message: 'السعر يجب أن يكون رقماً غير سالب' };
         }
       }
+      // Normalised onto `data`, not merely read into locals.
+      //
+      // The checks below use `data.X ?? 0`, but the INSERT binds `data.X` RAW.
+      // An omitted Discount validated as 0 then reached better-sqlite3 as
+      // `undefined`, throwing out of the handler. Same defect as purchases.
+      data = {
+        ...data,
+        Discount: num(data.Discount ?? 0),
+        TaxAmount: num(data.TaxAmount ?? 0),
+        TaxRate: num((data as any).TaxRate ?? 0),
+        PaidAmount: num(data.PaidAmount ?? 0),
+      };
       const discountIn = num(data.Discount ?? 0);
       const taxIn = num(data.TaxAmount ?? 0);
       const paidIn = num(data.PaidAmount ?? 0);
@@ -1246,6 +1274,9 @@ export function registerSalesHandlers() {
    * halfway cannot leave the books half-reversed.
    */
   ipcMain.handle('delete:saleReturn', async (_event, returnId: number) => {
+    const _rid = requireId(returnId, 'رقم مرتجع البيع');
+    if (!_rid.ok) return { success: false, message: _rid.message };
+    returnId = _rid.value;
     const db = getDb();
     try {
       const ret = db.prepare('SELECT * FROM sale_returns WHERE ReturnID = ?').get(returnId) as any;

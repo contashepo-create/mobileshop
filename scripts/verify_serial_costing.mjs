@@ -62,9 +62,9 @@ function seed() {
   db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'Ahmed',0,'active')");
   db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'Sup',0,'active')");
   // A phone: serialised, thousands of pounds each.
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'iPhone','device',1,15000,20000,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'iPhone','accessory',1,15000,20000,1)");
   // An accessory: pooled, a few pounds each.
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'Cable','part',0,25,60,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'Cable','accessory',0,25,60,1)");
   return db;
 }
 

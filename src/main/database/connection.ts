@@ -105,6 +105,7 @@ export function getDb(): Database.Database {
 
     db.pragma('foreign_keys = ON');
     hardenTransactions(db);
+    hardenBinding(db);
     console.log('[DB] Connected to:', dbPath);
   }
   return db;
@@ -152,6 +153,103 @@ export function getDb(): Database.Database {
  */
 /** Marks a connection as already wrapped, so wrapping cannot stack. */
 const HARDENED = Symbol.for('mobileshop.transactionsHardened');
+
+
+/** Marks a connection whose statements have already been bind-hardened. */
+const BIND_HARDENED = Symbol.for('mobileshop.bindHardened');
+
+/**
+ * Turns a binding failure into a clean refusal instead of a crash.
+ *
+ * THE PROBLEM
+ * -----------
+ * better-sqlite3 throws when a value cannot be bound:
+ *
+ *     TypeError: Provided value cannot be bound to SQLite parameter 1.
+ *
+ * That is correct of the driver, but the throw escapes the handler and crosses
+ * the IPC boundary as an unhandled rejection: the screen gets no reply at all,
+ * so the button appears to do nothing and the failure is invisible.
+ *
+ * A sweep that called every channel with a malformed identifier — `undefined`,
+ * `{}`, `[]` — found this on TWENTY-FIVE channels. Most are ordinary reads:
+ * `items:get`, `sales:get`, `employees:statement`, `permissions:getByRole`.
+ * The screens always pass a real id, which is exactly why nothing noticed. But
+ * "no screen currently sends a bad value" is not a property of the code, it is
+ * a property of today's callers, and the earlier audits found several places
+ * where that assumption had already been broken.
+ *
+ * THE APPROACH
+ * ------------
+ * Patching each call site would mean editing about a hundred `.get(id)` calls
+ * and hoping the next one is remembered. Wrapping `prepare` covers every
+ * statement in the application, including any added later — the same reasoning
+ * that put the transaction retry and the IPC guard where they are.
+ *
+ * A rejected bind returns EMPTY rather than throwing: `undefined` from `.get`,
+ * `[]` from `.all`, and a no-op result from `.run`. That is the honest answer —
+ * a row whose key is not a value cannot exist — and it is what the handlers
+ * already expect when a lookup finds nothing, so they produce their own
+ * "not found" message in Arabic instead of a crash.
+ *
+ * Deliberately NOT silent: the rejected value is logged with the statement, so
+ * a caller passing rubbish is still visible to the developer.
+ */
+function hardenBinding(conn: Database.Database): void {
+  const marked = conn as unknown as Record<symbol, boolean>;
+  if (marked[BIND_HARDENED]) return;
+  marked[BIND_HARDENED] = true;
+
+  const originalPrepare = conn.prepare.bind(conn);
+
+  /** True for a value better-sqlite3 will refuse to bind. */
+  const unbindable = (v: unknown): boolean =>
+    v !== null
+    && typeof v !== 'number'
+    && typeof v !== 'string'
+    && typeof v !== 'bigint'
+    && !Buffer.isBuffer(v)
+    && !(v instanceof Uint8Array)
+    && v !== undefined
+    && typeof v !== 'boolean';
+
+  const hasBadArg = (args: unknown[]): boolean => {
+    for (const a of args) {
+      if (a === undefined) return true;
+      if (a !== null && typeof a === 'object' && !Buffer.isBuffer(a) && !(a instanceof Uint8Array)) {
+        // A named-parameter object is legitimate; its VALUES are checked.
+        if (Array.isArray(a)) return true;
+        for (const v of Object.values(a as Record<string, unknown>)) {
+          if (v === undefined || unbindable(v)) return true;
+        }
+        continue;
+      }
+      if (unbindable(a)) return true;
+    }
+    return false;
+  };
+
+  (conn as unknown as { prepare: unknown }).prepare = ((sql: string) => {
+    const stmt = originalPrepare(sql) as unknown as Record<string, unknown>;
+    for (const method of ['get', 'all', 'run', 'iterate', 'pluck'] as const) {
+      const fn = stmt[method];
+      if (typeof fn !== 'function') continue;
+      stmt[method] = function patched(this: unknown, ...args: unknown[]) {
+        if (hasBadArg(args)) {
+          console.error(
+            `[DB] refused an unbindable parameter for: ${sql.slice(0, 90).replace(/\s+/g, ' ')}`,
+          );
+          if (method === 'all') return [];
+          if (method === 'run') return { changes: 0, lastInsertRowid: 0 };
+          if (method === 'iterate') return [][Symbol.iterator]();
+          return undefined;
+        }
+        return (fn as (...a: unknown[]) => unknown).apply(this, args);
+      };
+    }
+    return stmt;
+  }) as unknown as typeof conn.prepare;
+}
 
 function hardenTransactions(conn: Database.Database): void {
   // Applying the wrapper twice would nest a retry loop inside a retry loop:

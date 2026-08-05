@@ -19,14 +19,46 @@ class Wrapped {
 
   prepare(sql) {
     const st = this._db.prepare(sql);
+    // Mirrors `hardenBinding` in src/main/database/connection.ts.
+    //
+    // The application wraps `prepare` so an unbindable parameter returns empty
+    // instead of throwing across the IPC boundary. This stub replaces the real
+    // driver entirely, so without the same wrapper the tests would exercise a
+    // DIFFERENT database layer from the one that ships — and would keep
+    // reporting crashes the application no longer has, or worse, miss ones it
+    // does. The two must behave identically.
+    const unbindable = (v) =>
+      v !== null && v !== undefined
+      && typeof v !== 'number' && typeof v !== 'string' && typeof v !== 'bigint'
+      && typeof v !== 'boolean'
+      && !Buffer.isBuffer(v) && !(v instanceof Uint8Array);
+    const bad = (args) => {
+      for (const a of args) {
+        if (a === undefined) return true;
+        if (a !== null && typeof a === 'object' && !Buffer.isBuffer(a) && !(a instanceof Uint8Array)) {
+          if (Array.isArray(a)) return true;
+          for (const v of Object.values(a)) if (v === undefined || unbindable(v)) return true;
+          continue;
+        }
+        if (unbindable(a)) return true;
+      }
+      return false;
+    };
+    const guard = (method, fn, empty) => (...a) => {
+      if (bad(a)) {
+        console.error(`[DB] refused an unbindable parameter for: ${sql.slice(0, 90).replace(/\s+/g, ' ')}`);
+        return typeof empty === 'function' ? empty() : empty;
+      }
+      return fn(...a);
+    };
     return {
       // better-sqlite3 accepts either positional args or a single object for
       // named parameters; node:sqlite behaves the same way.
-      run: (...a) => st.run(...a),
-      get: (...a) => st.get(...a) ?? undefined,
-      all: (...a) => st.all(...a),
-      iterate: (...a) => st.all(...a)[Symbol.iterator](),
-      pluck: () => ({ get: (...a) => Object.values(st.get(...a) ?? {})[0] }),
+      run: guard('run', (...a) => st.run(...a), () => ({ changes: 0, lastInsertRowid: 0 })),
+      get: guard('get', (...a) => st.get(...a) ?? undefined, undefined),
+      all: guard('all', (...a) => st.all(...a), () => []),
+      iterate: guard('iterate', (...a) => st.all(...a)[Symbol.iterator](), () => [][Symbol.iterator]()),
+      pluck: () => ({ get: guard('get', (...a) => Object.values(st.get(...a) ?? {})[0], undefined) }),
     };
   }
 

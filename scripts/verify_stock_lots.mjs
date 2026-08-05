@@ -63,11 +63,11 @@ function seed() {
   db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'Sup',0,'active')");
   // Pooled accessory, worth more than ~100 — the owner's threshold for real
   // cost tracking.
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'Headset','part',0,100,300,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'Headset','accessory',0,100,300,1)");
   // A cheap consumable.
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'Cable','part',0,10,25,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'Cable','accessory',0,10,25,1)");
   // A serialised handset: costed per device, NOT per lot.
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(3,'iPhone','device',1,15000,20000,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(3,'iPhone','accessory',1,15000,20000,1)");
   return db;
 }
 

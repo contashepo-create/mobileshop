@@ -68,12 +68,12 @@ function freshShop() {
   x(`INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive)
      VALUES(1,'Safe','safe',100000,1)`);
   x(`INSERT INTO payment_methods(PaymentMethodID,MethodName,MethodType,Balance,IsActive)
-     VALUES(1,'Wallet','wallet',50000,1)`);
+     VALUES(1,'Wallet','digital_wallet',50000,1)`);
   x(`INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'Ahmed',0,'active')`);
   x(`INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'Supp',0,'active')`);
   x(`INSERT INTO employees(EmployeeID,Name,BaseSalary,Balance) VALUES(1,'Emp',3000,0)`);
   x(`INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive)
-     VALUES(1,'Cable','part',0,10,20,1),(2,'Phone','device',0,600,1000,1)`);
+     VALUES(1,'Cable','accessory',0,10,20,1),(2,'Phone','phone',0,600,1000,1)`);
   x(`INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice)
      VALUES(1,1,100,10),(2,1,10,600)`);
   return db;

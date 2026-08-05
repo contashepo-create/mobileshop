@@ -128,6 +128,19 @@ function splitStatements(sql) {
     if (c === "'" || c === '"') { quote = c; buf += c; continue; }
 
     if (c === ';') {
+      // A CREATE TRIGGER body is `BEGIN ... ; ... END`, so the semicolons
+      // INSIDE it do not end the statement. Splitting on them cut every
+      // trigger in half, and the halves both failed to parse — so the
+      // application enforced 44 database guards that the test schema did not
+      // have. The tests would have passed while the guards were untested,
+      // which is exactly the blind spot this review exists to remove.
+      //
+      // Tracked with a depth counter rather than a regex because triggers can
+      // legitimately contain several statements.
+      const upto = buf.toUpperCase();
+      const begins = (upto.match(/\bBEGIN\b/g) || []).length;
+      const ends = (upto.match(/\bEND\b/g) || []).length;
+      if (begins > ends) { buf += c; continue; }   // still inside the body
       const s = buf.trim();
       if (s) out.push(s);
       buf = '';

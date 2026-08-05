@@ -96,7 +96,7 @@ function seed() {
   db.exec(`INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive)
            VALUES(1,'Safe','safe',${OPENING_CASH},1)`);
   db.exec(`INSERT INTO payment_methods(PaymentMethodID,MethodName,MethodType,Balance,IsActive)
-           VALUES(1,'Wallet','wallet',${OPENING_WALLET},1)`);
+           VALUES(1,'Wallet','digital_wallet',${OPENING_WALLET},1)`);
   db.exec(`INSERT INTO customers(CustomerID,Name,Balance,Status)
            VALUES(1,'Ahmed',0,'active'),(2,'Sara',0,'active')`);
   db.exec(`INSERT INTO suppliers(SupplierID,Name,Balance,Status)
@@ -107,8 +107,8 @@ function seed() {
   // defect found: a sold handset stayed in `stock_quantities` for ever, so
   // inventory was overstated by the cost of every phone the shop had sold.
   db.exec(`INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive)
-           VALUES(1,'Cable','part',0,10,20,1),(2,'Phone','device',0,600,1000,1),
-                 (3,'iPhone','device',1,600,1000,1)`);
+           VALUES(1,'Cable','accessory',0,10,20,1),(2,'Phone','phone',0,600,1000,1),
+                 (3,'iPhone','phone',1,600,1000,1)`);
   db.exec(`INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice)
            VALUES(1,1,100,10),(2,1,20,600)`);
   // The opening cash, wallet and stock came from somewhere: the owner put them

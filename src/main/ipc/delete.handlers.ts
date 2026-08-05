@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { requireId } from '../../shared/validate';
 import { safeFailure } from '../security/errorResponse';
 import { restoreStock, resolveSourceWarehouse, restoreStockAtCost, deductStockAtCost, recordValuationResidual } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
@@ -29,6 +30,12 @@ function blockIfReferenced(
 export function registerDeleteHandlers() {
   // Delete sale - reverse all effects
   ipcMain.handle('delete:sale', async (_event, saleId: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(saleId, 'رقم الفاتورة');
+    if (!_id.ok) return { success: false, message: _id.message };
+    saleId = _id.value;
     const db = getDb();
     try {
       const sale = db.prepare('SELECT * FROM sales WHERE SaleID = ?').get(saleId) as any;
@@ -102,6 +109,12 @@ export function registerDeleteHandlers() {
 
   // Delete purchase - reverse all effects
   ipcMain.handle('delete:purchase', async (_event, purchaseId: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(purchaseId, 'رقم فاتورة الشراء');
+    if (!_id.ok) return { success: false, message: _id.message };
+    purchaseId = _id.value;
     const db = getDb();
     try {
       const purchase = db.prepare('SELECT * FROM purchases WHERE PurchaseID = ?').get(purchaseId) as any;
@@ -324,6 +337,12 @@ export function registerDeleteHandlers() {
 
   // Delete advance - reverse employee balance + cash
   ipcMain.handle('delete:advance', async (_event, advanceId: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(advanceId, 'رقم السلفة');
+    if (!_id.ok) return { success: false, message: _id.message };
+    advanceId = _id.value;
     const db = getDb();
     try {
       const advance = db.prepare('SELECT * FROM employee_advances WHERE AdvanceID = ?').get(advanceId) as any;
@@ -359,6 +378,12 @@ export function registerDeleteHandlers() {
 
   // Delete deduction - reverse
   ipcMain.handle('delete:deduction', async (_event, deductionId: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(deductionId, 'رقم الخصم');
+    if (!_id.ok) return { success: false, message: _id.message };
+    deductionId = _id.value;
     const db = getDb();
     try {
       const ded = db.prepare(
@@ -393,6 +418,12 @@ export function registerDeleteHandlers() {
 
   // Delete voucher - reverse cash + party balance
   ipcMain.handle('delete:voucher', async (_event, voucherId: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(voucherId, 'رقم السند');
+    if (!_id.ok) return { success: false, message: _id.message };
+    voucherId = _id.value;
     const db = getDb();
     try {
       const voucher = db.prepare('SELECT * FROM vouchers WHERE VoucherID = ?').get(voucherId) as any;
@@ -467,6 +498,12 @@ export function registerDeleteHandlers() {
 
   // Delete service sale - reverse
   ipcMain.handle('delete:serviceSale', async (_event, id: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(id, 'رقم الخدمة');
+    if (!_id.ok) return { success: false, message: _id.message };
+    id = _id.value;
     const db = getDb();
     try {
       const sale = db.prepare('SELECT * FROM service_sales WHERE ServiceSaleID = ?').get(id) as any;
@@ -534,6 +571,12 @@ export function registerDeleteHandlers() {
 
   // Delete maintenance delivery - reverse
   ipcMain.handle('delete:maintenanceDelivery', async (_event, deliveryId: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(deliveryId, 'رقم التسليم');
+    if (!_id.ok) return { success: false, message: _id.message };
+    deliveryId = _id.value;
     const db = getDb();
     try {
       const delivery = db.prepare('SELECT * FROM maintenance_deliveries WHERE DeliveryID = ?').get(deliveryId) as any;
@@ -624,6 +667,12 @@ export function registerDeleteHandlers() {
 
   // Delete asset transfer - reverse
   ipcMain.handle('delete:transfer', async (_event, transferId: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(transferId, 'رقم التحويل');
+    if (!_id.ok) return { success: false, message: _id.message };
+    transferId = _id.value;
     const db = getDb();
     try {
       const transfer = db.prepare('SELECT * FROM asset_transfers WHERE TransferID = ?').get(transferId) as any;

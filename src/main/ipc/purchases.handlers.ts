@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { safeFailure, safeMessage } from '../security/errorResponse';
+import { requireId } from '../../shared/validate';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, warehouseStock, deductStock, deductStockAtCost, restoreStockAtCost, recordValuationResidual, addStockLot } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
@@ -125,6 +126,21 @@ export function registerPurchasesHandlers() {
         }
       }
 
+      // Normalised, not merely validated.
+      //
+      // The check below reads `value ?? 0`, but the INSERT further down bound
+      // `data.Discount` RAW. An omitted field therefore passed validation as 0
+      // and then reached better-sqlite3 as `undefined`, throwing
+      // "Provided value cannot be bound to SQLite parameter 6." out of the
+      // handler — a crash, not a reply. Defaulting on `data` makes them agree.
+      data = {
+        ...data,
+        Discount: num(data.Discount ?? 0),
+        TaxAmount: num(data.TaxAmount ?? 0),
+        PaidAmount: num(data.PaidAmount ?? 0),
+        AdditionalCost: num(data.AdditionalCost ?? 0),
+        PaymentCost: num(data.PaymentCost ?? 0),
+      };
       for (const [label, value] of [
         ['الخصم', data.Discount], ['الضريبة', data.TaxAmount],
         ['المدفوع', data.PaidAmount], ['المصاريف الإضافية', data.AdditionalCost],
@@ -1031,6 +1047,11 @@ export function registerPurchasesHandlers() {
    * and the debt we had cancelled is restored to the supplier.
    */
   ipcMain.handle('delete:purchaseReturn', async (_event, returnId: number) => {
+    // Bound straight into the lookups below; a malformed id crashed the
+    // handler with a better-sqlite3 bind error instead of replying.
+    const _rid = requireId(returnId, 'رقم مرتجع الشراء');
+    if (!_rid.ok) return { success: false, message: _rid.message };
+    returnId = _rid.value;
     const db = getDb();
     try {
       const ret = db.prepare('SELECT * FROM purchase_returns WHERE ReturnID = ?').get(returnId) as any;

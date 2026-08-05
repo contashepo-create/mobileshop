@@ -11,7 +11,7 @@ function seed(){const db=buildDatabase();
  db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'S','safe',100000,1)");
  db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'A',0,'active')");
  db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'S',0,'active')");
- db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'C','part',0,10,20,1),(2,'P','device',0,600,1000,1)");
+ db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'C','accessory',0,10,20,1),(2,'P','phone',0,600,1000,1)");
  db.exec("INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,10,10),(2,1,10,600)");
 }
 let pass=0,fail=0;
@@ -342,7 +342,7 @@ function seedSerial() {
   db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'S','safe',100000,1)");
   db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'A',0,'active')");
   db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'S',0,'active')");
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'iPhone','device',1,600,1000,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'iPhone','accessory',1,600,1000,1)");
   return db;
 }
 const buyPhone = (imei, cost, wh = 1) => call('purchases:create', {
@@ -421,7 +421,7 @@ t('cancelling that debit note restores the device', ag.ok && ag.b === 1,
 //    specific units left, and repeated returns drove it below zero.
 seedSerial();
 currentDb().exec('DELETE FROM stock_quantities');
-currentDb().exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'Loose','part',0,10,20,1)");
+currentDb().exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(2,'Loose','accessory',0,10,20,1)");
 await call('purchases:create', { SupplierID: 1, items: [{ ItemID: 2, Quantity: 2, UnitCost: 900, WarehouseID: 1 }],
   Discount: 0, TaxAmount: 0, PaidAmount: 0, AdditionalCost: 0, PaymentCost: 0, fiscalYearId: 1 });
 const pExp = q('SELECT PurchaseID v FROM purchases ORDER BY PurchaseID DESC LIMIT 1').v;
@@ -453,7 +453,7 @@ function seedBS(capital) {
   db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'S','safe',100000,1)");
   db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'A',0,'active')");
   db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'S',0,'active')");
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'iPhone','device',1,600,1000,1),(2,'Cable','part',0,10,20,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'iPhone','accessory',1,600,1000,1),(2,'Cable','accessory',0,10,20,1)");
   db.exec(`INSERT INTO settings(Key,Value) VALUES('owner_capital','${capital}')`);
   return db;
 }
@@ -543,7 +543,7 @@ function seedDisc() {
   db.exec("INSERT INTO cash_accounts(CashAccountID,AccountName,AccountType,Balance,IsActive) VALUES(1,'S','safe',100000,1)");
   db.exec("INSERT INTO customers(CustomerID,Name,Balance,Status) VALUES(1,'A',0,'active')");
   db.exec("INSERT INTO suppliers(SupplierID,Name,Balance,Status) VALUES(1,'S',0,'active')");
-  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'Cable','part',0,10,20,1)");
+  db.exec("INSERT INTO items(ItemID,ItemName,ItemType,IsSerialized,CostPrice,SalePrice,IsActive) VALUES(1,'Cable','accessory',0,10,20,1)");
   db.exec("INSERT INTO stock_quantities(ItemID,WarehouseID,Quantity,CostPrice) VALUES(1,1,100,10)");
   return db;
 }

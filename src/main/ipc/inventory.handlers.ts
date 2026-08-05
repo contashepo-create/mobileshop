@@ -90,9 +90,15 @@ export function registerInventoryHandlers() {
 
   ipcMain.handle('categories:delete', async (_event, id: number) => {
     const db = getDb();
+    // The id is bound into the lookups below, and the count row is read
+    // without checking it exists. With bind hardening the lookup now returns
+    // undefined for a malformed id, so `count.count` threw instead.
+    const catId = requireId(id, 'رقم الفئة');
+    if (!catId.ok) return { success: false, message: catId.message };
+    id = catId.value;
     // Check if any items use this category
     const count = db.prepare('SELECT COUNT(*) as count FROM items WHERE CategoryID = ?').get(id) as any;
-    if (count.count > 0) {
+    if ((count?.count ?? 0) > 0) {
       return { success: false, message: `لا يمكن حذف الفئة - يوجد ${count.count} صنف مرتبط بها` };
     }
     db.prepare('DELETE FROM categories WHERE CategoryID = ?').run(id);
@@ -365,6 +371,9 @@ export function registerInventoryHandlers() {
   // Safe delete — only hard-deletes if item has no linked transactions
   ipcMain.handle('items:deleteSafe', async (_event, id: number) => {
     const db = getDb();
+    const delId = requireId(id, 'رقم الصنف');
+    if (!delId.ok) return { success: false, message: delId.message };
+    id = delId.value;
     const checks = db.prepare(`
       SELECT
         (SELECT COUNT(*) FROM purchase_details WHERE ItemID = ?) as purchases,
@@ -376,6 +385,7 @@ export function registerInventoryHandlers() {
         (SELECT COUNT(*) FROM warehouse_transfer_details WHERE ItemID = ?) as transfers,
         (SELECT COUNT(*) FROM warehouse_po_details WHERE ItemID = ?) as po
     `).get(id, id, id, id, id, id, id, id) as any;
+    if (!checks) return { success: false, message: 'الصنف غير موجود' };
 
     const linked = Object.entries(checks).filter(([_, v]) => (v as number) > 0);
     if (linked.length > 0) {

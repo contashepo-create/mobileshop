@@ -327,7 +327,15 @@ async function compileHardenBinding() {
     };
     const harden = take('hardenBinding');
     const rule = take('isWriteStatement');
-    if (!harden || !rule) return null;
+    // `hardenBinding` also calls `roundBalanceArithmetic` on the SQL it
+    // prepares. Extracting the first two and not the third produced
+    // `ReferenceError: roundBalanceArithmetic is not defined` at the moment
+    // the guard ran — caught by the full verify run, which is exactly what an
+    // extraction-based test is for: the shipped function's dependencies are
+    // part of its behaviour, and a missing one must fail loudly rather than
+    // downgrade this check to "unverified".
+    const round = take('roundBalanceArithmetic');
+    if (!harden || !rule || !round) return null;
 
     // The types are stripped by Node's own TypeScript loader rather than by a
     // hand-written regex. A regex was tried and mangled the code — it turned
@@ -345,7 +353,7 @@ async function compileHardenBinding() {
       'type Database = { Database: any };\n'
       + 'declare const Buffer: any;\n'
       + 'const BIND_HARDENED = Symbol.for("mobileshop.bindHardened");\n'
-      + harden + '\n' + rule + '\n'
+      + harden + '\n' + rule + '\n' + round + '\n'
       + 'export default hardenBinding;\n', 'utf8');
 
     const mod = await import('file://' + file);

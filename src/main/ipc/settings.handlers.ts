@@ -1,6 +1,7 @@
 import { ipcMain, app, dialog } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { getDb } from '../database/connection';
 import bcrypt from 'bcryptjs';
 import { devLogin, revokeDevToken, createDevChallenge, devLoginSigned } from '../security/devAuth';
@@ -276,6 +277,33 @@ export function registerSettingsHandlers() {
         VALUES (?, ?, NULL, 1, 1)
         ON CONFLICT(Username) DO UPDATE SET PasswordHash = excluded.PasswordHash
       `).run(admin.username, hash);
+
+      // RETIRE THE SEEDED DEFAULT ACCOUNT.
+      //
+      // `seedData` creates `admin` / `admin123` so a fresh database is usable
+      // before the wizard runs. The upsert above only replaces that account
+      // when the owner happens to choose the SAME username — and the wizard
+      // invites them to choose their own.
+      //
+      // MEASURED: after a complete, successful setup as `mohamed`, logging in
+      // as `admin` / `admin123` still succeeded with full administrator
+      // rights. A published default credential is the first thing anyone
+      // tries, and it would have shipped on every install.
+      //
+      // Deactivated rather than deleted: `UserID = 1` is referenced by seeded
+      // rows and by any document created before the wizard ran, and deleting
+      // it would either fail on the foreign key or orphan those records. An
+      // inactive user cannot log in — `auth:login` filters on `IsActive = 1` —
+      // and the password is scrambled as well, so even re-activating it by
+      // hand does not restore a known credential.
+      if (admin.username !== 'admin') {
+        const seeded = db.prepare(
+          "SELECT UserID FROM users WHERE Username = 'admin'").get() as any;
+        if (seeded) {
+          db.prepare('UPDATE users SET IsActive = 0, PasswordHash = ? WHERE UserID = ?')
+            .run(bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10), seeded.UserID);
+        }
+      }
 
       // Create initial customer if name provided
       if (customer.name.trim()) {

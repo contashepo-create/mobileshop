@@ -394,6 +394,20 @@ export class IpcAuthError extends Error {
   }
 }
 
+/**
+ * Test seam for `authorize`.
+ *
+ * Exposed so a suite can prove the DECISION rather than match the source. A
+ * text check cannot tell `throw new IpcAuthError(...)` from `return null` in a
+ * branch that merely looks defensive, and "an unmapped channel fails closed"
+ * is the property the whole authorisation model rests on.
+ */
+export function __authorizeForTests(
+  event: IpcMainInvokeEvent, channel: string,
+): CallerContext | null {
+  return authorize(event, channel);
+}
+
 function authorize(event: IpcMainInvokeEvent, channel: string): CallerContext | null {
   if (PUBLIC_CHANNELS.has(channel)) return null;
 

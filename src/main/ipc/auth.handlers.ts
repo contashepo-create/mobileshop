@@ -2,6 +2,9 @@ import { ipcMain } from 'electron';
 import bcrypt from 'bcryptjs';
 import { getDb } from '../database/connection';
 import { createSession, destroySession, getSession } from '../security/session';
+import {
+  checkLoginAllowed, recordLoginFailure, recordLoginSuccess,
+} from '../security/loginThrottle';
 
 /**
  * Resolve the effective permission set for a user:
@@ -46,6 +49,26 @@ export function registerAuthHandlers() {
       return { success: false, message: 'اسم المستخدم وكلمة المرور مطلوبان' };
     }
 
+    // BRUTE FORCE.
+    //
+    // This channel had no rate limit at all. Measured against this very
+    // handler: 100 wrong passwords in 7.8 seconds — ~13 guesses a second, for
+    // as long as the attacker likes. bcrypt's cost was the only brake, and a
+    // list of common passwords beats that in hours on an unattended till.
+    //
+    // Checked BEFORE the database is touched and before bcrypt runs, so a
+    // locked account costs an attacker nothing to discover and gains them
+    // nothing either.
+    const locked = checkLoginAllowed(username);
+    if (locked) {
+      const mins = Math.ceil(locked.lockedForSec / 60);
+      return {
+        success: false,
+        code: 'LOCKED_OUT',
+        message: `تم إيقاف المحاولات مؤقتاً بعد عدة محاولات خاطئة - أعد المحاولة بعد ${mins} دقيقة`,
+      };
+    }
+
     const db = getDb();
 
     const user = db.prepare(`
@@ -61,13 +84,19 @@ export function registerAuthHandlers() {
     // "user does not exist" from "wrong password" by response content or timing.
     if (!user) {
       bcrypt.compareSync(password, '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvaliduO');
+      // Counted even for a username that does not exist: otherwise an attacker
+      // guessing usernames is never throttled, and the account that DOES exist
+      // is found by watching which name starts locking out.
+      recordLoginFailure(username);
       return { success: false, message: 'اسم المستخدم أو كلمة المرور غير صحيحة' };
     }
 
     if (!bcrypt.compareSync(password, user.PasswordHash)) {
+      recordLoginFailure(username);
       return { success: false, message: 'اسم المستخدم أو كلمة المرور غير صحيحة' };
     }
 
+    recordLoginSuccess(username);
     const permissions = loadPermissions(user.UserID, user.RoleID ?? null);
 
     createSession(event.sender.id, {

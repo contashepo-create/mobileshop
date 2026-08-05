@@ -123,6 +123,17 @@ export function registerUsersHandlers() {
         WHERE UserID = ?
       `).run(data.username, data.employeeId ?? null, data.roleId ?? 1, data.isActive ?? 1, id);
     }
+
+    // A session caches the permission SET it was created with, so a change of
+    // role — or switching the account off — has no effect on a window that is
+    // already open. Demoting a manager to a cashier left them managing until
+    // they happened to log out.
+    //
+    // Ending the session is the honest fix: the user signs in again and gets
+    // exactly the rights they now have. Refreshing the cached set in place
+    // would be gentler but leaves every OTHER cached decision stale, and the
+    // one case that must never be gentle is revoking access.
+    destroyAllSessionsForUser(id);
     return { success: true };
   });
 
@@ -139,6 +150,15 @@ export function registerUsersHandlers() {
       };
     }
     db.prepare('UPDATE users SET IsActive = 0 WHERE UserID = ?').run(id);
+    // Deactivating an account must log it OUT, not merely stop the next login.
+    //
+    // `auth:login` checks `IsActive = 1`, but a session already established
+    // lives in memory keyed by window id and never re-reads the user row. So a
+    // cashier who was dismissed kept full access on whatever till was already
+    // open — MEASURED: account deactivated, IsActive = 0 in the database, and
+    // the existing session still authorised every call. Which is precisely the
+    // moment the account is disabled for.
+    destroyAllSessionsForUser(id);
     return { success: true };
   });
 

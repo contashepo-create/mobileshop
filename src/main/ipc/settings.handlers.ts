@@ -711,7 +711,24 @@ export function registerSettingsHandlers() {
     }
 
     // Tables to preserve (system config only)
-    const systemTables = ['users', 'roles', 'role_permissions', 'permissions', 'settings', 'fiscal_years'];
+    //
+    // `security_events` is on this list for a different reason from the rest.
+    // The others are configuration the shop would have to re-enter. The audit
+    // trail is preserved because a database reset is ITSELF one of the events
+    // it records — a wipe that erased the log would be a wipe with no witness,
+    // and the row written a few lines below would be the only survivor of an
+    // account of what happened.
+    //
+    // It is also now enforced by the database: `ck_security_events_no_delete`
+    // aborts any DELETE on that table. Leaving it out of this list would make
+    // `settings:resetDatabase` fail outright — MEASURED, the trigger refused
+    // the wipe and the whole transaction rolled back, so the shop could no
+    // longer reset at all. Two layers agreeing is the point; two layers
+    // disagreeing is an outage.
+    const systemTables = [
+      'users', 'roles', 'role_permissions', 'permissions', 'settings',
+      'fiscal_years', 'security_events',
+    ];
 
     // Get all user tables
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as any[];

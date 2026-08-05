@@ -1955,6 +1955,62 @@ function seedData(db: Database.Database) {
     BEGIN SELECT RAISE(ABORT, 'advance must be positive'); END;
   `);
 
+  // =============================================
+  // THE AUDIT TRAIL IS APPEND-ONLY, AND NOW IT IS ENFORCED
+  // =============================================
+  //
+  // `security_events` carried the comment "deliberately append-only in
+  // practice: nothing in the application updates or deletes a row here."
+  // That was a description of the callers, not a property of the table.
+  //
+  // MEASURED against the real schema — six attacks, all six succeeded:
+  //
+  //   UPDATE ... SET Detail   = 'لا شيء'          1 row
+  //   UPDATE ... SET Username = 'someone_else'    1 row
+  //   UPDATE ... SET EventType= 'login'           1 row
+  //   UPDATE ... SET CreatedAt= '2020-01-01'      1 row
+  //   DELETE  ... WHERE EventID = 2               1 row
+  //   DELETE  FROM security_events                1 row   <- the whole log
+  //
+  // The table ended empty. A log that the thing it is watching can erase is
+  // not evidence of anything: password resets, owner-level data exports and
+  // database wipes are exactly the events recorded here, and whoever performs
+  // one is precisely who wants the row gone.
+  //
+  // WHY TRIGGERS RATHER THAN A PERMISSION
+  // -------------------------------------
+  // The permission layer governs IPC channels. It cannot see a repair script,
+  // a hand edit in a SQLite browser, or a restored backup that was doctored
+  // offline — and the .db file sits in the shop's own AppData folder. The
+  // constraint has to live with the data.
+  //
+  // WHY NOT `ALTER TABLE ... ADD CONSTRAINT`
+  // ----------------------------------------
+  // SQLite has no such statement, and a CHECK cannot express "no UPDATE ever".
+  // BEFORE triggers with RAISE(ABORT) can, they are portable across every
+  // SQLite build this ships against, and they are written here as ONE LITERAL
+  // BLOCK because the test harness extracts db.exec(`...`) templates and skips
+  // any containing an interpolation — a generated guard would run in the app
+  // and be invisible to every test.
+  //
+  // WHAT IS DELIBERATELY STILL ALLOWED
+  // ----------------------------------
+  // INSERT. The log must keep accepting new events, or the guard has replaced
+  // a tamperable record with no record.
+  //
+  // Pruning old events is NOT provided. If it is ever needed it belongs in a
+  // migration that raises the schema version, under the developer's control,
+  // never in a handler the renderer can reach.
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS ck_security_events_no_update
+    BEFORE UPDATE ON security_events
+    BEGIN SELECT RAISE(ABORT, 'security_events is append-only: a recorded event cannot be altered'); END;
+
+    CREATE TRIGGER IF NOT EXISTS ck_security_events_no_delete
+    BEFORE DELETE ON security_events
+    BEGIN SELECT RAISE(ABORT, 'security_events is append-only: a recorded event cannot be deleted'); END;
+  `);
+
   const insertPerm = db.prepare('INSERT OR IGNORE INTO permissions (PermissionKey, PermissionName, Module) VALUES (?, ?, ?)');
   for (const [key, name, module] of permissions) {
     insertPerm.run(key, name, module);

@@ -74,6 +74,9 @@ console.log('\n── 1. every readiness axis has a suite, and it runs ──');
     ['security: password recovery', 'verify_password_recovery.mjs'],
     ['data: every channel executed', 'verify_all_channels.mjs'],
     ['data: database-level value guards', 'verify_db_constraints.mjs'],
+    // The log said "append-only in practice". Measured: six tampering attacks
+    // all succeeded and DELETE FROM security_events emptied it.
+    ['security: the audit trail cannot be rewritten or erased', 'verify_audit_trail.mjs'],
     // A refused write must never pass for a successful one. Added after a
     // probe measured `hardenBinding` answering a refused `run()` with
     // `{changes: 0}` and letting the enclosing transaction COMMIT — a document
@@ -245,8 +248,20 @@ console.log('── 3. the defects this review found cannot come back ──');
     console.error = quiet;
   }
 
-  /** How many database-level value guards the migration must declare. */
-  const EXPECTED_GUARDS = 44;
+  /**
+   * How many database-level guards the migration must declare.
+   *
+   * 44 value guards (a price may not be negative, a status must be one of a
+   * known set, and so on) plus 2 that protect the AUDIT TRAIL itself:
+   * `ck_security_events_no_update` and `ck_security_events_no_delete`.
+   *
+   * The audit pair is a different KIND of guard — it constrains the operation
+   * rather than the value — but it is counted here for the same reason as the
+   * rest: this number is the tripwire that makes a removed guard show up in a
+   * diff instead of vanishing quietly. Raising it was itself caught by this
+   * check failing when the two triggers were added.
+   */
+  const EXPECTED_GUARDS = 46;
 
   // The PRODUCTION source must carry the hardening, not merely the test stub.
   //
@@ -318,7 +333,7 @@ console.log('── 4. the harness cannot silently diverge from production ─�
   // of the 44 and the check still passed. A guard removed on purpose should be
   // a deliberate edit to this number, which makes the removal visible in the
   // diff rather than silent.
-  const EXPECTED_GUARDS = 44;   // must match the constant in section 3
+  const EXPECTED_GUARDS = 46;   // must match the constant in section 3
   ok(`the test schema carries all ${EXPECTED_GUARDS} guards`, trigCount === EXPECTED_GUARDS,
     `${trigCount} found — the harness must not cut trigger bodies at their `
     + 'internal semicolons, and no guard may be dropped without changing this number');

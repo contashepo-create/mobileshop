@@ -5,6 +5,62 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { businessToday } from '../../shared/businessDate';
 
+/**
+ * Opens a database file read-only and asks SQLite whether it is intact.
+ *
+ * Read-only and in its own connection, so a damaged file can never touch the
+ * live one and nothing is written to the candidate — a backup that the act of
+ * checking modified would no longer be the backup that was taken.
+ *
+ * The driver is required lazily. This module is imported by the offline
+ * verifiers, and a static import would pull the native binding into processes
+ * that have no database at all.
+ */
+async function verifyDatabaseFile(file: string): Promise<{ ok: boolean; reason: string }> {
+  interface Probe {
+    pragma: (s: string) => unknown;
+    prepare: (s: string) => { get: (...a: unknown[]) => unknown };
+    close: () => void;
+  }
+  let probe: Probe | null = null;
+  try {
+    const { default: Database } = await import('better-sqlite3');
+    probe = new Database(file, { readonly: true, fileMustExist: true }) as unknown as Probe;
+
+    const result = probe.pragma('integrity_check');
+    const rows = Array.isArray(result) ? result : [result];
+    const first = rows[0] as { integrity_check?: string } | string | undefined;
+    const verdict = typeof first === 'string' ? first : first?.integrity_check;
+    if (verdict !== 'ok') {
+      return { ok: false, reason: String(verdict ?? 'فحص السلامة فشل').slice(0, 120) };
+    }
+
+    // A file can be structurally perfect and still not be THIS application's
+    // database — an unrelated SQLite file would restore "successfully" and
+    // leave the shop staring at an empty program.
+    //
+    // `prepare`, NOT `pragma`. The first version of this check used
+    // `pragma("SELECT ...")`, which better-sqlite3 wraps as `PRAGMA SELECT ...`
+    // — a syntax error. It failed CLOSED, so it looked harmless, but a valid
+    // backup was reported as `near "SELECT": syntax error` and the shop would
+    // have been refused its own restore. Measured before it shipped.
+    const row = probe.prepare(
+      "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('sales','purchases','customers','items')",
+    ).get() as { n?: number } | undefined;
+    if ((row?.n ?? 0) < 4) {
+      return { ok: false, reason: 'الملف قاعدة بيانات سليمة لكنها ليست قاعدة بيانات هذا البرنامج' };
+    }
+
+    return { ok: true, reason: '' };
+  } catch (err: unknown) {
+    // `SQLITE_CORRUPT: database disk image is malformed` arrives here.
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: message.slice(0, 120) };
+  } finally {
+    try { probe?.close(); } catch { /* already closed */ }
+  }
+}
+
 export function registerBackupHandlers() {
   // Manual backup
   ipcMain.handle('backup:create', async () => {
@@ -61,6 +117,33 @@ export function registerBackupHandlers() {
       fs.closeSync(fd);
       if (header.toString('utf-8', 0, 15) !== 'SQLite format 3') {
         return { success: false, message: 'الملف المختار ليس قاعدة بيانات صالحة' };
+      }
+
+      // ...and that it is READABLE, not merely SQLite-shaped.
+      //
+      // The header is the first sixteen bytes. It says nothing about the
+      // 143,000 that follow. MEASURED: a database whose leaf pages were
+      // overwritten still began with "SQLite format 3", passed the check
+      // above, and then failed on first use with
+      // `SQLITE_CORRUPT: database disk image is malformed`.
+      //
+      // That is the worst possible moment to find out. By then the restore has
+      // already overwritten the live database — the shop has traded the books
+      // it had for a file that cannot be opened, and the only copy of the
+      // original is the `.before-restore` file, which nothing in the interface
+      // offers to put back.
+      //
+      // `integrity_check` walks every page and every index. It costs a second
+      // on a shop-sized database and it is the difference between refusing a
+      // bad backup and destroying a good one. `quick_check` was considered and
+      // rejected: it skips index verification, and a corrupt index is exactly
+      // the failure that shows up later as a wrong total rather than an error.
+      const probe = await verifyDatabaseFile(backupPath);
+      if (!probe.ok) {
+        return {
+          success: false,
+          message: `النسخة الاحتياطية تالفة ولم يتم استخدامها - قاعدة البيانات الحالية سليمة (${probe.reason})`,
+        };
       }
 
       closeDb();

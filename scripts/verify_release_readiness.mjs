@@ -92,6 +92,9 @@ console.log('\n── 1. every readiness axis has a suite, and it runs ──');
     ['data: multi-terminal', 'verify_multi_terminal.mjs'],
     ['data: disaster recovery', 'verify_disaster_recovery.mjs'],
     ['data: backup integrity', 'verify_backup_integrity.mjs'],
+    // A restore checked only the 16-byte SQLite header: measured, a database
+    // with destroyed pages passed it and was copied over the live books.
+    ['data: a bad backup cannot overwrite good books', 'verify_restore_safety.mjs'],
     ['stability: the whole program compiles', 'verify_build.mjs'],
     ['stability: renderer crash recovery', 'verify_renderer_crash.mjs'],
     ['stability: scale', 'verify_scale_load.mjs'],

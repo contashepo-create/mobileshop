@@ -67,17 +67,57 @@ wrangler secret put TG_BOT_TOKEN
 wrangler secret put TG_ADMIN_CHAT
 ```
 
+4. ولّد كلمة سر للـ webhook واحفظها:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+wrangler secret put TG_WEBHOOK_SECRET
+```
+
+> ### ⚠️ لماذا `TG_WEBHOOK_SECRET` إلزامي وليس اختيارياً
+>
+> مسار `/telegram` لا يمكن حمايته بـ `ADMIN_KEY`، لأن تليجرام لا يرسل
+> ترويسة من اختيارنا. كان دفاعه الوحيد هو رقم المحادثة **داخل جسم الطلب** —
+> والجسم يكتبه من يرسل الطلب.
+>
+> **قياس فعلي** على الخادم الحقيقي، بلا أي بيانات اعتماد، من مُرسِل مجهول
+> لا يعرف سوى الرابط العام:
+>
+> ```
+> POST /telegram
+> {"message":{"chat":{"id":7232305465},"text":"/new deadbeefdeadbeef 3650"}}
+>
+> ← 200 {"ok":true}
+> ← البوت أرسل: «كود التفعيل الخاص بك: 2YN0-0001-CMKM-MVE8-...»
+> ```
+>
+> ترخيص موقَّع صالح **عشر سنوات**، أنشأه مهاجم. رقم المحادثة ليس سراً —
+> وهو أصلاً رقم من عشر خانات.
+>
+> الحل هو آلية تليجرام نفسها: `secret_token` يُسجَّل مع `setWebhook`،
+> فيعيده تليجرام في ترويسة `X-Telegram-Bot-Api-Secret-Token` مع كل تسليم.
+> الطلب المزوَّر لا يستطيع حملها.
+>
+> **الخادم يرفض كل شيء إن لم تُضبط هذه الكلمة** (fail closed): بوت صامت
+> عطلٌ يبلّغ عنه المالك، أما بوت يصنع تراخيص للغرباء فلا ينتبه له أحد.
+
 ## الخطوة 4: النشر
 
 ```bash
 wrangler deploy
 ```
 
-اربط البوت بالخادم (مرة واحدة):
+اربط البوت بالخادم (مرة واحدة) — **مع كلمة السر**:
 
 ```bash
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://mobileshop-licensing.<اسمك>.workers.dev/telegram"
+curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+     -H "content-type: application/json" \
+     -d '{"url":"https://mobileshop-licensing.<اسمك>.workers.dev/telegram","secret_token":"<TG_WEBHOOK_SECRET>"}'
 ```
+
+> الرابط القديم `setWebhook?url=...` بدون `secret_token` يترك الثغرة
+> مفتوحة: تليجرام لن يرسل الترويسة، فسيرفض الخادم كل تسليم ويتوقف البوت.
+> استخدم الأمر أعلاه بالضبط.
 
 ## الخطوة 5: ربط التطبيق
 

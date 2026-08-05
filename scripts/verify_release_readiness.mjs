@@ -79,6 +79,11 @@ console.log('\n── 1. every readiness axis has a suite, and it runs ──');
     // `{changes: 0}` and letting the enclosing transaction COMMIT — a document
     // written with one of its parts missing, and no error anywhere.
     ['data: a refused write is never silent', 'verify_write_integrity.mjs'],
+    // The only internet-facing component. Added after a measured exploit:
+    // an anonymous POST to /telegram, with no credential of any kind, minted a
+    // signed ten-year licence — the chat id it authenticated on is part of the
+    // payload the attacker writes.
+    ['security: the worker refuses forged and unauthenticated calls', 'verify_worker_auth.mjs'],
     ['data: migrations are safe to re-run', 'verify_upgrade_safety.mjs'],
     ['data: concurrency across terminals', 'verify_trade_concurrency.mjs'],
     ['data: multi-terminal', 'verify_multi_terminal.mjs'],

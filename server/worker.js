@@ -17,6 +17,42 @@
  *   npx wrangler secret put TG_ADMIN_CHAT  # numeric chat id, or several
  *                                          # separated by commas for a backup
  *                                          # phone: 7232305465,1593943219
+ *   npx wrangler secret put TG_WEBHOOK_SECRET  # see below — REQUIRED
+ *
+ * TG_WEBHOOK_SECRET AND WHY IT IS NOT OPTIONAL
+ * --------------------------------------------
+ * `/telegram` cannot be protected by ADMIN_KEY: Telegram will not send a custom
+ * header of ours. Its only defence WAS the chat id inside the JSON body — and
+ * the body is written by whoever sends the request.
+ *
+ * MEASURED against this worker's real exported `fetch`, with no credential of
+ * any kind, from an anonymous caller who knows only the public URL:
+ *
+ *   POST /telegram
+ *   {"message":{"chat":{"id":7232305465},"text":"/new deadbeefdeadbeef 3650"}}
+ *
+ *   -> 200 {"ok":true}
+ *   -> outbound: sendMessage "كود التفعيل الخاص بك:
+ *                2YN0-0001-CMKM-MVE8-AP7K-7WPD-..."
+ *
+ * A valid, signed, TEN-YEAR licence, minted by an attacker. The chat id is not
+ * a secret — it appears in this repository's own history and in the deployment
+ * notes — and even if it were, it is a 10-digit number.
+ *
+ * Telegram's answer is `secret_token`: a value given to `setWebhook`, which
+ * Telegram then sends back on every delivery in the
+ * `X-Telegram-Bot-Api-Secret-Token` header. A forged request cannot carry it.
+ *
+ * Register it once, after setting the secret:
+ *
+ *   curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+ *        -H "content-type: application/json" \
+ *        -d '{"url":"https://<worker>/telegram","secret_token":"<TG_WEBHOOK_SECRET>"}'
+ *
+ * The worker FAILS CLOSED when the secret is unset: an unconfigured deployment
+ * refuses every webhook rather than accepting every one. A bot that is silent
+ * is a fault the owner will report; a bot that mints licences for strangers is
+ * one nobody notices.
  */
 
 const EPOCH_UTC = Date.UTC(2020, 0, 1);
@@ -119,8 +155,16 @@ function adminChats(env) {
 
 /** True when this chat id may command the bot. */
 function isAdminChat(env, chatId) {
-  const id = String(chatId || '').trim();
-  if (!id) return false;
+  // NOT trimmed. Telegram sends `chat.id` as a JSON number, so a legitimate id
+  // never carries whitespace — but the value is read out of an attacker-shaped
+  // payload, and `" 7232305465"` was MEASURED being accepted as the owner.
+  //
+  // An identity with more than one spelling is an identity that can slip past
+  // a comparison somewhere else: the same value is used as `env.__actingChat`,
+  // stored as the pending-flow key, and echoed into `chat_id` on the way out.
+  // One spelling, exactly.
+  const id = String(chatId ?? '');
+  if (!/^-?\d{5,}$/.test(id)) return false;
   return adminChats(env).includes(id);
 }
 
@@ -1294,10 +1338,38 @@ async function handleCommand(env, text) {
 }
 
 async function handleTelegram(request, env) {
+  // ===== IS THIS REQUEST REALLY FROM TELEGRAM? =====
+  //
+  // This must come FIRST, before the body is even read. The chat id below is
+  // part of the payload, so it proves nothing on its own — anyone who knows
+  // the URL can write `{"chat":{"id":<the owner's id>}}` and did, in a measured
+  // exploit that minted a signed ten-year licence. See the note at the top of
+  // this file.
+  //
+  // `secret_token` is Telegram's own mechanism: it is registered with
+  // `setWebhook` and returned on every delivery in this header. It is compared
+  // in constant time, like every other credential here.
+  //
+  // FAILS CLOSED. If the secret is not configured the webhook refuses
+  // everything, because the alternative — accepting everything — is the
+  // vulnerability this exists to remove.
+  const presented = request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
+  if (!env.TG_WEBHOOK_SECRET || !safeEqual(presented, env.TG_WEBHOOK_SECRET)) {
+    // Answered exactly like an unknown chat id: 200 with an empty
+    // acknowledgement. A distinct status or message would tell a prober that
+    // the endpoint exists and that it is looking for a header.
+    console.error('[worker] /telegram rejected: webhook secret missing or wrong');
+    return json({ ok: true });
+  }
+
   const update = await request.json().catch(() => null);
 
   // Only the owner may drive the bot; everyone else is ignored silently so the
   // bot does not even reveal that it exists.
+  //
+  // Kept as a SECOND layer even though the header is now proved: the header
+  // says the request came from Telegram, this says it came from the owner.
+  // Telegram delivers messages from anyone who finds the bot.
   const cb = update?.callback_query;
   const msg = update?.message;
   const chatId = String(cb?.from?.id || msg?.chat?.id || '');

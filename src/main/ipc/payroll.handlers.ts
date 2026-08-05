@@ -62,6 +62,11 @@ export function registerPayrollHandlers() {
     userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
+    // The id is bound straight into the lookup below; an absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler rather than returning a reply.
+    const issueEmp = requireId(data?.EmployeeID, 'رقم الموظف');
+    if (!issueEmp.ok) return { success: false, message: issueEmp.message };
     const emp = db.prepare('SELECT * FROM employees WHERE EmployeeID = ?').get(data.EmployeeID) as any;
     if (!emp) return { success: false, message: 'الموظف غير موجود' };
 
@@ -191,6 +196,11 @@ export function registerPayrollHandlers() {
     userId: number;
   }) => {
     const db = getDb();
+    // The id is bound straight into the lookup below; an absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler rather than returning a reply.
+    const paySal = requireId(data?.SalaryID, 'رقم الراتب');
+    if (!paySal.ok) return { success: false, message: paySal.message };
     const salary = db.prepare('SELECT * FROM salaries WHERE SalaryID = ?').get(data.SalaryID) as any;
     if (!salary) return { success: false, message: 'الراتب غير موجود' };
     if (salary.Status === 'paid') return { success: false, message: 'تم صرف هذا الراتب بالفعل' };

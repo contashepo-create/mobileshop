@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
-import { checkAmount } from '../../shared/money';
+import { checkAmount, MAX_AMOUNT } from '../../shared/money';
+import { requireId } from '../../shared/validate';
 
 export function registerOpeningBalanceHandlers() {
   // Get all opening balances overview
@@ -82,21 +83,84 @@ export function registerOpeningBalanceHandlers() {
   // Update customer opening balance
   ipcMain.handle('openingBalances:updateCustomer', async (_event, id: number, balance: number) => {
     const db = getDb();
-    db.prepare('UPDATE customers SET Balance = ? WHERE CustomerID = ?').run(balance, id);
+    // `id` and `balance` are bound straight into the UPDATE. An absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler instead of returning a reply.
+    const rid = requireId(id, 'رقم العميل');
+    if (!rid.ok) return { success: false, message: rid.message };
+    // NOT `checkAmount`: a PARTY may legitimately open in credit.
+    //
+    // A customer balance of -500 means the shop owes them 500, which is a real
+    // accounting position and the existing suite pins it. A first draft used
+    // checkAmount here and broke that — a guard that refuses a valid business
+    // state is a worse bug than the crash it was fixing. Only the TYPE is
+    // checked: a finite number, within the magnitude the money helpers allow.
+    const balNum = typeof balance === 'number' ? balance : Number(balance);
+    if (!Number.isFinite(balNum)) {
+      return { success: false, message: 'الرصيد الافتتاحي يجب أن يكون رقماً' };
+    }
+    if (Math.abs(balNum) > MAX_AMOUNT) {
+      return { success: false, message: 'الرصيد الافتتاحي أكبر من الحد المسموح' };
+    }
+    const bal = { ok: true as const, value: balNum };
+    const info = db.prepare('UPDATE customers SET Balance = ? WHERE CustomerID = ?').run(bal.value, rid.value);
+    if (info.changes === 0) return { success: false, message: 'العميل غير موجود' };
     return { success: true };
   });
 
   // Update supplier opening balance
   ipcMain.handle('openingBalances:updateSupplier', async (_event, id: number, balance: number) => {
     const db = getDb();
-    db.prepare('UPDATE suppliers SET Balance = ? WHERE SupplierID = ?').run(balance, id);
+    // `id` and `balance` are bound straight into the UPDATE. An absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler instead of returning a reply.
+    const rid = requireId(id, 'رقم المورد');
+    if (!rid.ok) return { success: false, message: rid.message };
+    // NOT `checkAmount`: a PARTY may legitimately open in credit.
+    //
+    // A customer balance of -500 means the shop owes them 500, which is a real
+    // accounting position and the existing suite pins it. A first draft used
+    // checkAmount here and broke that — a guard that refuses a valid business
+    // state is a worse bug than the crash it was fixing. Only the TYPE is
+    // checked: a finite number, within the magnitude the money helpers allow.
+    const balNum = typeof balance === 'number' ? balance : Number(balance);
+    if (!Number.isFinite(balNum)) {
+      return { success: false, message: 'الرصيد الافتتاحي يجب أن يكون رقماً' };
+    }
+    if (Math.abs(balNum) > MAX_AMOUNT) {
+      return { success: false, message: 'الرصيد الافتتاحي أكبر من الحد المسموح' };
+    }
+    const bal = { ok: true as const, value: balNum };
+    const info = db.prepare('UPDATE suppliers SET Balance = ? WHERE SupplierID = ?').run(bal.value, rid.value);
+    if (info.changes === 0) return { success: false, message: 'المورد غير موجود' };
     return { success: true };
   });
 
   // Update employee opening balance
   ipcMain.handle('openingBalances:updateEmployee', async (_event, id: number, balance: number) => {
     const db = getDb();
-    db.prepare('UPDATE employees SET Balance = ? WHERE EmployeeID = ?').run(balance, id);
+    // `id` and `balance` are bound straight into the UPDATE. An absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler instead of returning a reply.
+    const rid = requireId(id, 'رقم الموظف');
+    if (!rid.ok) return { success: false, message: rid.message };
+    // NOT `checkAmount`: a PARTY may legitimately open in credit.
+    //
+    // A customer balance of -500 means the shop owes them 500, which is a real
+    // accounting position and the existing suite pins it. A first draft used
+    // checkAmount here and broke that — a guard that refuses a valid business
+    // state is a worse bug than the crash it was fixing. Only the TYPE is
+    // checked: a finite number, within the magnitude the money helpers allow.
+    const balNum = typeof balance === 'number' ? balance : Number(balance);
+    if (!Number.isFinite(balNum)) {
+      return { success: false, message: 'الرصيد الافتتاحي يجب أن يكون رقماً' };
+    }
+    if (Math.abs(balNum) > MAX_AMOUNT) {
+      return { success: false, message: 'الرصيد الافتتاحي أكبر من الحد المسموح' };
+    }
+    const bal = { ok: true as const, value: balNum };
+    const info = db.prepare('UPDATE employees SET Balance = ? WHERE EmployeeID = ?').run(bal.value, rid.value);
+    if (info.changes === 0) return { success: false, message: 'الموظف غير موجود' };
     return { success: true };
   });
 
@@ -131,6 +195,21 @@ export function registerOpeningBalanceHandlers() {
     employees: { id: number; balance: number }[];
   }) => {
     const db = getDb();
+
+    // Shape first. `for (const x of data.cashAccounts)` threw
+    // "data.cashAccounts is not iterable" — an uncaught TypeError across IPC —
+    // when a caller omitted a group. Every group is optional to the caller and
+    // must simply be treated as empty.
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return { success: false, message: 'بيانات الأرصدة الافتتاحية غير صالحة' };
+    }
+    for (const group of ['cashAccounts', 'paymentMethods', 'customers', 'suppliers', 'employees'] as const) {
+      const v = (data as any)[group];
+      if (v === undefined || v === null) { (data as any)[group] = []; continue; }
+      if (!Array.isArray(v)) {
+        return { success: false, message: 'بيانات الأرصدة الافتتاحية غير صالحة' };
+      }
+    }
 
     // Validated BEFORE anything is written.
     //

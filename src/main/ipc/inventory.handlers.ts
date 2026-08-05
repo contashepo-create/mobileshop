@@ -6,7 +6,7 @@ import { businessToday } from '../../shared/businessDate';
 import { moveLots } from '../database/stock';
 import { checkAmount } from '../../shared/money';
 import {
-  requireText, optionalText, optionalId, oneOf, requireFlag, searchTerm,
+  requireText, optionalText, optionalId, requireId, oneOf, requireFlag, searchTerm,
   LIMITS, ITEM_TYPES, WAREHOUSE_TYPES,
 } from '../../shared/validate';
 
@@ -406,6 +406,19 @@ export function registerInventoryHandlers() {
 
   ipcMain.handle('serials:add', async (_event, data: { ItemID: number; IMEI: string; WarehouseID: number; CostPrice?: number }) => {
     const db = getDb();
+    // The IMEI is bound into the lookup and the item/warehouse ids into the
+    // INSERT. An absent value threw "Provided value cannot be bound to SQLite
+    // parameter 1." out of the handler instead of returning a reply.
+    const serImei = requireText(data?.IMEI, 'رقم IMEI', LIMITS.CODE);
+    if (!serImei.ok) return { success: false, message: serImei.message };
+    const serItem = requireId(data?.ItemID, 'الصنف');
+    if (!serItem.ok) return { success: false, message: serItem.message };
+    const serWh = requireId(data?.WarehouseID, 'المخزن');
+    if (!serWh.ok) return { success: false, message: serWh.message };
+    const serCost = checkAmount(data?.CostPrice ?? 0, 'تكلفة الجهاز');
+    if (!serCost.ok) return { success: false, message: serCost.message };
+    data = { ...data, IMEI: serImei.value, ItemID: serItem.value, WarehouseID: serWh.value, CostPrice: serCost.value };
+
     const existing = db.prepare('SELECT SerialID FROM item_serials WHERE IMEI = ?').get(data.IMEI);
     if (existing) return { success: false, message: 'رقم IMEI موجود بالفعل' };
     const result = db.prepare(`

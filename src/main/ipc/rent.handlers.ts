@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { requireId } from '../../shared/validate';
 import { checkAmount } from '../../shared/money';
 import { getCallerUserId } from '../security/ipcGuard';
 import { businessToday } from '../../shared/businessDate';
@@ -160,6 +161,11 @@ export function registerRentHandlers() {
    */
   ipcMain.handle('rents:cancel', async (_event, data: { RentID: number; Reason?: string }) => {
     const db = getDb();
+    // The id is bound straight into the lookup below; an absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler rather than returning a reply.
+    const canRent = requireId(data?.RentID, 'رقم العقد');
+    if (!canRent.ok) return { success: false, message: canRent.message };
     const rent = db.prepare('SELECT * FROM rents WHERE RentID = ?').get(data?.RentID) as any;
     if (!rent) return { success: false, message: 'العقد غير موجود' };
     if (rent.Status === 'cancelled') {
@@ -225,6 +231,11 @@ export function registerRentHandlers() {
     Amount?: number; userId: number; fiscalYearId: number; Notes?: string;
   }) => {
     const db = getDb();
+    // The id is bound straight into the lookup below; an absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler rather than returning a reply.
+    const payId = requireId(data?.RentPaymentID, 'رقم القسط');
+    if (!payId.ok) return { success: false, message: payId.message };
     const payment = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?')
       .get(data.RentPaymentID) as any;
     if (!payment) return { success: false, message: 'الدفعة غير موجودة' };
@@ -283,6 +294,11 @@ export function registerRentHandlers() {
     RentPaymentID: number; Reason?: string;
   }) => {
     const db = getDb();
+    // The id is bound straight into the lookup below; an absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler rather than returning a reply.
+    const unpayId = requireId(data?.RentPaymentID, 'رقم القسط');
+    if (!unpayId.ok) return { success: false, message: unpayId.message };
     const payment = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?')
       .get(data?.RentPaymentID) as any;
     if (!payment) return { success: false, message: 'الدفعة غير موجودة' };
@@ -335,6 +351,11 @@ export function registerRentHandlers() {
     userId?: number; fiscalYearId?: number; Notes?: string;
   }) => {
     const db = getDb();
+    // The id is bound straight into the lookup below; an absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler rather than returning a reply.
+    const advRent = requireId(data?.RentID, 'رقم العقد');
+    if (!advRent.ok) return { success: false, message: advRent.message };
     const rent = db.prepare('SELECT * FROM rents WHERE RentID = ?').get(data?.RentID) as any;
     if (!rent) return { success: false, message: 'العقد غير موجود' };
     if (rent.Status === 'cancelled') return { success: false, message: 'العقد ملغى' };
@@ -379,6 +400,11 @@ export function registerRentHandlers() {
     RentPaymentID: number; Amount?: number; userId?: number; fiscalYearId?: number;
   }) => {
     const db = getDb();
+    // The id is bound straight into the lookup below; an absent or
+    // non-numeric value threw "Provided value cannot be bound to SQLite
+    // parameter 1." OUT of the handler rather than returning a reply.
+    const applyId = requireId(data?.RentPaymentID, 'رقم القسط');
+    if (!applyId.ok) return { success: false, message: applyId.message };
     const payment = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?')
       .get(data?.RentPaymentID) as any;
     if (!payment) return { success: false, message: 'القسط غير موجود' };

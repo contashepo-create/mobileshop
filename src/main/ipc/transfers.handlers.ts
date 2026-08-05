@@ -4,6 +4,16 @@ import { safeFailure } from '../security/errorResponse';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
 import { checkAmounts } from '../../shared/money';
+import { oneOf } from '../../shared/validate';
+
+/**
+ * Who bears the transfer commission.
+ *
+ * Read off the `<Select>` in TransfersPage.tsx: `from_amount` takes the fee
+ * out of the amount the destination receives; `separate` charges it to the
+ * source account on top.
+ */
+const TRANSFER_COST_SOURCES = ['from_amount', 'separate'] as const;
 
 export function registerTransfersHandlers() {
   // Transfer between cash accounts / payment methods
@@ -30,6 +40,22 @@ export function registerTransfersHandlers() {
       [data.TransferCost ?? 0, 'رسوم التحويل'],
     ]);
     if (badMoney) return { success: false, message: badMoney };
+
+    // The fee-bearing rule decides WHO pays the commission, and both branches
+    // below test it by equality:
+    //
+    //   totalDeduction  = Amount + (source === 'separate' ? fee : 0)
+    //   receivedAmount  = source === 'from_amount' ? Amount - fee : Amount
+    //
+    // so any third value falls through BOTH and the fee is charged to nobody.
+    // MEASURED with `TransferCostSource: 'ALIEN'` and a fee of 50: cash out
+    // 1,000, wallet in 1,000, fee borne by no account — while the saved
+    // document records `TransferCost 50`. The books then claim a cost the
+    // shop never paid, and the transfer report cannot be reconciled.
+    const costSource = oneOf(
+      data.TransferCostSource || 'separate', 'مصدر رسوم التحويل', TRANSFER_COST_SOURCES);
+    if (!costSource.ok) return { success: false, message: costSource.message };
+    data = { ...data, TransferCostSource: costSource.value };
 
     // Moving money to the account it already sits in is not a transfer. It
     // costs the shop the fee, writes a document that explains nothing, and on

@@ -26,7 +26,7 @@
  */
 
 /** Upper bound: any single amount larger than this is a typo, not a trade. */
-const MAX_AMOUNT = 1e12;
+export const MAX_AMOUNT = 1e12;
 
 export interface AmountCheck {
   ok: boolean;

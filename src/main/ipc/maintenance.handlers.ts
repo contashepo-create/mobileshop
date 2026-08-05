@@ -5,7 +5,7 @@ import { nextDocNumber } from '../database/docNumber';
 import { deductStock, restoreStock } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 import {
-  oneOf, requireText, optionalText, optionalNote, optionalDate, optionalId,
+  oneOf, requireText, optionalText, optionalNote, optionalDate, optionalId, requireId,
   LIMITS, MAINTENANCE_WORKFLOW_STATUSES,
 } from '../../shared/validate';
 
@@ -287,6 +287,12 @@ export function registerMaintenanceHandlers() {
     UnitCost?: number; SalePrice?: number; WarehouseID: number; userId: number;
   }) => {
     const db = getDb();
+    // Bound straight into SQL below; an absent id threw
+    // "Provided value cannot be bound to SQLite parameter 1." out of the handler.
+    for (const [val, label] of [[data?.TicketID, 'التذكرة'], [data?.ItemID, 'الصنف'], [data?.WarehouseID, 'المخزن']] as const) {
+      const chk = requireId(val, label);
+      if (!chk.ok) return { success: false, message: chk.message };
+    }
     // COST INTEGRITY: the cost booked against the ticket MUST equal the value
     // actually leaving inventory, otherwise the balance sheet silently drifts
     // by the difference on every repair (assets drop by CostPrice while P&L is
@@ -389,7 +395,11 @@ export function registerMaintenanceHandlers() {
   ipcMain.handle('maintenance:addServiceCost', async (_event, data: {
     TicketID: number; Description: string; CostOnUs: number; PriceToClient: number; userId: number;
   }) => {
-    if (!data.Description.trim()) return { success: false, message: 'وصف الخدمة مطلوب' };
+    const svcDesc = requireText(data?.Description, 'وصف الخدمة', LIMITS.DESCRIPTION);
+    if (!svcDesc.ok) return { success: false, message: 'وصف الخدمة مطلوب' };
+    const svcTicket = requireId(data?.TicketID, 'التذكرة');
+    if (!svcTicket.ok) return { success: false, message: svcTicket.message };
+    data = { ...data, Description: svcDesc.value, TicketID: svcTicket.value };
     const db = getDb();
     const result = db.prepare(`
       INSERT INTO maintenance_service_costs (TicketID, Description, CostOnUs, PriceToClient, UserID)
@@ -420,7 +430,11 @@ export function registerMaintenanceHandlers() {
     TicketID: number; Description: string; CostOnUs: number; PriceToClient: number;
     Quantity: number; ItemID?: number; userId: number;
   }) => {
-    if (!data.Description.trim()) return { success: false, message: 'وصف الخدمة مطلوب' };
+    const useDesc = requireText(data?.Description, 'وصف الخدمة', LIMITS.DESCRIPTION);
+    if (!useDesc.ok) return { success: false, message: 'وصف الخدمة مطلوب' };
+    const useTicket = requireId(data?.TicketID, 'التذكرة');
+    if (!useTicket.ok) return { success: false, message: useTicket.message };
+    data = { ...data, Description: useDesc.value, TicketID: useTicket.value };
     const db = getDb();
     const result = db.prepare(`
       INSERT INTO maintenance_service_usage (TicketID, ItemID, Description, CostOnUs, PriceToClient, Quantity, UserID)
@@ -439,7 +453,14 @@ export function registerMaintenanceHandlers() {
   ipcMain.handle('maintenance:addNote', async (_event, data: {
     TicketID: number; Content: string; userId: number;
   }) => {
-    if (!data.Content.trim()) return { success: false, message: 'محتوى الملاحظة مطلوب' };
+    // `data.Content.trim()` threw "Cannot read properties of undefined"
+    // when the key was absent — an uncaught TypeError across IPC rather than
+    // a reply. requireText answers instead of throwing.
+    const noteText = requireText(data?.Content, 'محتوى الملاحظة', LIMITS.NOTES);
+    if (!noteText.ok) return { success: false, message: 'محتوى الملاحظة مطلوب' };
+    const noteTicket = requireId(data?.TicketID, 'التذكرة');
+    if (!noteTicket.ok) return { success: false, message: noteTicket.message };
+    data = { ...data, Content: noteText.value, TicketID: noteTicket.value };
     const db = getDb();
     db.prepare(`
       INSERT INTO operation_notes (OperationType, OperationID, Content, UserID)
@@ -509,6 +530,8 @@ export function registerMaintenanceHandlers() {
     userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
+    const delTicket = requireId(data?.TicketID, 'التذكرة');
+    if (!delTicket.ok) return { success: false, message: delTicket.message };
 
     const ticket = db.prepare('SELECT * FROM maintenance_tickets WHERE TicketID = ?').get(data.TicketID) as any;
     if (!ticket) return { success: false, message: 'التذكرة غير موجودة' };
@@ -770,7 +793,11 @@ export function registerMaintenanceHandlers() {
   ipcMain.handle('maintenance:cancel', async (_event, data: {
     TicketID: number; Reason: string; userId: number;
   }) => {
-    if (!data.Reason.trim()) return { success: false, message: 'سبب الإلغاء مطلوب' };
+    const cancelReason = requireText(data?.Reason, 'سبب الإلغاء', LIMITS.DESCRIPTION);
+    if (!cancelReason.ok) return { success: false, message: 'سبب الإلغاء مطلوب' };
+    const cancelTicket = requireId(data?.TicketID, 'التذكرة');
+    if (!cancelTicket.ok) return { success: false, message: cancelTicket.message };
+    data = { ...data, Reason: cancelReason.value, TicketID: cancelTicket.value };
     const db = getDb();
     const ticket = db.prepare('SELECT * FROM maintenance_tickets WHERE TicketID = ?').get(data.TicketID) as any;
     if (!ticket) return { success: false, message: 'التذكرة غير موجودة' };
@@ -820,7 +847,13 @@ export function registerMaintenanceHandlers() {
     TotalRefund: number; CashAccountID?: number; PartsRestored: number; userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
-    if (!data.Reason.trim()) return { success: false, message: 'سبب المرتجع مطلوب' };
+    const retReason = requireText(data?.Reason, 'سبب المرتجع', LIMITS.DESCRIPTION);
+    if (!retReason.ok) return { success: false, message: 'سبب المرتجع مطلوب' };
+    const retTicket = requireId(data?.TicketID, 'التذكرة');
+    if (!retTicket.ok) return { success: false, message: retTicket.message };
+    const retDelivery = requireId(data?.DeliveryID, 'التسليم');
+    if (!retDelivery.ok) return { success: false, message: retDelivery.message };
+    data = { ...data, Reason: retReason.value, TicketID: retTicket.value, DeliveryID: retDelivery.value };
     const dateStr = businessToday();
     const returnNumber = nextDocNumber(db, 'maintenance_returns', 'ReturnNumber', 'MRT', dateStr);
 

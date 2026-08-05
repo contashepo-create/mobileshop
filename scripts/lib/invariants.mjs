@@ -157,6 +157,31 @@ export function identity(db, opening) {
   const staffDeductions = g(
     'SELECT COALESCE(SUM(Amount),0) v FROM employee_deductions WHERE IsDeducted = 1');
 
+  // General-purpose vouchers: an expense or an income that belongs to no party.
+  //
+  // The model ignored these entirely, so a 10-pound electricity bill booked
+  // through `vouchers:create` read as a 10-pound "drift" — an accusation
+  // against the application for doing exactly the right thing. Found by the
+  // all-channels sweep, and confirmed against the app's own profit and loss,
+  // which reported the same 10 as a general expense. A voucher naming a
+  // customer, supplier or employee is NOT included: that one moves a debt
+  // between two accounts and nets to zero, and counting it would double it.
+  const generalExpenses = g(`SELECT COALESCE(SUM(Amount),0) v FROM vouchers
+                             WHERE VoucherType = 'payment'
+                               AND (PartyType = 'general' OR PartyType IS NULL)`);
+  const generalIncome = g(`SELECT COALESCE(SUM(Amount),0) v FROM vouchers
+                           WHERE VoucherType = 'receipt'
+                             AND (PartyType = 'general' OR PartyType IS NULL)`);
+
+  // Transfer and top-up services. The shop's earning is the margin, not the
+  // principal: it hands over 50 and collects 55, so 5 is income and the 50 is
+  // a pass-through that already moved through the cash accounts. Mirrors
+  // `reports:profitLoss`, which computes `ChargeAmount - Amount`.
+  const serviceProfit = g(`SELECT COALESCE(SUM(ChargeAmount - COALESCE(Amount,0)
+                                              - COALESCE(ServiceCost,0)
+                                              - COALESCE(TransferCost,0)),0) v
+                           FROM service_sales`);
+
   // Repairs.
   //
   // A delivered repair becomes a `Source='maintenance'` sale, which the
@@ -181,6 +206,7 @@ export function identity(db, opening) {
 
   const profit = (revenue - salesReturned) - (cogs - cogsReturned)
     + (repairRevenue - repairRefunds) - repairPartsCost
+    + (generalIncome - generalExpenses) + serviceProfit
     - absorbedFees - freightLost - refundFees - valuationAdjustments
     - wages + staffDeductions;
   const expected = opening + profit;

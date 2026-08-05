@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { safeFailure } from '../security/errorResponse';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
 import { checkAmounts } from '../../shared/money';
@@ -215,7 +216,7 @@ export function registerServicesHandlers() {
       return { success: true, serviceNumber, profit, remaining, status };
     } catch (err: any) {
       console.error('[ServiceSales] Error:', err);
-      return { success: false, message: `خطأ: ${err.message || err}` };
+      return safeFailure('serviceSales:create', err);
     }
   });
 

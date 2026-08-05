@@ -1,5 +1,6 @@
 import { ipcMain, dialog, app } from 'electron';
 import { getDb, closeDb, getDbPath } from '../database/connection';
+import { safeFailure } from '../security/errorResponse';
 import path from 'node:path';
 import fs from 'node:fs';
 import { businessToday } from '../../shared/businessDate';
@@ -27,7 +28,10 @@ export function registerBackupHandlers() {
       await db.backup(result.filePath);
       return { success: true, path: result.filePath };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      // MEASURED before this: a failed backup returned
+      // "EACCES: permission denied, open '/proc/1/mem'" — the errno and the
+      // absolute path, straight into a toast.
+      return safeFailure('backup:create', err, 'تعذّر حفظ النسخة الاحتياطية');
     }
   });
 
@@ -76,7 +80,9 @@ export function registerBackupHandlers() {
 
       return { success: true, message: 'تمت الاستعادة - يرجى إعادة تشغيل التطبيق' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      // MEASURED: restoring a missing file returned
+      // "ENOENT: no such file or directory, open '/home/user/.../x.db'".
+      return safeFailure('backup:restore', err, 'تعذّرت استعادة النسخة الاحتياطية');
     }
   });
 

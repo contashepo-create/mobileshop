@@ -1351,7 +1351,24 @@ export default {
       if (url.pathname === '/health') return json({ ok: true });
       return json({ ok: false, error: 'not found' }, 404);
     } catch (err) {
-      return json({ ok: false, error: String(err?.message || err) }, 500);
+      // The catch-all must not describe the fault to whoever triggered it.
+      //
+      // MEASURED against the real exported fetch with a D1 that throws: EVERY
+      // public endpoint — /health, /heartbeat, /registration, the update feed
+      // — answered
+      //
+      //     {"ok":false,"error":"D1_ERROR: no such table: devices at /worker/db.js:412"}
+      //
+      // to an anonymous caller. That names the table, the internal file and a
+      // line number, and /health needs no credential at all, so it is a free
+      // probe: send a malformed request, read the schema out of the reply.
+      //
+      // The detail goes to `wrangler tail` where the developer can read it,
+      // keyed by a reference the caller is also given so a report can be
+      // matched to a log line.
+      const ref = Math.random().toString(36).slice(2, 8).toUpperCase();
+      console.error(`[worker] ref=${ref}`, err && err.stack ? err.stack : err);
+      return json({ ok: false, error: 'internal error', ref }, 500);
     }
   },
 

@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { getDb } from '../database/connection';
+import { safeFailure } from '../security/errorResponse';
 import bcrypt from 'bcryptjs';
 import { devLogin, revokeDevToken, createDevChallenge, devLoginSigned } from '../security/devAuth';
 import { LICENSE_PUBLIC_KEY } from '../security/licenseCrypto';
@@ -557,7 +558,7 @@ export function registerSettingsHandlers() {
 
       return { success: true, dataUrl: `data:${mime};base64,${bytes.toString('base64')}` };
     } catch (err: any) {
-      return { success: false, message: `تعذّر قراءة الصورة: ${err?.message || err}` };
+      return safeFailure('settings:pickLogo', err, 'تعذّر قراءة الصورة');
     }
   });
 
@@ -706,7 +707,7 @@ export function registerSettingsHandlers() {
         throw new Error('النسخة الناتجة ليست قاعدة بيانات صالحة');
       }
     } catch (err: any) {
-      return { success: false, message: `تعذّر إنشاء نسخة احتياطية قبل التصفير: ${err?.message || err}` };
+      return safeFailure('settings:resetDatabase', err, 'تعذّر إنشاء نسخة احتياطية قبل التصفير');
     }
 
     // Tables to preserve (system config only)
@@ -737,7 +738,7 @@ export function registerSettingsHandlers() {
         }
       })();
     } catch (err: any) {
-      return { success: false, message: `تعذّر تصفير قاعدة البيانات: ${err?.message || err}` };
+      return safeFailure('settings:resetDatabase', err, 'تعذّر تصفير قاعدة البيانات');
     } finally {
       // Restore enforcement whatever happened. Leaving it off would let every
       // later screen write orphaned rows into a database that looks healthy.

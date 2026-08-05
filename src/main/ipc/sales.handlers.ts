@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { safeFailure, safeMessage } from '../security/errorResponse';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, deductStock, deductStockAtCost, restoreStock, restoreStockAtCost, totalStock, planStockAllocation, recordValuationResidual } from '../database/stock';
 import type { StockShortage } from '../database/stock';
@@ -451,9 +452,12 @@ export function registerSalesHandlers() {
     } catch (err: any) {
       // A refusal is a normal outcome, not a fault: the transaction rolled back
       // and nothing was written.
-      if (err?.userRefusal) return { success: false, message: err.message };
+      // A refusal written for the user passes through, but is still screened:
+      // several are built by interpolation and could carry a path or a
+      // constraint name without anyone noticing.
+      if (err?.userRefusal) return safeMessage('sales:create', err.message, err);
       console.error('[Sales] Error creating sale:', err);
-      return { success: false, message: `خطأ في إنشاء الفاتورة: ${err.message || err}` };
+      return safeFailure('sales:create', err, 'خطأ في إنشاء الفاتورة');
     }
   });
 
@@ -869,7 +873,7 @@ export function registerSalesHandlers() {
       return { success: true, returnNumber };
     } catch (err: any) {
       console.error('[Sales] Error creating return:', err);
-      return { success: false, message: `خطأ: ${err.message || err}` };
+      return safeFailure('saleReturns:create', err);
     }
   });
 
@@ -1155,10 +1159,10 @@ export function registerSalesHandlers() {
       // A refusal is a normal outcome, not a fault: the transaction rolled back
       // and the invoice is untouched. Only real faults are logged as errors.
       if (err?.userRefusal) {
-        return { success: false, message: err.message };
+        return safeFailure('sales:update', err);
       }
       console.error('[Sales] Error updating sale:', err);
-      return { success: false, message: `خطأ في تعديل الفاتورة: ${err.message || err}` };
+      return safeFailure('sales:update', err, 'خطأ في تعديل الفاتورة');
     }
   });
 
@@ -1436,9 +1440,12 @@ export function registerSalesHandlers() {
       tx();
       return { success: true, message: 'تم إلغاء المرتجع وعكس كل تأثيراته' };
     } catch (err: any) {
-      if (err?.userRefusal) return { success: false, message: err.message };
+      // A refusal written for the user passes through, but is still screened:
+      // several are built by interpolation and could carry a path or a
+      // constraint name without anyone noticing.
+      if (err?.userRefusal) return safeMessage('delete:saleReturn', err.message, err);
       console.error('[Sales] Error reversing return:', err);
-      return { success: false, message: `خطأ: ${err.message || err}` };
+      return safeFailure('delete:saleReturn', err);
     }
   });
 }

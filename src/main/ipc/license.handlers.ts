@@ -1,5 +1,6 @@
 import { ipcMain, app } from 'electron';
 import { getDb } from '../database/connection';
+import { safeFailure } from '../security/errorResponse';
 import { setRemoteState, ensureRemoteTables } from '../remote/remoteStore';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -441,7 +442,7 @@ export function registerLicenseHandlers() {
       fs.writeFileSync(licensePath, encrypt(license), 'utf-8');
       fs.chmodSync(licensePath, 0o444);
     } catch (err: any) {
-      return { success: false, message: `تعذّر حفظ الترخيص: ${err.message}` };
+      return safeFailure('license:activate', err, 'تعذّر حفظ الترخيص');
     }
 
     try { fs.unlinkSync(attemptsPath); } catch { /* ignore */ }
@@ -522,7 +523,7 @@ export function registerLicenseHandlers() {
       }
       return { success: true, message: 'تم إلغاء التفعيل - يمكن تفعيله على جهاز آخر' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('license:deactivate', err);
     }
   });
 
@@ -610,7 +611,7 @@ export function registerLicenseHandlers() {
         message: 'تم مسح سجل آخر تشغيل. أعد تشغيل البرنامج بعد ضبط تاريخ الجهاز.',
       };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('license:repairClockState', err);
     }
   });
 }

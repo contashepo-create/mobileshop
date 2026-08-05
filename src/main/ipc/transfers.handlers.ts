@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { safeFailure } from '../security/errorResponse';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
 import { checkAmounts } from '../../shared/money';
@@ -126,7 +127,7 @@ export function registerTransfersHandlers() {
       return { success: true, transferNumber, receivedAmount, transferCost: data.TransferCost };
     } catch (err: any) {
       console.error('[Transfer] Error:', err);
-      return { success: false, message: `خطأ: ${err.message || err}` };
+      return safeFailure('transfers:create', err);
     }
   });
 

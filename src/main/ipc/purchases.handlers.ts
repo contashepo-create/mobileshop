@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { safeFailure, safeMessage } from '../security/errorResponse';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, warehouseStock, deductStock, deductStockAtCost, restoreStockAtCost, recordValuationResidual, addStockLot } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
@@ -361,9 +362,12 @@ export function registerPurchasesHandlers() {
       tx();
       return { success: true, purchaseNumber, totalAmount, paidAmount, remaining, status };
     } catch (err: any) {
-      if (err?.userRefusal) return { success: false, message: err.message };
+      // A refusal written for the user passes through, but is still screened:
+      // several are built by interpolation and could carry a path or a
+      // constraint name without anyone noticing.
+      if (err?.userRefusal) return safeMessage('purchases:create', err.message, err);
       console.error('[Purchases] Error creating purchase:', err);
-      return { success: false, message: `خطأ في إنشاء الفاتورة: ${err.message || err}` };
+      return safeFailure('purchases:create', err, 'خطأ في إنشاء الفاتورة');
     }
   });
 
@@ -940,7 +944,7 @@ export function registerPurchasesHandlers() {
     try {
       tx();
     } catch (err: any) {
-      return { success: false, message: err?.message || 'تعذر إتمام المرتجع' };
+      return safeFailure('purchaseReturns:create', err, 'تعذر إتمام المرتجع');
     }
     return { success: true, returnNumber };
   });
@@ -1211,7 +1215,7 @@ export function registerPurchasesHandlers() {
       return { success: true, message: 'تم إلغاء مرتجع الشراء وعكس كل تأثيراته' };
     } catch (err: any) {
       console.error('[Purchases] Error reversing return:', err);
-      return { success: false, message: `خطأ: ${err.message || err}` };
+      return safeFailure('delete:purchaseReturn', err);
     }
   });
 }

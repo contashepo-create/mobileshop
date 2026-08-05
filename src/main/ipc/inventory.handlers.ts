@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { safeFailure } from '../security/errorResponse';
 import { nextDocNumber } from '../database/docNumber';
 import { businessToday } from '../../shared/businessDate';
 import { moveLots } from '../database/stock';
@@ -276,7 +277,7 @@ export function registerInventoryHandlers() {
       if (err.message?.includes('UNIQUE constraint failed: items.Barcode')) {
         return { success: false, message: 'الباركود موجود بالفعل' };
       }
-      return { success: false, message: `خطأ: ${err.message || err}` };
+      return safeFailure('items:create', err);
     }
   });
 
@@ -351,7 +352,7 @@ export function registerInventoryHandlers() {
       if (err.message?.includes('UNIQUE constraint failed: items.Barcode')) {
         return { success: false, message: 'الباركود مستخدم بواسطة صنف آخر' };
       }
-      return { success: false, message: `خطأ: ${err.message || err}` };
+      return safeFailure('items:update', err);
     }
   });
 

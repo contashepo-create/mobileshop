@@ -1,5 +1,6 @@
 import { ipcMain, dialog, app } from 'electron';
 import { getDb, getDbPath, setDbPath } from '../database/connection';
+import { safeFailure } from '../security/errorResponse';
 import path from 'node:path';
 import fs from 'node:fs';
 import { businessToday } from '../../shared/businessDate';
@@ -57,7 +58,7 @@ export function registerDatabaseHandlers() {
     try {
       safeTable = assertExportableTable(db, tableName);
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('db:exportCSV', err);
     }
     const rows = db.prepare(`SELECT * FROM "${safeTable}"`).all() as any[];
     if (rows.length === 0) return { success: false, message: 'لا توجد بيانات' };
@@ -177,7 +178,7 @@ export function registerDatabaseHandlers() {
       return { success: true, path: backupPath };
     } catch (err: any) {
       console.error('[DB] Auto-backup failed:', err);
-      return { success: false, message: err.message };
+      return safeFailure('db:autoBackup', err);
     }
   });
 
@@ -474,7 +475,7 @@ export function registerDatabaseHandlers() {
       }
       return { success: false, message: 'نوع الاتصال غير مدعوم' };
     } catch (err: any) {
-      return { success: false, message: `خطأ: ${err.message}` };
+      return safeFailure('db:testCloudConnection', err);
     }
   });
 
@@ -539,7 +540,7 @@ export function registerDatabaseHandlers() {
 
       return { success: false, message: 'نوع الرفع غير مدعوم' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('db:uploadToCloud', err);
     }
   });
 
@@ -663,7 +664,7 @@ export function registerDatabaseHandlers() {
       }
       return result;
     } catch (err: any) {
-      return { success: false, message: err?.message || 'فشل إنشاء النسخة' };
+      return safeFailure('telegram:sendBackup', err, 'فشل إنشاء النسخة');
     } finally {
       // The temp copy is a full dump of the business; do not leave it lying in
       // the OS temp folder whether the upload worked or not.

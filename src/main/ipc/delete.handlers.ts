@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { safeFailure } from '../security/errorResponse';
 import { restoreStock, resolveSourceWarehouse, restoreStockAtCost, deductStockAtCost, recordValuationResidual } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 
@@ -95,7 +96,7 @@ export function registerDeleteHandlers() {
       tx();
       return { success: true, message: 'تم حذف الفاتورة وعكس كل التأثيرات' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('delete:sale', err);
     }
   });
 
@@ -317,7 +318,7 @@ export function registerDeleteHandlers() {
       tx();
       return { success: true, message: 'تم حذف فاتورة الشراء وعكس كل التأثيرات' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('delete:purchase', err);
     }
   });
 
@@ -352,7 +353,7 @@ export function registerDeleteHandlers() {
       tx();
       return { success: true, message: 'تم حذف السلفية وعكس التأثير' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('delete:advance', err);
     }
   });
 
@@ -386,7 +387,7 @@ export function registerDeleteHandlers() {
       db.prepare('DELETE FROM employee_deductions WHERE DeductionID = ?').run(deductionId);
       return { success: true, message: 'تم حذف الخصم' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('delete:deduction', err);
     }
   });
 
@@ -460,7 +461,7 @@ export function registerDeleteHandlers() {
       tx();
       return { success: true, message: 'تم حذف السند وعكس كل التأثيرات' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('delete:voucher', err);
     }
   });
 
@@ -527,7 +528,7 @@ export function registerDeleteHandlers() {
       tx();
       return { success: true, message: 'تم حذف العملية وعكس كل التأثيرات' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('delete:serviceSale', err);
     }
   });
 
@@ -617,7 +618,7 @@ export function registerDeleteHandlers() {
       tx();
       return { success: true, message: 'تم حذف التسليم وعكس كل التأثيرات' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('delete:maintenanceDelivery', err);
     }
   });
 
@@ -682,7 +683,7 @@ export function registerDeleteHandlers() {
       tx();
       return { success: true, message: 'تم حذف التحويل وعكس كل التأثيرات' };
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return safeFailure('delete:transfer', err);
     }
   });
 }

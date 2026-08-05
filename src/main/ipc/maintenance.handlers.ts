@@ -5,7 +5,7 @@ import { nextDocNumber } from '../database/docNumber';
 import { deductStock, restoreStock } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 import {
-  oneOf, requireText, optionalText, optionalNote, optionalDate,
+  oneOf, requireText, optionalText, optionalNote, optionalDate, optionalId,
   LIMITS, MAINTENANCE_WORKFLOW_STATUSES,
 } from '../../shared/validate';
 
@@ -106,6 +106,58 @@ export function registerMaintenanceHandlers() {
     MaintenanceType?: string; ReferenceTicketID?: number;
   }) => {
     const db = getDb();
+
+    // Validated at the door, because everything below binds straight into SQL.
+    //
+    // MEASURED before this: `CustomerID: {}` threw
+    // "Provided value cannot be bound to SQLite parameter 4." OUT of the
+    // handler. That is a better-sqlite3 diagnostic naming a parameter
+    // position — useless to the shopkeeper, and it describes the statement to
+    // anyone else. Rejecting the value is better than catching the error it
+    // causes.
+    const rcvCustomerId = optionalId(data?.CustomerID, 'العميل');
+    if (!rcvCustomerId.ok) return { success: false, message: rcvCustomerId.message };
+    if (rcvCustomerId.value !== null) {
+      const exists = db.prepare('SELECT 1 AS ok FROM customers WHERE CustomerID = ?').get(rcvCustomerId.value);
+      if (!exists) return { success: false, message: 'العميل غير موجود' };
+    }
+    const rcvTechId = optionalId(data?.TechnicianID, 'الفني');
+    if (!rcvTechId.ok) return { success: false, message: rcvTechId.message };
+    const rcvRefTicket = optionalId(data?.ReferenceTicketID, 'التذكرة المرجعية');
+    if (!rcvRefTicket.ok) return { success: false, message: rcvRefTicket.message };
+
+    const rcvName = requireText(data?.CustomerName, 'اسم العميل', LIMITS.NAME);
+    if (!rcvName.ok) return { success: false, message: rcvName.message };
+    const rcvPhone = optionalText(data?.CustomerPhone, 'هاتف العميل', LIMITS.PHONE);
+    if (!rcvPhone.ok) return { success: false, message: rcvPhone.message };
+    const rcvModel = requireText(data?.DeviceModel, 'موديل الجهاز', LIMITS.NAME);
+    if (!rcvModel.ok) return { success: false, message: rcvModel.message };
+    const rcvImei = optionalText(data?.DeviceIMEI, 'رقم IMEI', LIMITS.CODE);
+    if (!rcvImei.ok) return { success: false, message: rcvImei.message };
+    const rcvProblem = requireText(data?.ProblemDesc, 'وصف العطل', LIMITS.NOTES);
+    if (!rcvProblem.ok) return { success: false, message: rcvProblem.message };
+    const rcvAccessories = optionalNote(data?.Accessories, 'الملحقات', LIMITS.NOTES);
+    if (!rcvAccessories.ok) return { success: false, message: rcvAccessories.message };
+    const rcvPassword = optionalText(data?.DevicePassword, 'كلمة مرور الجهاز', LIMITS.CODE);
+    if (!rcvPassword.ok) return { success: false, message: rcvPassword.message };
+    const rcvDeliveryDate = optionalDate(data?.AgreedDeliveryDate, 'تاريخ التسليم المتفق عليه');
+    if (!rcvDeliveryDate.ok) return { success: false, message: rcvDeliveryDate.message };
+
+    data = {
+      ...data,
+      CustomerID: rcvCustomerId.value ?? undefined,
+      TechnicianID: rcvTechId.value ?? undefined,
+      ReferenceTicketID: rcvRefTicket.value ?? undefined,
+      CustomerName: rcvName.value,
+      CustomerPhone: rcvPhone.value ?? '',
+      DeviceModel: rcvModel.value,
+      DeviceIMEI: rcvImei.value ?? undefined,
+      ProblemDesc: rcvProblem.value,
+      Accessories: rcvAccessories.value ?? undefined,
+      DevicePassword: rcvPassword.value ?? undefined,
+      AgreedDeliveryDate: rcvDeliveryDate.value ?? undefined,
+    };
+
     const dateStr = businessToday();
     const ticketNumber = nextDocNumber(db, 'maintenance_tickets', 'TicketNumber', 'MNT', dateStr);
     const maintenanceType = data.MaintenanceType || 'normal';

@@ -42,7 +42,17 @@ class Wrapped {
       : new DatabaseSync(path ?? ':memory:');
   }
 
-  prepare(sql) {
+  prepare(rawSql) {
+    // Mirrors `roundBalanceArithmetic` in src/main/database/connection.ts.
+    // Running balances accumulate inside SQLite, so 300 credit sales of 33.33
+    // settled at 9998.999999999982 instead of 9999 — and `Balance = 0` then
+    // never reads true for a customer who has paid in full. The stub replaces
+    // the driver entirely, so without the same rewrite the tests would measure
+    // a different database layer from the one that ships.
+    const sql = /\bSET\s+Balance\s*=\s*Balance\s*[+-]\s*\?/i.test(rawSql)
+      ? rawSql.replace(/\bSET\s+Balance\s*=\s*Balance\s*([+-])\s*\?/gi,
+          (_m, op) => `SET Balance = ROUND(Balance ${op} ?, 2)`)
+      : rawSql;
     const st = this._db.prepare(sql);
     // Mirrors `hardenBinding` in src/main/database/connection.ts.
     //

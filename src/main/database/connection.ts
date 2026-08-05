@@ -267,7 +267,8 @@ function hardenBinding(conn: Database.Database): void {
     return false;
   };
 
-  (conn as unknown as { prepare: unknown }).prepare = ((sql: string) => {
+  (conn as unknown as { prepare: unknown }).prepare = ((rawSql: string) => {
+    const sql = roundBalanceArithmetic(rawSql);
     const stmt = originalPrepare(sql) as unknown as Record<string, unknown>;
     // Decided from the SQL, once per statement, not per call. A statement that
     // changes rows must never be allowed to do nothing quietly; a statement
@@ -312,6 +313,77 @@ function hardenBinding(conn: Database.Database): void {
  * dangerous, because the cost of being wrong in that direction is an error
  * message, while the other direction is a silent wrong balance.
  */
+/**
+ * Rounds every running-balance UPDATE to the piastre, in SQL.
+ *
+ * THE DEFECT, MEASURED
+ * --------------------
+ * Every money column in this schema is REAL — a binary float. Individual
+ * documents are fine: the handlers pass their totals through `money()`, so an
+ * invoice of 0.1 + 0.2 is stored as exactly 0.3 (verified).
+ *
+ * The running balances are not, because they are never recomputed — they are
+ * accumulated by 92 statements of the form
+ *
+ *     UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?
+ *
+ * and the addition happens inside SQLite, after `money()` has done its work.
+ * Each step adds a value that is exact to the piastre to a total that is not,
+ * and the error compounds. MEASURED, 300 credit sales of 33.33 driven through
+ * the real handlers:
+ *
+ *     expected            9999.000000000000
+ *     customers.Balance   9998.999999999982      <- 1.8e-11 short
+ *
+ * and separately a `cash_accounts.Balance` holding a fraction of a piastre.
+ *
+ * WHY THAT MATTERS EVEN THOUGH IT IS A HUNDRED-BILLIONTH OF A POUND
+ * -----------------------------------------------------------------
+ * Not because 9998.999999999982 prints wrong — it rounds to 9,999.00 on every
+ * screen. It matters because of the COMPARISONS the program makes against
+ * these numbers:
+ *
+ *   - `Balance = 0` decides whether a customer is settled. A residue of
+ *     -1.8e-11 makes a fully-paid customer appear on the aging report forever,
+ *     owing an amount that displays as 0.00 and cannot be collected or cleared.
+ *   - `Balance >= amount` decides whether the drawer can pay. A drawer holding
+ *     999.9999999999 refuses a payment of 1,000 that it can plainly make.
+ *   - `CreditLimit` comparisons refuse a sale that is exactly at the limit.
+ *
+ * These are the failures a shop cannot diagnose, because every figure on
+ * screen agrees with them.
+ *
+ * WHY HERE, AND WHY NOT decimal.js
+ * ---------------------------------
+ * The arithmetic happens in SQLite, so a JavaScript decimal library cannot see
+ * it — `Balance = Balance + ?` never passes through JavaScript at all. The fix
+ * has to be in the SQL, and `ROUND(..., 2)` is exactly the operation needed.
+ * Verified against the same 300 sales: `ROUND(Balance + ?, 2)` yields
+ * 9999.000000000000 exactly.
+ *
+ * Rewriting here rather than at the 92 call sites is the same reasoning as the
+ * bind hardening above: the 93rd, written next month, is covered without its
+ * author knowing any of this.
+ *
+ * Storing integer piastres instead would also work and is the textbook answer,
+ * but it means changing 108 columns, every read, every report and every
+ * existing database — a far larger surface for a defect than the one it
+ * closes. The safe range here is not the constraint: 2^53 piastres is
+ * 90 trillion pounds, ninety times the application's own MAX_AMOUNT ceiling.
+ * The problem was never the magnitude, only the accumulation, and that is what
+ * this repairs.
+ */
+function roundBalanceArithmetic(sql: string): string {
+  // Narrow on purpose. Only the exact accumulate-in-place shape is rewritten,
+  // matched on the balance column by name, so no other arithmetic in the
+  // program can be altered by accident.
+  if (!/\bSET\s+Balance\s*=\s*Balance\s*[+-]\s*\?/i.test(sql)) return sql;
+  return sql.replace(
+    /\bSET\s+Balance\s*=\s*Balance\s*([+-])\s*\?/gi,
+    (_m, op: string) => `SET Balance = ROUND(Balance ${op} ?, 2)`,
+  );
+}
+
 function isWriteStatement(sql: string): boolean {
   const head = String(sql)
     .replace(/--[^\n]*/g, ' ')

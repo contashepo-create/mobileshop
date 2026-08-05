@@ -79,6 +79,10 @@ console.log('\n── 1. every readiness axis has a suite, and it runs ──');
     // `{changes: 0}` and letting the enclosing transaction COMMIT — a document
     // written with one of its parts missing, and no error anywhere.
     ['data: a refused write is never silent', 'verify_write_integrity.mjs'],
+    // Running balances accumulate inside SQLite, after money() has rounded.
+    // Measured: 300 sales of 33.33 settled at 9998.999999999982, so a paid-up
+    // customer never satisfied `Balance = 0`.
+    ['accounting: running balances are exact to the piastre', 'verify_money_precision.mjs'],
     // Closing the year was a label on a button: measured, `sales:create` and
     // `purchases:create` both posted into a year stamped 'closed'.
     ['accounting: a closed fiscal year refuses new documents', 'verify_fiscal_year_close.mjs'],

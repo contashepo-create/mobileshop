@@ -74,13 +74,18 @@ const DEV = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
 const OTHER = 'ffffffffffffffffffffffffffffffff';
 
 /** Every place the module may write, so the suite can clean up after itself. */
-const LOCATIONS = [
-  path.join(os.homedir(), '.mobileshop-trial'),
-  path.join(os.homedir(), '.config', 'mobileshop', '.mobileshop-trial'),
-  path.join('/var/lib', 'mobileshop', '.mobileshop-trial'),
-  path.join(os.tmpdir(), '.mobileshop-trial'),
-  path.join(process.env.ProgramData || 'C:\\ProgramData', 'MobileShopERP', '.mobileshop-trial'),
-];
+// Asked of the module under test, never restated.
+//
+// This was a hand-written list of five paths. `candidatePaths()` produces a
+// DIFFERENT five on Windows — the hand-written copy had no entry for
+// %LOCALAPPDATA%\MobileShopERP\, so a marker written there by an earlier run
+// survived every clean(). MEASURED on a real Windows machine: `nothing is
+// present before the first run` failed because the reader found a stale file
+// the cleaner did not know existed.
+//
+// Two lists that must agree by hand will eventually disagree, and the failure
+// looks like a broken guard rather than a broken test.
+const LOCATIONS = A.candidatePaths();
 /**
  * Removes every marker copy, INCLUDING the read-only ones.
  *
@@ -119,6 +124,18 @@ const forge = (target, contents) => {
 };
 const surviving = () => LOCATIONS.filter(p => { try { return fs.existsSync(p); } catch { return false; } });
 
+/**
+ * A marker copy that is really on disk, for the forgery cases.
+ *
+ * Targeting `LOCATIONS[0]` assumed the home-directory copy was always
+ * written. It is not: `writeTrialAnchor` skips any location it cannot write,
+ * so on a locked-down machine index 0 may never exist and the forgery would
+ * be planted somewhere the reader never looks — the check would pass without
+ * testing anything. Falling back to LOCATIONS[0] keeps the "unwritable
+ * machine" case working, where nothing exists by design.
+ */
+const firstExisting = () => surviving()[0] || LOCATIONS[0];
+
 clean();
 
 // ---------------------------------------------------------------- 1
@@ -155,9 +172,19 @@ console.log('\n[2] Deleting userData no longer grants a fresh trial');
 // ---------------------------------------------------------------- 3
 console.log('\n[3] A partially-deleted marker heals itself');
 {
+  // Delete copies that ACTUALLY EXIST rather than fixed indices.
+  //
+  // `LOCATIONS[0]` and `[3]` assumed a particular order and a particular
+  // platform: on Windows index 3 is not the temp copy, and on a machine where
+  // /var/lib is unwritable the surviving set is smaller than the candidate
+  // list. Picking from what is really on disk makes the check mean the same
+  // thing everywhere. Writability is restored first — the product marks these
+  // read-only on Windows, so unlink fails with EPERM without it.
   const before = surviving().length;
-  try { fs.unlinkSync(LOCATIONS[0]); } catch { /* may not exist */ }
-  try { fs.unlinkSync(LOCATIONS[3]); } catch { /* may not exist */ }
+  for (const victim of surviving().slice(0, 2)) {
+    try { fs.chmodSync(victim, 0o666); } catch { /* already writable */ }
+    try { fs.unlinkSync(victim); } catch { /* raced or locked */ }
+  }
   const after = surviving().length;
   t('deleting some copies leaves fewer behind', after < before, `${before} -> ${after}`);
   t('the anchor still reads correctly from a survivor',
@@ -178,19 +205,19 @@ console.log('\n[4] The marker cannot be forged, edited or imported');
   // this check used a NEWER date, which the "oldest wins" rule discarded on its
   // own — so removing the signature check entirely still passed. The mutant
   // survived and the guard was untested.
-  forge(LOCATIONS[0], JSON.stringify({
+  forge(firstExisting(), JSON.stringify({
     deviceId: DEV, startDate: '2020-01-01T00:00:00.000Z', sig: 'bogus',
   }));
   t('a tampered start date is ignored even when it is older',
     A.readTrialAnchor(DEV) === genuine, String(A.readTrialAnchor(DEV)));
 
   // An unsigned marker is not evidence of anything.
-  forge(LOCATIONS[0], JSON.stringify({ deviceId: DEV, startDate: '2019-01-01T00:00:00.000Z' }));
+  forge(firstExisting(), JSON.stringify({ deviceId: DEV, startDate: '2019-01-01T00:00:00.000Z' }));
   t('an unsigned marker is ignored even when it is older',
     A.readTrialAnchor(DEV) === genuine, String(A.readTrialAnchor(DEV)));
 
   // Garbage must not crash the reader — it runs before the UI exists.
-  forge(LOCATIONS[0], 'not json at all');
+  forge(firstExisting(), 'not json at all');
   t('unparseable content is ignored, not thrown', A.readTrialAnchor(DEV) === genuine);
 
   // A marker copied from another machine must not brand this one as used.
@@ -199,7 +226,7 @@ console.log('\n[4] The marker cannot be forged, edited or imported');
   // The OLDEST surviving date wins, so deleting some copies and letting the
   // app rewrite the rest cannot silently restart the clock.
   A.healTrialAnchor(DEV, genuine);
-  forge(LOCATIONS[3], JSON.stringify({
+  forge(firstExisting(), JSON.stringify({
     deviceId: DEV, startDate: '2026-07-30T00:00:00.000Z',
     sig: (await import('node:crypto')).createHmac('sha256', 'm0b1l3_sh0p_tr14l_4nch0r_2026')
       .update(`${DEV}|2026-07-30T00:00:00.000Z`).digest('hex'),

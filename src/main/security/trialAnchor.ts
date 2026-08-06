@@ -50,8 +50,19 @@ const MARKER_NAME = '.mobileshop-trial';
 
 const SIGN_KEY = 'm0b1l3_sh0p_tr14l_4nch0r_2026';
 
-/** Locations to try, best first. Unwritable ones are skipped silently. */
-function candidatePaths(): string[] {
+/**
+ * Locations to try, best first. Unwritable ones are skipped silently.
+ *
+ * EXPORTED so the test suite can ask THIS function where the markers live
+ * instead of keeping its own copy of the list. The copy had already drifted:
+ * it named four paths and this function writes to five on Windows, missing
+ * `%LOCALAPPDATA%\MobileShopERP\`. A marker left there by an earlier run was
+ * never cleaned, so `nothing is present before the first run` failed on a real
+ * machine — the test was measuring a stale file it did not know about.
+ *
+ * A list that must be kept in step by hand will not be. One source.
+ */
+export function candidatePaths(): string[] {
   const out: string[] = [];
   try { out.push(path.join(os.homedir(), MARKER_NAME)); } catch { /* no home */ }
 

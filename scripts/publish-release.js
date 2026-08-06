@@ -117,7 +117,13 @@ console.log('');
  * a character. `npx` remains only as a fallback for a machine that has no
  * local install, and there it is invoked through the shell deliberately.
  */
-function runWrangler(args, cwd) {
+function runWrangler(args, cwd, stdinFile) {
+  // `stdinFile` feeds the package to wrangler's `--pipe` on standard input.
+  // The file handle is opened here rather than read into memory: a 133 MB
+  // Buffer is avoidable, and streaming is the whole point of the pipe.
+  const stdio = stdinFile
+    ? [fs.openSync(stdinFile, 'r'), 'inherit', 'inherit']
+    : 'inherit';
   // A local install, in the server folder or at the repo root.
   const candidates = [
     path.join(ROOT, 'server', 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
@@ -126,37 +132,75 @@ function runWrangler(args, cwd) {
   const local = candidates.find(c => fs.existsSync(c));
 
   if (local) {
-    return execFileSync(process.execPath, [local, ...args], { stdio: 'inherit', cwd });
+    return execFileSync(process.execPath, [local, ...args], { stdio, cwd, maxBuffer: 1024 * 1024 * 1024 });
   }
 
   // No local copy: fall back to npx, which must go through a shell on Windows.
   // Arguments are quoted here because the shell will re-parse them.
   const quoted = args.map(a => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a));
   return execFileSync(`npx wrangler ${quoted.join(' ')}`, {
-    stdio: 'inherit', cwd, shell: true,
+    stdio, cwd, shell: true, maxBuffer: 1024 * 1024 * 1024,
   });
 }
 
 // ---- 1. upload to R2 -------------------------------------------------------
+//
+// `--file` is NOT used, and the reason is measured.
+//
+// `wrangler r2 object put --file` performs a SINGLE PUT. Cloudflare's own
+// guidance puts the practical ceiling for that at about 100 MB, and states
+// plainly that a single upload is "not resumable — must restart the entire
+// upload". This package is 133 MB. On the owner's connection the request died
+// part-way with
+//
+//     ▲ [WARNING] A fetch request failed, likely due to a connectivity issue
+//     ✘ [ERROR] fetch failed
+//
+// after wrangler had already authenticated and addressed the bucket correctly.
+// Nothing was wrong with the credentials, the bucket, or the command; the
+// upload simply cannot survive a single interruption over several minutes.
+//
+// `--pipe` streams the file on stdin instead, which is the form the wrangler
+// issue tracker records as working when `--file` does not. It is attempted
+// first, and `--file` is kept as a fallback so a machine where the pipe
+// misbehaves is not left with no route at all.
 console.log('⬆️  رفع الحزمة إلى R2 …');
+console.log(`   (${(size / 1048576).toFixed(1)} MB — قد يستغرق عدة دقائق)`);
+
+const putArgs = (extra) => [
+  'r2', 'object', 'put',
+  `${BUCKET}/win32-x64/${nupkg}`,
+  '--content-type', 'application/octet-stream',
+  '--remote',
+  ...extra,
+];
+
+let uploaded = false;
 try {
-  runWrangler([
-    'r2', 'object', 'put',
-    `${BUCKET}/win32-x64/${nupkg}`,
-    '--file', file,
-    '--content-type', 'application/octet-stream',
-    '--remote',
-  ], path.join(ROOT, 'server'));
-} catch (err) {
-  // The REAL reason is printed. `catch { die(...) }` swallowed it and replaced
-  // every possible fault — a missing npx, an expired token, a network drop, a
-  // bucket that does not exist — with one guess. A publisher that cannot say
-  // why it failed sends the operator to fix things that are not broken.
-  const detail = String(err && err.message ? err.message : err).split('\n')[0];
-  die(`فشل رفع الملف إلى R2.\n   السبب: ${detail}\n\n` +
-      '   إن كان السبب انتهاء الجلسة:  npx wrangler login\n' +
-      `   إن كان الدلو غير موجود:      npx wrangler r2 bucket create ${BUCKET}`);
+  runWrangler(putArgs(['--pipe']), path.join(ROOT, 'server'), file);
+  uploaded = true;
+} catch (pipeErr) {
+  console.log('\n   تعذّر الرفع بالتدفّق، تجربة الطريقة المباشرة …');
+  try {
+    runWrangler(putArgs(['--file', file]), path.join(ROOT, 'server'));
+    uploaded = true;
+  } catch {
+    // Report the FIRST failure: the fallback's message is usually the same
+    // network fault seen twice, and the pipe attempt is the informative one.
+    const detail = String(pipeErr && pipeErr.message ? pipeErr.message : pipeErr).split('\n')[0];
+    die(`فشل رفع الملف إلى R2.\n   السبب: ${detail}\n\n` +
+        '   الحزمة ١٣٣ م.ب، والانقطاع أثناء الرفع يُلغي المحاولة كاملة.\n\n' +
+        '   جرّب بالترتيب:\n' +
+        '   ١) أعد الأمر — الانقطاع العابر شائع ونجاح المحاولة الثانية معتاد.\n' +
+        '   ٢) اتصال أثبت (سلك بدل واي-فاي)، وأوقف أي VPN.\n' +
+        '   ٣) الرفع يدوياً من لوحة Cloudflare:\n' +
+        `      R2 -> ${BUCKET} -> Upload، ثم ضع الملف داخل مجلد win32-x64\n` +
+        `      الملف: ${file}\n` +
+        '      ثم أعد تشغيل  npm run release  — سيتخطى الرفع ويُبلّغ الخادم فقط.');
+  }
 }
+if (!uploaded) die('لم يكتمل الرفع.');
+
 
 // ---- 2. tell the Worker ----------------------------------------------------
 console.log('\n📢 إبلاغ الخادم بالإصدار الجديد …');

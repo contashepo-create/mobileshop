@@ -143,6 +143,39 @@ console.log('── 2. the verify script is complete and ordered ──');
   // that the sweep is last among the BEHAVIOURAL suites, not last overall.
   // Caught by this very check failing the moment this file was appended —
   // a character-offset heuristic that broke as soon as the string grew.
+  // No npm script may use POSIX-only shell syntax.
+  //
+  // `npm run verify` contained `TZ=Africa/Cairo node ...`. That is a shell
+  // assignment, understood by sh and NOT by cmd.exe. MEASURED on the owner's
+  // Windows machine: the chain stopped at suite 19 of 87 with
+  //
+  //     'TZ' is not recognized as an internal or external command
+  //
+  // and the sixty-eight suites after it never ran — the run LOOKED like a
+  // single small failure while most of the verification silently did not
+  // happen. Anything a script needs from the environment must be set inside
+  // the script it belongs to, where Node sets it portably.
+  {
+    const OFFENDERS = [];
+    for (const [name, body] of Object.entries(pkg.scripts || {})) {
+      for (const part of String(body).split(' && ')) {
+        if (/^\s*[A-Za-z_][A-Za-z0-9_]*=/.test(part)) {
+          OFFENDERS.push(`${name}: ${part.trim().slice(0, 60)}`);
+        }
+      }
+    }
+    ok('no npm script prefixes a command with VAR= (breaks cmd.exe)',
+      OFFENDERS.length === 0, OFFENDERS.join(' | '));
+
+    // The same class of fault, different spelling.
+    const UNIX_ONLY = /(^|\s)(rm\s|cp\s|mv\s|chmod\s|touch\s|cat\s|sed\s|awk\s|\|\|\s*true|2>\/dev\/null)/;
+    const shellUsers = Object.entries(pkg.scripts || {})
+      .filter(([, body]) => UNIX_ONLY.test(String(body)))
+      .map(([name]) => name);
+    ok('no npm script calls a POSIX-only shell utility',
+      shellUsers.length === 0, shellUsers.join(', '));
+  }
+
   const behavioural = verify.split(' && ')
     .filter((c) => !c.includes('verify_release_readiness'));
   const sweepIdx = behavioural.findIndex((c) => c.includes('verify_fuzz_sweep.mjs'));

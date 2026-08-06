@@ -13,9 +13,52 @@
  * expresses them, and the handler's source is asserted to still match — so if
  * someone edits one and not the other, this fails.
  *
- * Run with:  TZ=Africa/Cairo node --experimental-strip-types scripts/verify_clock.mjs
+ * Run with:  node --experimental-strip-types scripts/verify_clock.mjs
+ *
+ * THE TIMEZONE IS FORCED HERE, NOT ON THE COMMAND LINE
+ * ----------------------------------------------------
+ * This suite used to be invoked as `TZ=Africa/Cairo node ...` inside
+ * `npm run verify`. That is POSIX shell syntax. On Windows, cmd.exe answers
+ *
+ *     'TZ' is not recognized as an internal or external command
+ *
+ * and the whole verify chain stops there — measured on a real Windows machine
+ * at suite 19 of 87. Sixty-eight suites after it never ran.
+ *
+ * Setting `process.env.TZ` in the script is not enough on its own either:
+ * V8 caches the local timezone the first time a Date is used, and on some
+ * platforms it is read before user code runs. Measured: with the process
+ * launched under TZ=America/New_York, an internal assignment left four checks
+ * failing because the offsets were still New York's.
+ *
+ * So the assignment is made FIRST, and then VERIFIED. If the runtime did not
+ * adopt it, the process re-executes itself once with the variable set in the
+ * child's environment — which works identically on Windows, macOS and Linux
+ * because Node, not the shell, is doing the passing.
  */
-process.env.TZ = process.env.TZ || 'Africa/Cairo';
+process.env.TZ = 'Africa/Cairo';
+
+// Egypt is UTC+3 in July (summer time) and UTC+2 in January. If the runtime
+// disagrees, the assignment above did not take effect and every offset check
+// below would be measuring the wrong zone.
+{
+  const july = -new Date('2026-07-15T12:00:00Z').getTimezoneOffset() / 60;
+  const january = -new Date('2026-01-15T12:00:00Z').getTimezoneOffset() / 60;
+  if (july !== 3 || january !== 2) {
+    if (process.env.__CLOCK_TZ_RETRY === '1') {
+      console.error(
+        `\nCLOCK SUITE CANNOT RUN: this Node build does not honour TZ=Africa/Cairo `
+        + `(July offset ${july}, January offset ${january}; expected 3 and 2).`);
+      process.exit(1);
+    }
+    const { spawnSync } = await import('node:child_process');
+    const r = spawnSync(process.execPath, process.argv.slice(1), {
+      stdio: 'inherit',
+      env: { ...process.env, TZ: 'Africa/Cairo', __CLOCK_TZ_RETRY: '1' },
+    });
+    process.exit(r.status ?? 1);
+  }
+}
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

@@ -401,15 +401,47 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
       const D = await import(${JSON.stringify(join(ROOT, 'src/main/security/devAuth.ts'))});
       process.stdout.write(String(D.isDevelopmentDevPassword()));
     `;
+    // The child must NOT inherit this machine's environment.
+    //
+    // `{ ...process.env, ...env }` looked harmless and was not. On a developer
+    // machine with a real `.env`, dotenv has already put
+    // MOBILESHOP_DEV_PASSWORD_HASH_B64 into `process.env` before this suite
+    // runs, so the child saw a VALID hash no matter which case was being set
+    // up. All four checks in this block failed — on a correctly configured
+    // machine, and only there. MEASURED: the same four pass on a clean
+    // environment and fail as soon as a real .env exists, while the guard
+    // being tested behaves identically in both.
+    //
+    // A test that fails BECAUSE the product is configured properly is worse
+    // than no test: it trains the reader to ignore a red line.
+    //
+    // Only the few variables Node itself needs are forwarded. Everything the
+    // case under test cares about is set explicitly, so the child's state is
+    // exactly what the case describes.
     const run = (env) => {
+      const minimal = {
+        PATH: process.env.PATH,
+        SystemRoot: process.env.SystemRoot,   // Windows: node will not start without it
+        TEMP: process.env.TEMP,
+        TMP: process.env.TMP,
+        HOME: process.env.HOME,
+        USERPROFILE: process.env.USERPROFILE,
+        APPDATA: process.env.APPDATA,
+      };
       try {
         return execFileSync(process.execPath,
           ['--experimental-strip-types', '--input-type=module', '--eval', probe],
-          { env: { ...process.env, ...env }, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+          { env: { ...minimal, ...env }, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
       } catch { return 'error'; }
     };
 
     const cleanEnv = { MOBILESHOP_DEV_PASSWORD_HASH: '', MOBILESHOP_DEV_PASSWORD_HASH_B64: '' };
+
+    // Prove the harness itself works before trusting its verdicts. If the child
+    // cannot start at all, every check below would report 'error' and read as a
+    // security failure.
+    t('the probe process runs (its verdicts are meaningful)',
+      run({ ...cleanEnv }) !== 'error');
     t('a truncated raw hash is refused, falling back rather than breaking login',
       run({ ...cleanEnv, MOBILESHOP_DEV_PASSWORD_HASH: '$2a$12' }) === 'true');
     t('a truncated base64 hash is refused too',

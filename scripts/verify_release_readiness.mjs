@@ -303,6 +303,61 @@ console.log('── 2. the verify script is complete and ordered ──');
       offenders.length === 0, offenders.join(', '));
   }
 
+  // No mutation may be left behind in the shipped source.
+  //
+  // The mutation tools rewrite real handlers and restore them in a `finally`.
+  // That failed once: a blanket delete of `.mutbak` files ran while a long
+  // mutation pass was still going, two backups vanished before they were used,
+  // and `git add -A` committed the mutants. What reached the default branch
+  // was:
+  //
+  //     delete.handlers.ts : if (advance.IsDeducted)  ->  if (false)
+  //     stock.ts           : consumeLots(...) deleted
+  //
+  // The first disables the advance deduction when a payout is deleted; the
+  // second stops sales drawing from the cost layers, so inventory valuation
+  // and COGS both go wrong. Neither is visible in a passing test run, because
+  // the suites that would catch them are the ones the mutation tool disables
+  // while it works.
+  //
+  // This is cheap and it is checked on every run.
+  {
+    const MUTANT_MARKS = [
+      [/\bif\s*\(\s*false\s*\)/, 'if (false)'],
+      [/\bif\s*\(\s*true\s*\)\s*return\b/, 'if (true) return'],
+      [/\/\/\s*MUTANT\b/i, '// MUTANT'],
+    ];
+    const found = [];
+    const walkSrc = (dir) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) { walkSrc(full); continue; }
+        if (!/\.(ts|tsx)$/.test(e.name)) continue;
+        const body = readFileSync(full, 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, ' ')
+          .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+        for (const [rx, label] of MUTANT_MARKS) {
+          if (rx.test(body)) found.push(`${relative(ROOT, full)} (${label})`);
+        }
+      }
+    };
+    walkSrc(join(ROOT, 'src'));
+    ok('no mutation marker was left in src/', found.length === 0, found.join(', '));
+
+    // And no backup file from a mutation run may be sitting in the tree.
+    const strays = [];
+    const walkAny = (dir) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === 'node_modules' || e.name === '.git') continue;
+        const full = join(dir, e.name);
+        if (e.isDirectory()) { walkAny(full); continue; }
+        if (e.name.endsWith('.mutbak')) strays.push(relative(ROOT, full));
+      }
+    };
+    walkAny(ROOT);
+    ok('no .mutbak backup was left behind', strays.length === 0, strays.join(', '));
+  }
+
   const behavioural = verify.split(' && ')
     .filter((c) => !c.includes('verify_release_readiness'));
   const sweepIdx = behavioural.findIndex((c) => c.includes('verify_fuzz_sweep.mjs'));

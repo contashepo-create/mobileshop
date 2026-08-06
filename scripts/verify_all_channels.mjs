@@ -28,7 +28,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_all_channels.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -64,7 +64,7 @@ console.log(`\n── enumerating ── ${channels.size} channels registered`);
 
 // ---------------------------------------------------------------- load
 const { buildDatabase, loadHandlers, handlers, call } =
-  await import(join(ROOT, 'scripts/lib/handlerHarness.mjs'));
+  await import(pathToFileURL(join(ROOT, 'scripts/lib/handlerHarness.mjs')).href);
 const db = buildDatabase();
 await loadHandlers();
 
@@ -220,7 +220,7 @@ const SKIP = new Set([
 // ---------------------------------------------------------------- execute
 console.log('── 2. every channel answers; none throws; none leaks ──');
 {
-  const er = await import(join(ROOT, 'src/main/security/errorResponse.ts'));
+  const er = await import(pathToFileURL(join(ROOT, 'src/main/security/errorResponse.ts')).href);
   const quiet = console.error;
   const quietLog = console.log;
   let executed = 0, skipped = 0;
@@ -273,7 +273,7 @@ console.log('── 2. every channel answers; none throws; none leaks ──');
 // REFUSED change nothing, but a few carry a valid payload with only the id
 // replaced and legitimately post. Measuring the identity against the position
 // taken here keeps section 3 about the sweep rather than about section 2b.
-const { identity: __identity } = await import(join(ROOT, 'scripts/lib/invariants.mjs'));
+const { identity: __identity } = await import(pathToFileURL(join(ROOT, 'scripts/lib/invariants.mjs')).href);
 const BEFORE_HOSTILE = __identity(db, 50000) === null;
 
 // ---------------------------------------------------------------- hostile ids
@@ -286,7 +286,7 @@ console.log('── 2b. no channel crashes on a malformed identifier ──');
   // delete:*, sales:update, purchases:create and the maintenance family.
   //
   // The screens always send a real id, which is exactly why nothing noticed.
-  const er = await import(join(ROOT, 'src/main/security/errorResponse.ts'));
+  const er = await import(pathToFileURL(join(ROOT, 'src/main/security/errorResponse.ts')).href);
   const HOSTILE_IDS = [undefined, null, {}, [], 'abc', NaN, -1, 0];
   const quiet = console.error, quietLog = console.log;
   const crashed = [];
@@ -333,7 +333,7 @@ console.log('── 2b. no channel crashes on a malformed identifier ──');
 // ---------------------------------------------------------------- invariants
 console.log('── 3. the books still balance after all of that ──');
 {
-  const { checkAll } = await import(join(ROOT, 'scripts/lib/invariants.mjs'));
+  const { checkAll } = await import(pathToFileURL(join(ROOT, 'scripts/lib/invariants.mjs')).href);
   // `checkAll(db, opening)` needs the capital the shop STARTED with, because
   // the identity it verifies is `netWorth == opening + profit` accumulated
   // over every document ever written.

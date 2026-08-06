@@ -46,7 +46,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_error_disclosure.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join, relative, extname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -75,7 +75,7 @@ const ok = (label, cond, detail = '') => {
 // ===========================================================================
 console.log('\n── 1. the detector recognises every leak shape ──');
 // ===========================================================================
-const er = await import(join(ROOT, 'src/main/security/errorResponse.ts'));
+const er = await import(pathToFileURL(join(ROOT, 'src/main/security/errorResponse.ts')).href);
 {
   // Every string below came out of a REAL failure captured while auditing.
   const MUST_FLAG = [
@@ -321,7 +321,7 @@ console.log('── 5. real handlers, driven to failure ──');
 {
   // Executed, not grepped. A source scan proves a line is absent; only calling
   // the handler proves the reply is clean.
-  const { buildDatabase, loadHandlers, call } = await import(join(ROOT, 'scripts/lib/handlerHarness.mjs'));
+  const { buildDatabase, loadHandlers, call } = await import(pathToFileURL(join(ROOT, 'scripts/lib/handlerHarness.mjs')).href);
   const db = buildDatabase();
   await loadHandlers();
   db.prepare("INSERT INTO roles (RoleID,RoleName,IsSystem) VALUES (1,'مدير',1)").run();
@@ -409,7 +409,7 @@ console.log('── 7. the Cloudflare Worker tells anonymous callers nothing ─
 
   // Driven for real: the exported fetch, with a D1 that throws the way an
   // outage or a missing migration would.
-  const mod = await import(join(ROOT, 'server/worker.js'));
+  const mod = await import(pathToFileURL(join(ROOT, 'server/worker.js')).href);
   const boom = {
     CLIENT_KEY: 'ck', ADMIN_KEY: 'ak',
     DB: {

@@ -48,7 +48,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_money_precision.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -72,7 +72,7 @@ const ok = (label, cond, detail = '') => {
 };
 
 const { buildDatabase, loadHandlers, call, currentDb } =
-  await import(join(ROOT, 'scripts/lib/handlerHarness.mjs'));
+  await import(pathToFileURL(join(ROOT, 'scripts/lib/handlerHarness.mjs')).href);
 
 const db = buildDatabase();
 await loadHandlers();

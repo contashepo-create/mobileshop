@@ -51,7 +51,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_write_integrity.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -75,7 +75,7 @@ const ok = (label, cond, detail = '') => {
 };
 
 const { buildDatabase, loadHandlers, call, currentDb } =
-  await import(join(ROOT, 'scripts/lib/handlerHarness.mjs'));
+  await import(pathToFileURL(join(ROOT, 'scripts/lib/handlerHarness.mjs')).href);
 
 const db = buildDatabase();
 await loadHandlers();
@@ -367,7 +367,7 @@ async function compileHardenBinding() {
       + harden + '\n' + rule + '\n' + round + '\n'
       + 'export default hardenBinding;\n', 'utf8');
 
-    const mod = await import('file://' + file);
+    const mod = await import(pathToFileURL(file).href);
     return typeof mod.default === 'function' ? mod.default : null;
   } catch {
     return null;

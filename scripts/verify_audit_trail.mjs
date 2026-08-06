@@ -40,7 +40,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_audit_trail.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -64,7 +64,7 @@ const ok = (label, cond, detail = '') => {
 };
 
 const { buildDatabase, loadHandlers, currentDb } =
-  await import(join(ROOT, 'scripts/lib/handlerHarness.mjs'));
+  await import(pathToFileURL(join(ROOT, 'scripts/lib/handlerHarness.mjs')).href);
 
 buildDatabase();
 await loadHandlers();
@@ -73,7 +73,7 @@ const db = currentDb();
 db.prepare("INSERT INTO roles (RoleID,RoleName,IsSystem) VALUES (1,'مدير',1)").run();
 db.prepare("INSERT INTO users (UserID,Username,PasswordHash,RoleID,IsActive) VALUES (1,'admin','$2a$10$x',1,1)").run();
 
-const { recordSecurityEvent } = await import(join(ROOT, 'src/main/security/securityLog.ts'));
+const { recordSecurityEvent } = await import(pathToFileURL(join(ROOT, 'src/main/security/securityLog.ts')).href);
 
 // ===========================================================================
 console.log('\n── 1. events can still be recorded ──');
@@ -222,7 +222,7 @@ console.log('── 5. the guards are in the schema the tests can see ──');
     trig.includes('ck_security_events_no_delete'), JSON.stringify(trig));
 
   // Re-running the migrations must not fail or lose events.
-  const { runMigrations } = await import(join(ROOT, 'src/main/database/migrations/index.ts'));
+  const { runMigrations } = await import(pathToFileURL(join(ROOT, 'src/main/database/migrations/index.ts')).href);
   const n = db.prepare('SELECT COUNT(*) c FROM security_events').get().c;
   let again = null;
   try { runMigrations(db); } catch (e) { again = e; }

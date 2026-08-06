@@ -23,7 +23,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_release_readiness.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
@@ -279,6 +279,30 @@ console.log('── 2. the verify script is complete and ordered ──');
       offenders.join(', '));
   }
 
+  // A dynamic import must be given a file:// URL, never a bare path.
+  //
+  // On Windows `import('D:\\...')` makes Node read `d:` as a protocol:
+  //
+  //     ERR_UNSUPPORTED_ESM_URL_SCHEME ... Received protocol 'd:'
+  //
+  // and `'file://' + path` is no better — it leaves backslashes and unencoded
+  // spaces. `pathToFileURL` is the documented conversion. Twenty-two sites
+  // across eleven suites shared one of the two broken forms.
+  {
+    const offenders = [];
+    for (const f of readdirSync(join(ROOT, 'scripts'))) {
+      if (!f.endsWith('.mjs')) continue;
+      if (f === 'verify_release_readiness.mjs') continue;   // holds the patterns it seeks
+      const body = readFileSync(join(ROOT, 'scripts', f), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+      if (/import\(\s*join\(/.test(body)) offenders.push(`${f} (import(join(...)))`);
+      if (/'file:\/\/'\s*\+/.test(body)) offenders.push(`${f} ('file://' + path)`);
+    }
+    ok('every dynamic import uses pathToFileURL, not a raw path',
+      offenders.length === 0, offenders.join(', '));
+  }
+
   const behavioural = verify.split(' && ')
     .filter((c) => !c.includes('verify_release_readiness'));
   const sweepIdx = behavioural.findIndex((c) => c.includes('verify_fuzz_sweep.mjs'));
@@ -304,7 +328,7 @@ console.log('── 3. the defects this review found cannot come back ──');
   // Each defect below is therefore re-created against the real handlers and
   // the real database, exactly as it was originally measured.
   const { buildDatabase, loadHandlers, handlers } =
-    await import(join(ROOT, 'scripts/lib/handlerHarness.mjs'));
+    await import(pathToFileURL(join(ROOT, 'scripts/lib/handlerHarness.mjs')).href);
   const db = buildDatabase();
   await loadHandlers();
   const H = (c, ...a) => handlers.get(c)({ sender: { id: 1 } }, ...a);
@@ -435,7 +459,7 @@ console.log('── 3. the defects this review found cannot come back ──');
     `${eMajor} — 32 was seventeen months out of support when this shipped as "ready"`);
 
   // The Worker is a separate runtime, so it is driven separately.
-  const mod = await import(join(ROOT, 'server/worker.js'));
+  const mod = await import(pathToFileURL(join(ROOT, 'server/worker.js')).href);
   const boom = { CLIENT_KEY: 'ck', ADMIN_KEY: 'ak',
     DB: { prepare() { throw new Error('D1_ERROR: no such table: devices at /worker/db.js:412'); },
           batch() { throw new Error('D1_ERROR'); }, exec() { throw new Error('D1_ERROR'); } } };
@@ -456,7 +480,7 @@ console.log('── 4. the harness cannot silently diverge from production ─�
   // Every long-lived defect in this review hid because the TEST environment
   // differed from the shipped one. Both are proven by BEHAVIOUR here, for the
   // same reason as section 3.
-  const { buildDatabase } = await import(join(ROOT, 'scripts/lib/handlerHarness.mjs'));
+  const { buildDatabase } = await import(pathToFileURL(join(ROOT, 'scripts/lib/handlerHarness.mjs')).href);
   const probe = buildDatabase();
 
   // If the harness still split on the semicolons inside `BEGIN ... END`, the

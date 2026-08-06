@@ -36,7 +36,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_restore_safety.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -89,7 +89,7 @@ const dir = mkdtempSync(join(ROOT, '.restore-check-'));
 try {
   const modFile = join(dir, 'probe.ts');
   writeFileSync(modFile, src.slice(at, end) + '\nexport default verifyDatabaseFile;\n', 'utf8');
-  const verify = (await import('file://' + modFile)).default;
+  const verify = (await import(pathToFileURL(modFile).href)).default;
   ok('the restore guard could be compiled and executed', typeof verify === 'function');
 
   /** Builds a file that looks like this application's database. */

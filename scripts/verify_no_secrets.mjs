@@ -37,7 +37,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_no_secrets.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join, relative, extname } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
@@ -399,7 +399,7 @@ console.log('── 4. credential getters answer presence, never the value ─�
 {
   // Executed, not grepped. A comment promising the token is withheld proves
   // nothing; calling the handler and reading the reply does.
-  const { build } = await import(join(ROOT, 'node_modules/esbuild/lib/main.js'));
+  const { build } = await import(pathToFileURL(join(ROOT, 'node_modules/esbuild/lib/main.js')).href);
   const dir = mkdtempSync(join(tmpdir(), 'secret-verify-'));
   const handlers = new Map();
   globalThis.__SECRET_H = handlers;

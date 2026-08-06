@@ -40,7 +40,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_db_constraints.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -62,7 +62,7 @@ const ok = (label, cond, detail = '') => {
   if (!cond) failures.push(`${label}${detail ? ' — ' + detail : ''}`);
 };
 
-const { buildDatabase } = await import(join(ROOT, 'scripts/lib/handlerHarness.mjs'));
+const { buildDatabase } = await import(pathToFileURL(join(ROOT, 'scripts/lib/handlerHarness.mjs')).href);
 const db = buildDatabase();
 
 /** The write must be REFUSED by the database itself. */

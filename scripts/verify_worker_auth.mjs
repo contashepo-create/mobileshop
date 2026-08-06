@@ -29,7 +29,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_worker_auth.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -52,7 +52,7 @@ const ok = (label, cond, detail = '') => {
   if (!cond) failures.push(`${label}${detail ? ' — ' + detail : ''}`);
 };
 
-const worker = (await import('file://' + join(ROOT, 'server/worker.js'))).default;
+const worker = (await import(pathToFileURL(join(ROOT, 'server/worker.js')).href)).default;
 
 /**
  * Every outbound call the worker makes, captured.

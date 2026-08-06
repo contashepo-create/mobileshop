@@ -42,7 +42,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_fiscal_year_close.mjs
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -112,7 +112,7 @@ writeFileSync(file,
   'const require = (_m) => ({ getDb: () => globalThis.__TEST_DB_FOR_GUARD__ });\n'
   + body + '\n'
   + 'export default refuseClosedYear;\n', 'utf8');
-const refuseClosedYear = (await import('file://' + file)).default;
+const refuseClosedYear = (await import(pathToFileURL(file).href)).default;
 
 // ===========================================================================
 console.log('\n── 1. a CLOSED year refuses every kind of document ──');

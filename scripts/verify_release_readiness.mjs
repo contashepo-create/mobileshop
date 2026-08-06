@@ -23,10 +23,21 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_release_readiness.mjs
  */
+import { fileURLToPath } from 'node:url';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
-const ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+// `fileURLToPath`, never `.pathname`.
+//
+// On Windows a file:// URL's pathname is `/D:/coding%20projects/...` — it
+// keeps a leading slash and it is percent-encoded. MEASURED on the owner's
+// machine, joining that with a subdirectory produced
+//
+//     ENOENT: scandir 'D:\D:\programing\coding%20projects\mobile%20shop'
+//
+// — the drive letter twice and the spaces still as %20. `fileURLToPath` is the
+// documented conversion and handles both.
+const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 /**
  * Path relative to the repository root, in forward slashes, on every OS.
  *
@@ -212,6 +223,30 @@ console.log('── 2. the verify script is complete and ordered ──');
     }
     ok('no suite spawns a Unix-only command line utility',
       shellers.length === 0, shellers.join(', '));
+  }
+
+  // No suite may derive a filesystem path from `.pathname`.
+  //
+  // On Windows a file:// URL's pathname keeps a leading slash and stays
+  // percent-encoded: `/D:/coding%20projects/...`. Joining that with a
+  // subdirectory produced, on the owner's machine,
+  //
+  //     ENOENT: scandir 'D:\D:\programing\coding%20projects\mobile%20shop'
+  //
+  // Nineteen suites shared the same line. `fileURLToPath` is the documented
+  // conversion; `.pathname` is a URL component that only looks like a path.
+  {
+    const offenders = [];
+    for (const f of readdirSync(join(ROOT, 'scripts'))) {
+      if (!f.endsWith('.mjs')) continue;
+      if (f === 'verify_release_readiness.mjs') continue;   // contains the pattern it seeks
+      const body = readFileSync(join(ROOT, 'scripts', f), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+      if (/import\.meta\.url\s*\)\s*\.pathname/.test(body)) offenders.push(f);
+    }
+    ok('no suite builds a path from import.meta.url .pathname',
+      offenders.length === 0, offenders.join(', '));
   }
 
   const behavioural = verify.split(' && ')

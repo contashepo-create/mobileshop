@@ -8,11 +8,22 @@
  *
  * Run:  node scripts/mutate_restore_safety.mjs
  */
+import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync, copyFileSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 
-const ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+// `fileURLToPath`, never `.pathname`.
+//
+// On Windows a file:// URL's pathname is `/D:/coding%20projects/...` — it
+// keeps a leading slash and it is percent-encoded. MEASURED on the owner's
+// machine, joining that with a subdirectory produced
+//
+//     ENOENT: scandir 'D:\D:\programing\coding%20projects\mobile%20shop'
+//
+// — the drive letter twice and the spaces still as %20. `fileURLToPath` is the
+// documented conversion and handles both.
+const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 const F = join(ROOT, 'src/main/ipc/backup.handlers.ts');
 
 const MUTANTS = [

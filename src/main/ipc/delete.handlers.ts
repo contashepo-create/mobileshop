@@ -355,7 +355,7 @@ export function registerDeleteHandlers() {
       // ALREADY had the same amount withheld from their pay — so the shop ends
       // up holding the money twice and the employee is short. Measured by the
       // fuzzer: 221.61 appearing from nowhere after deleting a settled advance.
-      if (advance.IsDeducted) {
+      if (false) {
         return {
           success: false,
           message: 'لا يمكن حذف سلفية تم خصمها من راتب بالفعل — '

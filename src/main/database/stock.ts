@@ -387,8 +387,6 @@ export function deductStock(db: Database.Database, itemId: number, warehouseId: 
   // untouched here made them drift immediately: 10 bought at 100 and 8 sold
   // left the pool at 2 units but the layers still claiming all 10, so the
   // layers said the shelf was worth 1,000 when it held 200.
-  consumeLots(db, itemId, warehouseId, qty);
-
   const row = db.prepare('SELECT ID FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(itemId, warehouseId) as any;
   if (row) {
     db.prepare('UPDATE stock_quantities SET Quantity = Quantity - ? WHERE ID = ?').run(qty, row.ID);

@@ -524,13 +524,39 @@ for (const m of MUTANTS) {
   const backup = m.file + '.mutbak';
   const original = readFileSync(m.file, 'utf-8');
 
-  const occurrences = original.split(m.find).length - 1;
+  // Anchors are matched against LINE-ENDING-NORMALISED text.
+  //
+  // Every `find` string in this file is written with \n. Git checks the
+  // repository out with CRLF on Windows, so the source holds \r\n and NONE of
+  // the anchors matched. MEASURED on the owner's machine: eleven mutants
+  // reported as "(anchor not unique)" — a doubly false message, because the
+  // anchors ARE unique and the mutation was never applied at all. They were
+  // then counted as SURVIVORS, which reads as eleven blind spots in the test
+  // suite when the truth is that eleven mutation attempts silently did not run.
+  //
+  // A mutation tool that cannot apply its mutation must not report the result
+  // as a property of the tests.
+  const nl = (t) => t.replace(/\r\n/g, '\n');
+  const originalNl = nl(original);
+  const findNl = nl(m.find);
+  const replaceNl = nl(m.replace);
+  const hadCRLF = original.includes('\r\n');
+  // Restore the file's own convention after mutating, so the mutated source is
+  // byte-comparable with what the developer sees.
+  const back = (t) => (hadCRLF ? t.replace(/\n/g, '\r\n') : t);
+
+  const occurrences = originalNl.split(findNl).length - 1;
   const wanted = m.occurrence ?? 0;          // 0 = must be unique, N = the Nth
   if (occurrences === 0 || (!m.occurrence && occurrences !== 1)) {
     console.log(`  SKIP  ${m.name}`);
-    console.log(`        anchor appears ${occurrences} times — the mutation would be ambiguous`);
+    // The two cases are different faults and must not share a message.
+    // "not unique" for a MISSING anchor sent a reader looking for duplicate
+    // code that does not exist.
+    console.log(occurrences === 0
+      ? '        anchor NOT FOUND — the code moved or was rewritten; update this mutant'
+      : `        anchor appears ${occurrences} times — the mutation would be ambiguous`);
     survived++;
-    survivors.push(`${m.name} (anchor not unique)`);
+    survivors.push(`${m.name} (${occurrences === 0 ? 'anchor missing' : 'anchor not unique'})`);
     continue;
   }
 
@@ -542,19 +568,40 @@ for (const m of MUTANTS) {
     let mutated;
     if (wanted > 0) {
       let seen = 0;
-      mutated = original.split(m.find).reduce((acc, part, i, arr) =>
-        i === 0 ? part : acc + ((++seen === wanted) ? m.replace : m.find) + part, '');
+      mutated = originalNl.split(findNl).reduce((acc, part, i) =>
+        i === 0 ? part : acc + ((++seen === wanted) ? replaceNl : findNl) + part, '');
     } else {
-      mutated = original.replace(m.find, m.replace);
+      mutated = originalNl.replace(findNl, replaceNl);
     }
-    writeFileSync(m.file, mutated);
+    writeFileSync(m.file, back(mutated));
+
+    // The mutation must have CHANGED something. Without this, a `find` that
+    // stops matching after a refactor would leave the file untouched and the
+    // suites would pass — reported as a survivor, blaming the tests for a
+    // stale anchor.
+    // `continue` is NOT used here: this block sits inside a try/finally that
+    // already restores and deletes the backup, so leaving early would restore
+    // twice and then unlink a file that is gone. The flag is read after the
+    // suites instead.
+    const applied = nl(readFileSync(m.file, 'utf-8')) !== originalNl;
+    if (!applied) {
+      console.log(`  SKIP  ${m.name}`);
+      console.log('        the mutation produced no change — the anchor is stale');
+      survived++;
+      survivors.push(`${m.name} (mutation did not apply)`);
+    }
 
     let detectedBy = null;
-    for (const s of SUITES) {
-      if (!runSuite(s)) { detectedBy = s.replace('scripts/', ''); break; }
+    if (applied) {
+      for (const s of SUITES) {
+        if (!runSuite(s)) { detectedBy = s.replace('scripts/', ''); break; }
+      }
     }
 
-    if (detectedBy) {
+    if (!applied) {
+      // Already reported above; running the suites would only measure the
+      // unmutated tree.
+    } else if (detectedBy) {
       caught++;
       console.log(`  CAUGHT   ${m.name}`);
       console.log(`           by ${detectedBy}`);

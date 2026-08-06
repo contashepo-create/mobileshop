@@ -419,19 +419,29 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
     // case under test cares about is set explicitly, so the child's state is
     // exactly what the case describes.
     const run = (env) => {
-      const minimal = {
-        PATH: process.env.PATH,
-        SystemRoot: process.env.SystemRoot,   // Windows: node will not start without it
-        TEMP: process.env.TEMP,
-        TMP: process.env.TMP,
-        HOME: process.env.HOME,
-        USERPROFILE: process.env.USERPROFILE,
-        APPDATA: process.env.APPDATA,
-      };
+      // SUBTRACT the polluting variables; do not try to LIST the needed ones.
+      //
+      // The first attempt built a minimal allow-list (PATH, SystemRoot, TEMP,
+      // HOME, ...). It worked on Linux and broke every check on Windows,
+      // including the probe-runs guard — Windows needs a set of variables that
+      // is longer and less predictable than it looks, and their NAMES are
+      // case-insensitive there, so `SystemRoot` may be stored as `SYSTEMROOT`
+      // and an exact-key copy silently misses it.
+      //
+      // Guessing what an OS needs to start a process is the wrong problem to
+      // solve. The only variables that must not survive are the two this suite
+      // sets up itself, so those are deleted and everything else is inherited.
+      const child = { ...process.env };
+      for (const key of Object.keys(child)) {
+        const k = key.toUpperCase();
+        if (k === 'MOBILESHOP_DEV_PASSWORD_HASH' || k === 'MOBILESHOP_DEV_PASSWORD_HASH_B64') {
+          delete child[key];   // case-insensitive on Windows, exact on POSIX
+        }
+      }
       try {
         return execFileSync(process.execPath,
           ['--experimental-strip-types', '--input-type=module', '--eval', probe],
-          { env: { ...minimal, ...env }, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+          { env: { ...child, ...env }, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
       } catch { return 'error'; }
     };
 

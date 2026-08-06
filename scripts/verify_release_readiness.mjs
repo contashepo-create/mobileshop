@@ -528,7 +528,7 @@ console.log('── 5. nothing is left half-finished ──');
   // A marker left in shipped code is a promise nobody kept.
   const markers = [];
   for (const f of files) {
-    const lines = readFileSync(f, 'utf8').split('\n');
+    const lines = readFileSync(f, 'utf8').split(/\r?\n/);
     lines.forEach((l, i) => {
       if (/\b(FIXME|XXX|HACK)\b/.test(l) && !l.trim().startsWith('*')) {
         markers.push(`${relPath(f)}:${i + 1}`);

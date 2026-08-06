@@ -127,7 +127,7 @@ try {
   await esb.transform('const x: number = 1;', { loader: 'ts' });
 } catch (e) {
   console.log('\n  FAIL  esbuild is installed but cannot run — the build gate cannot run.');
-  console.log(`        ${String(e.message || e).split('\n')[0].slice(0, 200)}`);
+  console.log(`        ${String(e.message || e).split(/\r?\n/)[0].slice(0, 200)}`);
   console.log('        Try: npm rebuild esbuild   (or delete node_modules and npm install)');
   console.log('\nRESULT: 0 passed, 1 failed');
   process.exit(1);
@@ -137,7 +137,7 @@ console.log(`\nusing esbuild ${esb.version} via ${relative(ROOT, API_PATH) || AP
 
 /** First meaningful line of an esbuild diagnostic, for a readable failure. */
 const firstError = s =>
-  (s.split('\n').find(l => l.includes('ERROR')) || s.split('\n')[0] || '').trim().slice(0, 160);
+  (s.split(/\r?\n/).find(l => l.includes('ERROR')) || s.split(/\r?\n/)[0] || '').trim().slice(0, 160);
 
 // ------------------------------------------------------------------ sources
 function walk(dir, out = []) {
@@ -165,7 +165,7 @@ console.log(`[1] Every source file under src/ parses (${files.length} files)`);
     } catch (e) {
       const msg = (e.errors || [])
         .map(x => `${x.text}${x.location ? ` (line ${x.location.line})` : ''}`)
-        .join('; ') || String(e.message || e).split('\n')[0];
+        .join('; ') || String(e.message || e).split(/\r?\n/)[0];
       broken.push(`${rel}: ${msg.slice(0, 120)}`);
     }
   }
@@ -276,7 +276,7 @@ console.log('\n[3] No db.exec template literal contains a raw backtick');
         buf += c; p++;
       }
       // Line number of the opening backtick, for a message a human can act on.
-      const line = text.slice(0, at).split('\n').length;
+      const line = text.slice(0, at).split(/\r?\n/).length;
       found.push({ line, content: buf, closed: text.slice(p, p + 2) === '`)' });
       i = p + 1;
     }

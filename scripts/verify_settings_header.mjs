@@ -94,7 +94,7 @@ console.log('\n[1] The shared header exists and behaves');
 console.log('\n[2] Each page renders it FIRST, and nothing is left at the bottom');
 for (const [name, file] of PAGES) {
   const s = raw(file);
-  const lines = s.split('\n');
+  const lines = s.split(/\r?\n/);
 
   t(`${name} imports the shared header`,
     /import \{ SettingsHeader \} from '[^']*shared\/SettingsHeader'/.test(s));
@@ -141,7 +141,7 @@ for (const [name, file] of PAGES) {
   // Matched by LINE POSITION rather than by a whitespace-sensitive pattern —
   // the three pages indent this differently, and an over-strict regex failed
   // on code that was correct.
-  const ls = s.split('\n');
+  const ls = s.split(/\r?\n/);
   const toastLines = ls
     .map((l, i) => (/showToast\(\s*'success'/.test(l) ? i : -1))
     .filter((i) => i >= 0);
@@ -159,7 +159,7 @@ for (const [name, file] of PAGES) {
 console.log('\n[5] The destructive action did not move next to save');
 {
   const g = raw('src/renderer/src/pages/settings/GeneralSettings.tsx');
-  const lines = g.split('\n');
+  const lines = g.split(/\r?\n/);
   const resetAt = lines.findIndex((l) => l.includes('تصفير قاعدة البيانات'));
   const headerAt = lines.findIndex((l) => /<SettingsHeader(?![A-Za-z0-9_])/.test(l));
   t('the database reset is still far below the header',

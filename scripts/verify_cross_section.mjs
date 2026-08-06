@@ -105,7 +105,7 @@ function books(db, opening) {
   if (!Array.isArray(breaches)) return breaches || null;
   if (breaches.length === 0) return null;
   const first = breaches[0];
-  return `${first.name}: ${String(first.msg).split('\n')[0]}`;
+  return `${first.name}: ${String(first.msg).split(/\r?\n/)[0]}`;
 }
 
 const ok = (res) => res && res.success !== false;
@@ -226,7 +226,7 @@ console.log('\n[1] SECTION BY SECTION — each one, against the FULL book');
     t(`${name}: accepted without crashing`, !err && res !== undefined,
       err || (res && res.success === false ? 'refused: ' + why(res) : ''));
     t(`${name}: the WHOLE book still balances`, breach === null,
-      breach ? String(breach).split('\n')[0] : '');
+      breach ? String(breach).split(/\r?\n/)[0] : '');
   }
 }
 
@@ -254,7 +254,7 @@ console.log('\n[2] MAINTENANCE -> STOCK -> CASH — the six-section flow');
     t('issuing a spare part reduces warehouse stock', stockQty(1) === stockBefore - 2,
       `${stockBefore} -> ${stockQty(1)}`);
     t('the books balance after the part leaves', books(db, OPENING) === null,
-      String(books(db, OPENING) || '').split('\n')[0]);
+      String(books(db, OPENING) || '').split(/\r?\n/)[0]);
   } else {
     t('issuing a spare part is handled', true, 'refused: ' + why(part));
   }
@@ -274,7 +274,7 @@ console.log('\n[2] MAINTENANCE -> STOCK -> CASH — the six-section flow');
   // Source='maintenance' from ordinary sales for exactly this reason.
   const breach = books(db, OPENING);
   t('the whole repair leaves the books balanced', breach === null,
-    breach ? String(breach).split('\n')[0] : '');
+    breach ? String(breach).split(/\r?\n/)[0] : '');
 
   const stmt = await call('customerStatement:get', 1);
   t('the repair is visible to the customer statement', stmt !== undefined && stmt !== null);
@@ -347,7 +347,7 @@ console.log('\n[2b] A part that is genuinely FREE must stay free');
     free && money(free.UnitPrice) === 0,
     `billed ${free?.UnitPrice}, cost is 10 — billing cost would charge for a giveaway`);
   t('the books balance', books(db, OPENING) === null,
-    String(books(db, OPENING) || '').split('\n')[0]);
+    String(books(db, OPENING) || '').split(/\r?\n/)[0]);
 }
 
 // ===================================================================== 3
@@ -369,7 +369,7 @@ console.log('\n[3] SALE -> VOUCHER: a debt paid later clears exactly once');
   t('cash rose by exactly the payment', money(cash()) === money(cashBefore + 200),
     `${cashBefore} -> ${cash()}`);
   t('the books balance', books(db, OPENING) === null,
-    String(books(db, OPENING) || '').split('\n')[0]);
+    String(books(db, OPENING) || '').split(/\r?\n/)[0]);
 
   // Paying twice must not take the customer below zero without recording it.
   const again = await call('vouchers:create', {
@@ -379,7 +379,7 @@ console.log('\n[3] SALE -> VOUCHER: a debt paid later clears exactly once');
   t('an overpayment is refused or recorded as credit',
     !ok(again) || money(cust()) === -500, `accepted=${ok(again)} balance=${cust()}`);
   t('the books balance after the overpayment', books(db, OPENING) === null,
-    String(books(db, OPENING) || '').split('\n')[0]);
+    String(books(db, OPENING) || '').split(/\r?\n/)[0]);
 }
 
 // ===================================================================== 4
@@ -414,7 +414,7 @@ console.log('\n[4] PURCHASE -> RETURN -> SUPPLIER LEDGER');
     t('the debt fell by exactly the same value', money(supp()) === 150, String(supp()));
   }
   t('the books balance', books(db, OPENING) === null,
-    String(books(db, OPENING) || '').split('\n')[0]);
+    String(books(db, OPENING) || '').split(/\r?\n/)[0]);
 
   const tooMuch = await call('purchaseReturns:create', {
     PurchaseID: pid, items: [{ ItemID: 1, Quantity: 500, UnitCost: 10, WarehouseID: 1 }],
@@ -422,7 +422,7 @@ console.log('\n[4] PURCHASE -> RETURN -> SUPPLIER LEDGER');
   });
   t('returning more than was bought is refused', !ok(tooMuch), why(tooMuch));
   t('and the refusal left nothing behind', books(db, OPENING) === null,
-    String(books(db, OPENING) || '').split('\n')[0]);
+    String(books(db, OPENING) || '').split(/\r?\n/)[0]);
 }
 
 // ===================================================================== 5
@@ -450,7 +450,7 @@ console.log('\n[5] DELETE across sections — an undo must undo EVERYTHING');
       `${before.net} -> ${netWorth(db)}`);
   }
   t('the books balance after the undo', books(db, OPENING) === null,
-    String(books(db, OPENING) || '').split('\n')[0]);
+    String(books(db, OPENING) || '').split(/\r?\n/)[0]);
 }
 
 // ===================================================================== 6
@@ -497,7 +497,7 @@ console.log('\n[6] REPORTS agree with the LEDGERS they summarise');
     }
   }
   t('the books balance', books(db, OPENING) === null,
-    String(books(db, OPENING) || '').split('\n')[0]);
+    String(books(db, OPENING) || '').split(/\r?\n/)[0]);
 }
 
 // ===================================================================== 7
@@ -517,7 +517,7 @@ console.log('\n[7] FISCAL YEAR is a boundary, not a suggestion');
   t('every purchase carries a fiscal year', p === 0, `${p} unstamped`);
   t('every voucher carries a fiscal year', v === 0, `${v} unstamped`);
   t('the books balance', books(db, OPENING) === null,
-    String(books(db, OPENING) || '').split('\n')[0]);
+    String(books(db, OPENING) || '').split(/\r?\n/)[0]);
 }
 
 // ===================================================================== 8
@@ -561,7 +561,7 @@ console.log('\n[8] A FULL TRADING DAY — every section, in sequence, one shop')
   console.log('      ' + steps.map(x => `${x.label}:${x.accepted ? '✓' : '✗'}`).join('  '));
   const firstBreak = steps.find(x => x.breach);
   t('no step left the books unbalanced', !firstBreak,
-    firstBreak ? `${firstBreak.label}: ${String(firstBreak.breach).split('\n')[0]}` : '');
+    firstBreak ? `${firstBreak.label}: ${String(firstBreak.breach).split(/\r?\n/)[0]}` : '');
   t('no step crashed', steps.every(x => !x.err),
     steps.filter(x => x.err).map(x => `${x.label}: ${x.err}`).join(' | '));
 
@@ -577,7 +577,7 @@ console.log('\n[8] A FULL TRADING DAY — every section, in sequence, one shop')
     ['a refund never exceeds the receipt', inv.refundNeverExceedsReceipt],
   ]) {
     const r = fn(db);
-    t(label, !r, String(r || '').split('\n')[0]);
+    t(label, !r, String(r || '').split(/\r?\n/)[0]);
   }
 }
 
@@ -662,7 +662,7 @@ console.log('\n[9] SECTION ISOLATION — a refusal must not damage another secti
     try { res = await fn(); } catch { res = { success: false }; }
     const breach = books(db, OPENING);
     t(`${label}: the books stay intact`, breach === null,
-      breach ? String(breach).split('\n')[0] : (ok(res) ? 'accepted' : 'refused'));
+      breach ? String(breach).split(/\r?\n/)[0] : (ok(res) ? 'accepted' : 'refused'));
   }
   t('net worth is untouched by every refusal', netWorth(db) === before,
     `${before} -> ${netWorth(db)}`);

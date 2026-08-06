@@ -334,7 +334,7 @@ console.log('── 2. credential files are ignored and were never committed ─
       // one of these checks silently compared against an empty string.
       const out = execFileSync('git', ['log', '--all', '--oneline', '--', p],
         { cwd: ROOT, encoding: 'utf8' });
-      count = out.split('\n').filter(Boolean).length;
+      count = out.split(/\r?\n/).filter(Boolean).length;
     } catch { count = 0; }
     ok(`${p} was never committed`, Number(count) === 0, `${count} commits touch it`);
   }
@@ -382,12 +382,12 @@ console.log('── 2. credential files are ignored and were never committed ─
     nowIgnored = '';
   }
   ok('no already-tracked file is caught by the ignore rules',
-    nowIgnored === '', nowIgnored.split('\n').slice(0, 4).join(', '));
+    nowIgnored === '', nowIgnored.split(/\r?\n/).slice(0, 4).join(', '));
 
   // `.env.example` must show the SHAPE and never a value.
   const example = readFileSync(join(ROOT, '.env.example'), 'utf8');
   const filled = example
-    .split('\n')
+    .split(/\r?\n/)
     .filter(l => /^[A-Z_]+=.+/.test(l.trim()))
     .filter(l => !/^MOBILESHOP_R2_BUCKET=/.test(l.trim()));   // a bucket name, not a secret
   ok('.env.example carries no filled-in values', filled.length === 0, filled.join(' | '));

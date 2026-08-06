@@ -263,7 +263,7 @@ console.log('── 4. no handler returns a raw runtime error any more ──');
     // Section 6 asserts the guard's OTHER path — the one that catches real
     // throws — stays generic.
     if (f.endsWith('ipcGuard.ts')) continue;
-    const lines = readFileSync(f, 'utf8').split('\n');
+    const lines = readFileSync(f, 'utf8').split(/\r?\n/);
     lines.forEach((line, i) => {
       if (line.trim().startsWith('*') || line.trim().startsWith('//')) return;
       if (RAW_RETURN.test(line)) offenders.push(`${relative(ROOT, f)}:${i + 1}`);
@@ -285,7 +285,7 @@ console.log('── 4. no handler returns a raw runtime error any more ──');
   const spliced = [];
   for (const f of files) {
     if (f.endsWith('errorResponse.ts')) continue;
-    const lines = readFileSync(f, 'utf8').split('\n');
+    const lines = readFileSync(f, 'utf8').split(/\r?\n/);
     lines.forEach((line, i) => {
       if (line.trim().startsWith('*') || line.trim().startsWith('//')) return;
       if (RAW_TEMPLATE.test(line)) spliced.push(`${relative(ROOT, f)}:${i + 1}`);

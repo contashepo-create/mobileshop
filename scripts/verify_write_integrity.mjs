@@ -386,7 +386,7 @@ console.log('── 6. balance-moving writes are reachable only with a validated
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.ts')) continue;
     const body = readFileSync(join(dir, f), 'utf8');
-    for (const line of body.split('\n')) {
+    for (const line of body.split(/\r?\n/)) {
       if (/UPDATE\s+(cash_accounts|payment_methods|customers|suppliers|employees)\s+SET\s+Balance/i.test(line)) {
         balanceWrites++;
       }

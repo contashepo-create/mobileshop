@@ -87,7 +87,7 @@ console.log('\n[2] No screen reports success without inspecting the reply');
       const p = join(dir, entry);
       if (statSync(p).isDirectory()) { walk(p); continue; }
       if (!entry.endsWith('.tsx')) continue;
-      const lines = readFileSync(p, 'utf-8').split('\n');
+      const lines = readFileSync(p, 'utf-8').split(/\r?\n/);
       lines.forEach((line, i) => {
         const m = /^\s*await window\.api\.invoke\(\s*['"]([^'"]+)['"]/.exec(line);
         if (!m || READ_ONLY.test(m[1])) return;

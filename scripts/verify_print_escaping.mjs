@@ -178,7 +178,7 @@ console.log('\n[4] No raw interpolation is left in any printed template');
 
   for (const file of PRINT_SCREENS) {
     const src = raw(file);
-    const lines = src.split('\n');
+    const lines = src.split(/\r?\n/);
     // Restrict the scan to the functions that BUILD PRINT HTML. JSX elsewhere
     // in the file is escaped by React itself, so flagging it is noise.
     const offenders = [];

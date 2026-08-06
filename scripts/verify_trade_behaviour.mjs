@@ -17,13 +17,13 @@ const PASS = [], FAIL = [];
 function check(name, ok, detail = '') {
   (ok ? PASS : FAIL).push(name);
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`);
-  if (detail && !ok) console.log(`          ${String(detail).split('\n').join('\n          ')}`);
+  if (detail && !ok) console.log(`          ${String(detail).split(/\r?\n/).join('\n          ')}`);
 }
 
 function checkVerbose(name, ok, detail = '') {
   (ok ? PASS : FAIL).push(name);
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}`);
-  if (detail) console.log(`          ${String(detail).split('\n').join('\n          ')}`);
+  if (detail) console.log(`          ${String(detail).split(/\r?\n/).join('\n          ')}`);
 }
 
 const r2 = n => Math.round((n || 0) * 100) / 100;

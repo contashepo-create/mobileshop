@@ -305,7 +305,7 @@ console.log('── 6. the removed react-router v7 API is gone from the source �
   const rscHits = rscFiles.join('\n').trim();
   ok('the renderer uses only the declarative router (no data router, no RSC)',
     rscHits === '',
-    `found in: ${rscHits.split('\n').slice(0, 3).join(', ')} — the RSC advisory ` +
+    `found in: ${rscHits.split(/\r?\n/).slice(0, 3).join(', ')} — the RSC advisory ` +
     'GHSA-qwww-vcr4-c8h2 would then apply and react-router must go to >= 8.3.0');
 }
 

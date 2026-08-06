@@ -579,7 +579,7 @@ f.history.forEach(h => console.log('  ' + h));
 console.log('\nbreaches:');
 for (const b of f.breaches) {
   console.log(`  [${b.name}]`);
-  String(b.msg).split('\n').forEach(l => console.log('    ' + l));
+  String(b.msg).split(/\r?\n/).forEach(l => console.log('    ' + l));
 }
 console.log(`\nreplay with:  node --experimental-strip-types scripts/fuzz_trade.mjs ${ITERATIONS} ${SEED}`);
 process.exit(1);

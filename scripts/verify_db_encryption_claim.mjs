@@ -144,7 +144,7 @@ try {
         if (e.isDirectory()) { scan(p, hits); continue; }
         if (!/\.(ts|tsx|js|mjs)$/.test(e.name)) continue;
         const body = readFileSync(p, 'utf8');
-        for (const line of body.split('\n')) {
+        for (const line of body.split(/\r?\n/)) {
           // The pragma as CODE, not as prose in a comment.
           if (/pragma\s*\(\s*[`'"]\s*key\s*=/i.test(line)
             || /pragma\s*\(\s*[`'"]\s*rekey\s*=/i.test(line)) {

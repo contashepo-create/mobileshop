@@ -246,7 +246,7 @@ console.log('\n[7] No unguarded field dereference is left on nullable state');
       /const\s*\[\s*(\w+)\s*,\s*set\w+\s*\]\s*=\s*useState\s*(?:<[^>]*>)?\s*\(\s*(null|undefined)?\s*\)/g)) {
       if (m[2] === 'null' || m[2] === undefined) nullable.add(m[1]);
     }
-    src.split('\n').forEach((line, i) => {
+    src.split(/\r?\n/).forEach((line, i) => {
       for (const v of nullable) {
         const re = new RegExp(`(?<![\\w.?])${v}\\.(\\w+)\\.(map\\(|length\\b|slice\\(|reduce\\(|filter\\()`, 'g');
         for (const m of line.matchAll(re)) {

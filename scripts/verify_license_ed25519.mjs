@@ -451,7 +451,7 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
         // at a Windows-only fault that could not be reproduced on Linux. The
         // first line of stderr names it immediately.
         lastProbeError = String(err && err.stderr ? err.stderr : (err && err.message) || err)
-          .split('\n').filter(Boolean).slice(0, 6).join(' | ').slice(0, 400);
+          .split(/\r?\n/).filter(Boolean).slice(0, 6).join(' | ').slice(0, 400);
         return 'error';
       }
     };

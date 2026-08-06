@@ -332,7 +332,7 @@ console.log('\n[5b] Every credential-verifying endpoint is rate limited');
       if (!VERIFIES.test(body)) continue;
       checked++;
       if (THROTTLED.test(body) || SELF_GUARDED.test(body)) continue;
-      unprotected.push(`${m[1]} (${f}:${src.slice(0, m.index).split('\n').length})`);
+      unprotected.push(`${m[1]} (${f}:${src.slice(0, m.index).split(/\r?\n/).length})`);
     }
   }
   t('every credential-verifying endpoint is throttled',

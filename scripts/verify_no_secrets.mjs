@@ -40,7 +40,7 @@
 import { fileURLToPath } from 'node:url';
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join, relative, extname } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 
@@ -267,10 +267,17 @@ console.log('── 2. credential files are ignored and were never committed ─
   for (const p of MUST_IGNORE) {
     let count = 0;
     try {
-      count = execSync(`git log --all --oneline -- ${JSON.stringify(p)} | wc -l`,
-        { cwd: ROOT, encoding: 'utf8' }).trim();
-    } catch { count = '0'; }
-    ok(`${p} was never committed`, String(count) === '0', `${count} commits touch it`);
+      // Counted in Node, not by piping to `wc`.
+      //
+      // `wc` does not exist on Windows and the pipe needs a POSIX shell.
+      // MEASURED on the owner's machine: fifteen repetitions of
+      // "'wc' is not recognized as an internal or external command" and every
+      // one of these checks silently compared against an empty string.
+      const out = execFileSync('git', ['log', '--all', '--oneline', '--', p],
+        { cwd: ROOT, encoding: 'utf8' });
+      count = out.split('\n').filter(Boolean).length;
+    } catch { count = 0; }
+    ok(`${p} was never committed`, Number(count) === 0, `${count} commits touch it`);
   }
 
   // The template itself must stay TRACKED: the ignore rule is `.env.*` with an
@@ -290,19 +297,31 @@ console.log('── 2. credential files are ignored and were never committed ─
   //     and a negation is the line beginning with `!`.
   let exampleRule = '';
   try {
-    exampleRule = execSync('git check-ignore --no-index -v .env.example || true',
-      { cwd: ROOT, encoding: 'utf8', shell: '/bin/bash' }).trim();
+    // No shell. `|| true` existed only to swallow git's non-zero exit when
+    // nothing matches; a try/catch does the same thing on every platform, and
+    // `shell: '/bin/bash'` is a path that does not exist on Windows —
+    // MEASURED: `spawnSync /bin/bash ENOENT`.
+    exampleRule = execFileSync('git', ['check-ignore', '--no-index', '-v', '.env.example'],
+      { cwd: ROOT, encoding: 'utf8' }).trim();
   } catch { exampleRule = ''; }
   const rescued = exampleRule === '' || /:\d+:!/.test(exampleRule);
   ok('.env.example survives the .env.* ignore rule', rescued,
     `matched rule: ${exampleRule || '(none)'}`);
   ok('.env.example is tracked',
-    execSync('git ls-files .env.example', { cwd: ROOT, encoding: 'utf8' }).trim() === '.env.example');
+    execFileSync('git', ['ls-files', '.env.example'], { cwd: ROOT, encoding: 'utf8' }).trim() === '.env.example');
 
   // A broad ignore rule must not swallow a file the project needs.
-  const nowIgnored = execSync(
-    'git ls-files | git check-ignore --stdin || true',
-    { cwd: ROOT, encoding: 'utf8', shell: '/bin/bash' }).trim();
+  // The pipe is done in Node: the file list is read, then handed to
+  // check-ignore on stdin. Same question, no shell, works everywhere.
+  let nowIgnored = '';
+  try {
+    const tracked = execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' });
+    nowIgnored = execFileSync('git', ['check-ignore', '--stdin'],
+      { cwd: ROOT, encoding: 'utf8', input: tracked }).trim();
+  } catch {
+    // check-ignore exits non-zero when NOTHING is ignored — the good case.
+    nowIgnored = '';
+  }
   ok('no already-tracked file is caught by the ignore rules',
     nowIgnored === '', nowIgnored.split('\n').slice(0, 4).join(', '));
 

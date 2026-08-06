@@ -249,6 +249,36 @@ console.log('── 2. the verify script is complete and ordered ──');
       offenders.length === 0, offenders.join(', '));
   }
 
+  // No suite may depend on a POSIX shell.
+  //
+  // `verify_no_secrets` used `| wc -l`, `|| true` and `shell: '/bin/bash'`.
+  // On Windows that produced fifteen copies of "'wc' is not recognized" and
+  // then `spawnSync /bin/bash ENOENT`. `verify_dependency_security` shelled
+  // out to `grep -rlE ... || true`, which on Windows returns NOTHING — and
+  // nothing found is that check's PASSING answer, so it reported success
+  // without reading a file. A check that cannot fail is worse than no check.
+  {
+    const SHELLISMS = [
+      [/shell:\s*['"`]\/bin\//, "shell: '/bin/...'"],
+      [/\|\|\s*true/, '|| true'],
+      [/\|\s*wc\b/, '| wc'],
+      [/execSync\(\s*[`'"][^`'"]*\bgrep\s+-/, 'execSync grep'],
+    ];
+    const offenders = [];
+    for (const f of readdirSync(join(ROOT, 'scripts'))) {
+      if (!f.endsWith('.mjs')) continue;
+      if (f === 'verify_release_readiness.mjs') continue;   // holds the patterns it seeks
+      const body = readFileSync(join(ROOT, 'scripts', f), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+      for (const [rx, label] of SHELLISMS) {
+        if (rx.test(body)) offenders.push(`${f} (${label})`);
+      }
+    }
+    ok('no suite relies on POSIX shell syntax', offenders.length === 0,
+      offenders.join(', '));
+  }
+
   const behavioural = verify.split(' && ')
     .filter((c) => !c.includes('verify_release_readiness'));
   const sweepIdx = behavioural.findIndex((c) => c.includes('verify_fuzz_sweep.mjs'));

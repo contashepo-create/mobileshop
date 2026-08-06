@@ -47,7 +47,7 @@
  * Run:  node --experimental-strip-types scripts/verify_dependency_security.mjs
  */
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 // `fileURLToPath`, never `.pathname`.
@@ -282,11 +282,27 @@ console.log('── 6. the removed react-router v7 API is gone from the source �
   // if you are using the unstable RSC APIs". If a future change introduces a
   // data router, that reasoning stops holding and this check fails loudly.
   const rendererDir = join(ROOT, 'src/renderer');
-  const { execSync } = await import('node:child_process');
-  const rscHits = execSync(
-    `grep -rlE "createBrowserRouter|createHashRouter|createMemoryRouter|unstable_|RouterProvider|useFetcher|useLoaderData|deserializeErrors" ${JSON.stringify(rendererDir)} || true`,
-    { encoding: 'utf8' },
-  ).trim();
+  // Scanned in Node, not by shelling out to `grep`.
+  //
+  // `grep` is not on PATH on Windows and `|| true` needs a POSIX shell, so
+  // this returned nothing there — and "nothing found" is exactly the PASSING
+  // answer. The check would have reported success on every Windows machine
+  // without reading a single file, which is worse than failing.
+  const RSC_API = /createBrowserRouter|createHashRouter|createMemoryRouter|unstable_|RouterProvider|useFetcher|useLoaderData|deserializeErrors/;
+  const rscFiles = [];
+  (function scan(dir) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) { scan(full); continue; }
+      if (!/\.(ts|tsx|js|jsx)$/.test(e.name)) continue;
+      try {
+        if (RSC_API.test(readFileSync(full, 'utf8'))) rscFiles.push(full);
+      } catch { /* unreadable */ }
+    }
+  })(rendererDir);
+  const rscHits = rscFiles.join('\n').trim();
   ok('the renderer uses only the declarative router (no data router, no RSC)',
     rscHits === '',
     `found in: ${rscHits.split('\n').slice(0, 3).join(', ')} — the RSC advisory ` +

@@ -136,9 +136,9 @@ async function buildBundle() {
   };
 
   const entry = `
-    export * from '${join(ROOT, 'src/renderer/src/components/layout/Sidebar.tsx')}';
-    export * as store from '${join(ROOT, 'src/renderer/src/stores/sidebar.store.ts')}';
-    export * as cat from '${join(ROOT, 'src/renderer/src/lib/navCatalog.ts')}';
+    export * from './src/renderer/src/components/layout/Sidebar.tsx';
+    export * as store from './src/renderer/src/stores/sidebar.store.ts';
+    export * as cat from './src/renderer/src/lib/navCatalog.ts';
   `;
   const out = await build({
     stdin: { contents: entry, resolveDir: ROOT, sourcefile: 'nav-entry.ts', loader: 'ts' },

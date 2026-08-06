@@ -229,8 +229,8 @@ console.log('\n[5] Authorisation — no route reachable without a check');
     } };
     const gout = await build({
       stdin: { contents: `
-        export { __authorizeForTests } from '${join(ROOT, 'src/main/security/ipcGuard.ts')}';
-        export * as sess from '${join(ROOT, 'src/main/security/session.ts')}';`,
+        export { __authorizeForTests } from './src/main/security/ipcGuard.ts';
+        export * as sess from './src/main/security/session.ts';`,
         resolveDir: ROOT, sourcefile: 'g.ts', loader: 'ts' },
       bundle: true, write: false, format: 'cjs', platform: 'node',
       plugins: [gstub], external: ['better-sqlite3', 'bcryptjs'], logLevel: 'silent',
@@ -398,14 +398,14 @@ if (!BASE) {
   } };
   const out = await build({
     stdin: { contents: `
-      export { runMigrations } from '${join(ROOT, 'src/main/database/migrations/index.ts')}';
-      export { registerAuthHandlers } from '${join(ROOT, 'src/main/ipc/auth.handlers.ts')}';
-      export { registerSettingsHandlers } from '${join(ROOT, 'src/main/ipc/settings.handlers.ts')}';
-      export { registerUsersHandlers } from '${join(ROOT, 'src/main/ipc/users.handlers.ts')}';
-      export { registerDatabaseHandlers } from '${join(ROOT, 'src/main/ipc/database.handlers.ts')}';
-      export { getSession } from '${join(ROOT, 'src/main/security/session.ts')}';
-      export { __resetLoginThrottle } from '${join(ROOT, 'src/main/security/loginThrottle.ts')}';
-      export { getDb } from '${join(ROOT, 'src/main/database/connection.ts')}';`,
+      export { runMigrations } from './src/main/database/migrations/index.ts';
+      export { registerAuthHandlers } from './src/main/ipc/auth.handlers.ts';
+      export { registerSettingsHandlers } from './src/main/ipc/settings.handlers.ts';
+      export { registerUsersHandlers } from './src/main/ipc/users.handlers.ts';
+      export { registerDatabaseHandlers } from './src/main/ipc/database.handlers.ts';
+      export { getSession } from './src/main/security/session.ts';
+      export { __resetLoginThrottle } from './src/main/security/loginThrottle.ts';
+      export { getDb } from './src/main/database/connection.ts';`,
       resolveDir: ROOT, sourcefile: 'a.ts', loader: 'ts' },
     bundle: true, write: false, format: 'cjs', platform: 'node',
     plugins: [stub], external: ['better-sqlite3', 'bcryptjs'], logLevel: 'silent',

@@ -112,7 +112,7 @@ if (!SQLITE_BASE) {
   } };
   const out = await build({
     stdin: {
-      contents: `export { hardenTransactions } from '${join(ROOT, 'src/main/database/connection.ts')}';`,
+      contents: `export { hardenTransactions } from './src/main/database/connection.ts';`,
       resolveDir: ROOT, sourcefile: 'c.ts', loader: 'ts',
     },
     bundle: true, write: false, format: 'cjs', platform: 'node',

@@ -105,7 +105,7 @@ async function buildHardenBundle() {
   } };
   const out = await build({
     stdin: { contents:
-      `export { hardenTransactions } from '${join(ROOT, 'src/main/database/connection.ts')}';`,
+      `export { hardenTransactions } from './src/main/database/connection.ts';`,
       resolveDir: ROOT, sourcefile: 'c.ts', loader: 'ts' },
     bundle: true, write: false, format: 'cjs', platform: 'node',
     plugins: [expose, stub], external: ['better-sqlite3'], logLevel: 'silent',

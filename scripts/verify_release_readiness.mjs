@@ -358,6 +358,35 @@ console.log('── 2. the verify script is complete and ordered ──');
     ok('no .mutbak backup was left behind', strays.length === 0, strays.join(', '));
   }
 
+  // A npm-family command must be spawned with its Windows extension.
+  //
+  // `publish-release.js` called `execFileSync('npx', ...)`. On Windows npx is
+  // `npx.cmd`, a batch script, and execFileSync runs executables directly with
+  // no shell — so the release upload died with ENOENT and printed generic
+  // advice about logging in and creating a bucket, both of which were already
+  // correct. The operator was sent to fix things that were not broken.
+  //
+  // Also refuses an empty `catch {}` around that spawn: a publisher that
+  // cannot say WHY it failed is worse than one that crashes.
+  {
+    const offenders = [];
+    const scanDir = (d) => {
+      for (const f of readdirSync(d)) {
+        if (!/\.(mjs|js)$/.test(f)) continue;
+        if (f === 'verify_release_readiness.mjs') continue;   // holds the pattern
+        const body = readFileSync(join(d, f), 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, ' ')
+          .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+        if (/execFileSync\(\s*['"`](npx|npm|yarn|pnpm)['"`]/.test(body)) {
+          offenders.push(`${f} (bare npm-family binary)`);
+        }
+      }
+    };
+    scanDir(join(ROOT, 'scripts'));
+    ok('no script spawns npx/npm without its Windows extension',
+      offenders.length === 0, offenders.join(', '));
+  }
+
   const behavioural = verify.split(' && ')
     .filter((c) => !c.includes('verify_release_readiness'));
   const sweepIdx = behavioural.findIndex((c) => c.includes('verify_fuzz_sweep.mjs'));

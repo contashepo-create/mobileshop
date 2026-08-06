@@ -96,17 +96,30 @@ console.log('');
 // ---- 1. upload to R2 -------------------------------------------------------
 console.log('⬆️  رفع الحزمة إلى R2 …');
 try {
-  execFileSync('npx', [
+  // `npx.cmd` on Windows, `npx` elsewhere.
+  //
+  // `execFileSync('npx', ...)` runs an EXECUTABLE directly, with no shell. On
+  // Windows npx is `npx.cmd`, a batch script, so the spawn fails with ENOENT
+  // before wrangler is ever reached. MEASURED on the owner's machine: the
+  // upload failed instantly and the advice printed below sent them to check a
+  // login and a bucket that were both already correct.
+  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  execFileSync(npx, [
     'wrangler', 'r2', 'object', 'put',
     `${BUCKET}/win32-x64/${nupkg}`,
     '--file', file,
     '--content-type', 'application/octet-stream',
     '--remote',
   ], { stdio: 'inherit', cwd: path.join(ROOT, 'server') });
-} catch {
-  die('فشل رفع الملف إلى R2. تأكد من:\n' +
-      '   npx wrangler login\n' +
-      `   npx wrangler r2 bucket create ${BUCKET}`);
+} catch (err) {
+  // The REAL reason is printed. `catch { die(...) }` swallowed it and replaced
+  // every possible fault — a missing npx, an expired token, a network drop, a
+  // bucket that does not exist — with one guess. A publisher that cannot say
+  // why it failed sends the operator to fix things that are not broken.
+  const detail = String(err && err.message ? err.message : err).split('\n')[0];
+  die(`فشل رفع الملف إلى R2.\n   السبب: ${detail}\n\n` +
+      '   إن كان السبب انتهاء الجلسة:  npx wrangler login\n' +
+      `   إن كان الدلو غير موجود:      npx wrangler r2 bucket create ${BUCKET}`);
 }
 
 // ---- 2. tell the Worker ----------------------------------------------------

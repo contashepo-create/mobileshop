@@ -56,8 +56,34 @@ import { createRequire } from 'node:module';
 // documented conversion and handles both.
 const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 
-/** Repo-relative path with forward slashes, on every OS. */
-const rel = (f) => relative(ROOT, f).split(sep).join('/');
+/**
+ * Repo-relative path with forward slashes, on every OS.
+ *
+ * Named `repoPath`, not `rel`. A local `const rel = relative(ROOT, file)`
+ * further down SHADOWED the short name, so one exemption compared a
+ * backslash path against a forward-slash list and the scanner reported
+ * itself. A helper used for a cross-platform invariant must not share a name
+ * with an ordinary local.
+ */
+const repoPath = (f) => relative(ROOT, f).split(sep).join('/');
+
+/**
+ * The two files that necessarily CONTAIN every pattern they hunt for.
+ *
+ * At module scope because three separate sections need it; while it lived
+ * inside one of them an earlier section referenced it before initialisation.
+ *
+ * Compared through `repoPath()` so the path separator cannot decide whether
+ * the exemption applies. On Windows it did: `relative()` yields
+ * `scripts\\verify_no_secrets.mjs`, which never matches a forward-slash
+ * entry, so both scanners lost their exemption and reported their own
+ * detector patterns as live secrets — measured as seven failures, every one
+ * of them this file quoting the shapes it exists to find.
+ *
+ * A fixed list of two paths rather than a pattern, so a third file cannot
+ * quietly join it.
+ */
+const DETECTOR_FILES = ['scripts/verify_no_secrets.mjs', 'scripts/verify_security.py'];
 
 /**
  * True when git tracks this file.
@@ -161,14 +187,14 @@ console.log('\n── 1. no live credential shape anywhere in the tree ──');
     const hits = [];
     for (const file of FILES) {
       // This suite necessarily contains every pattern it looks for.
-      if (["scripts/verify_no_secrets.mjs", "scripts/verify_security.py"].includes(relative(ROOT, file))) continue;
+      if (DETECTOR_FILES.includes(repoPath(file))) continue;
       let body;
       try { body = readFileSync(file, 'utf8'); } catch { continue; }
       // Splitting a credential across a `+` must not hide it from the shape
       // detectors either — same dodge, same answer.
       body = body + '\n' + body.replace(/['"`]\s*\+\s*['"`]/g, '');
       for (const m of body.match(rx) || []) {
-        if (!looksFake(m)) hits.push(`${relative(ROOT, file)}: ${m.slice(0, 22)}…`);
+        if (!looksFake(m)) hits.push(`${repoPath(file)}: ${m.slice(0, 22)}…`);
       }
     }
     ok(`no ${name} in the tree`, hits.length === 0, hits.slice(0, 3).join(' | '));
@@ -201,11 +227,10 @@ console.log('\n── 1. no live credential shape anywhere in the tree ──');
   // being exempt and reported their own detector patterns as live secrets.
   // MEASURED on the owner's machine: seven failures, every one of them this
   // file quoting the shapes it exists to find.
-  const DETECTOR_FILES = ['scripts/verify_no_secrets.mjs', 'scripts/verify_security.py'];
   const burned = FILES.filter(f => {
-    if (DETECTOR_FILES.includes(rel(f))) return false;
+    if (DETECTOR_FILES.includes(repoPath(f))) return false;
     try { return deconcat(readFileSync(f, 'utf8')).includes(BURNED); } catch { return false; }
-  }).map(f => relative(ROOT, f));
+  }).map(f => repoPath(f));
   ok('the previously committed bot token is absent', burned.length === 0, burned.join(', '));
 
   // ---------------------------------------------------------------- keyless
@@ -238,8 +263,8 @@ console.log('\n── 1. no live credential shape anywhere in the tree ──');
 
   const leaks = [];
   for (const file of FILES) {
-    const rel = relative(ROOT, file);
-    if (DETECTOR_FILES.includes(rel)) continue;
+    const shown = repoPath(file);
+    if (DETECTOR_FILES.includes(shown)) continue;
     let body;
     try { body = readFileSync(file, 'utf8'); } catch { continue; }
     for (const m of body.matchAll(KEYLESS)) {
@@ -248,7 +273,7 @@ console.log('\n── 1. no live credential shape anywhere in the tree ──');
       if (looksFake(value) || looksFake(name)) continue;
       // A bcrypt hash is not a secret to be stolen, it is the stored form.
       if (/^\$2[aby]\$/.test(value)) continue;
-      leaks.push(`${rel}: ${name}=${value.slice(0, 12)}…`);
+      leaks.push(`${shown}: ${name}=${value.slice(0, 12)}…`);
     }
   }
   ok('no secret-named assignment holds a real-looking value',
@@ -263,9 +288,9 @@ console.log('\n── 1. no live credential shape anywhere in the tree ──');
   ];
   for (const secret of BURNED_KEYS) {
     const hit = FILES.filter(f => {
-      if (DETECTOR_FILES.includes(rel(f))) return false;
+      if (DETECTOR_FILES.includes(repoPath(f))) return false;
       try { return deconcat(readFileSync(f, 'utf8')).includes(secret); } catch { return false; }
-    }).map(f => relative(ROOT, f));
+    }).map(f => repoPath(f));
     ok(`the leaked Cloudflare key ${secret.slice(0, 8)}… is absent`,
       hit.length === 0, hit.join(', '));
   }
@@ -396,7 +421,7 @@ console.log('── 3. nothing secret is inlined into the renderer bundle ──
   const envReaders = rendererFiles.filter(f => {
     const b = readFileSync(f, 'utf8');
     return /process\.env\.|import\.meta\.env\./.test(b);
-  }).map(f => relative(ROOT, f));
+  }).map(f => repoPath(f));
   ok('no renderer or preload file reads process.env / import.meta.env',
     envReaders.length === 0, envReaders.join(', '));
 
@@ -411,7 +436,7 @@ console.log('── 3. nothing secret is inlined into the renderer bundle ──
       const b = readFileSync(f, 'utf8');
       const mod = file.replace('src/main/', '').replace('.ts', '');
       return b.includes(mod) || b.includes(symbol);
-    }).map(f => relative(ROOT, f));
+    }).map(f => repoPath(f));
     ok(`${symbol} is not reachable from the renderer`,
       importers.length === 0, importers.join(', '));
   }
@@ -422,7 +447,7 @@ console.log('── 3. nothing secret is inlined into the renderer bundle ──
   const appFiles = FILES.filter(f => f.includes('/src/'));
   const privateKeyUsers = appFiles.filter(f =>
     /MOBILESHOP_LICENSE_PRIVATE|\.license-key/.test(readFileSync(f, 'utf8')),
-  ).map(f => relative(ROOT, f));
+  ).map(f => repoPath(f));
   ok('no file under src/ reads the private licence key',
     privateKeyUsers.length === 0, privateKeyUsers.join(', '));
 }

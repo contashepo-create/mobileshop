@@ -95,7 +95,7 @@ const MUTANTS = [
 
 const runSuite = () => {
   try {
-    execFileSync('node', ['--experimental-strip-types', 'scripts/verify_fiscal_year_close.mjs'],
+    execFileSync(process.execPath, ['--experimental-strip-types', 'scripts/verify_fiscal_year_close.mjs'],
       { cwd: ROOT, stdio: 'pipe' });
     return true;
   } catch { return false; }

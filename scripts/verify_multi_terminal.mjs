@@ -31,7 +31,7 @@
  *
  * Run:  node --experimental-strip-types scripts/verify_multi_terminal.mjs
  */
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -286,7 +286,18 @@ console.log('\n[3] Several licences, one database — they must not interfere');
   const shared = join(dir, 'twomachines.db');
   makeShop(shared).close();
   const userDataA = join(dir, 'machineA'); const userDataB = join(dir, 'machineB');
-  execFileSync('mkdir', ['-p', userDataA, userDataB]);
+  // Node's own mkdirSync, not the external `mkdir` program.
+  //
+  // `execFileSync('mkdir', ['-p', ...])` spawns a Unix utility that does not
+  // exist as an executable on Windows — cmd.exe has `mkdir` as a builtin, not
+  // as a file on PATH. MEASURED on the owner's machine:
+  //
+  //     Error: spawnSync mkdir ENOENT
+  //
+  // after fourteen checks in this suite had already passed. There is no reason
+  // to leave the process at all for something the runtime does directly.
+  mkdirSync(userDataA, { recursive: true });
+  mkdirSync(userDataB, { recursive: true });
   writeFileSync(join(userDataA, 'license.dat'), 'LICENCE-A-EXPIRES-2027');
   writeFileSync(join(userDataB, 'license.dat'), 'LICENCE-B-EXPIRES-2026');
 

@@ -91,7 +91,7 @@ const MUTANTS = [
 
 const runSuite = () => {
   try {
-    execFileSync('node', ['--experimental-strip-types', 'scripts/verify_restore_safety.mjs'],
+    execFileSync(process.execPath, ['--experimental-strip-types', 'scripts/verify_restore_safety.mjs'],
       { cwd: ROOT, stdio: 'pipe' });
     return true;
   } catch { return false; }

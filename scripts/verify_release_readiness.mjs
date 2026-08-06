@@ -184,6 +184,36 @@ console.log('── 2. the verify script is complete and ordered ──');
       shellUsers.length === 0, shellUsers.join(', '));
   }
 
+  // No suite may shell out to a Unix-only utility.
+  //
+  // `verify_multi_terminal` called `execFileSync('mkdir', ['-p', ...])`. On
+  // Windows `mkdir` is a cmd.exe builtin, not an executable on PATH, so the
+  // spawn failed with `ENOENT` — after fourteen of that suite's checks had
+  // already passed, taking the rest of the chain with it.
+  //
+  // Node does all of these directly. Leaving the process to ask the OS for
+  // something the runtime already provides is how a suite becomes
+  // platform-specific without anyone deciding that it should be.
+  {
+    const UNIX_BINS = /execFileSync\(\s*['"`](mkdir|rm|cp|mv|touch|ls|chmod|chown|cat|sed|awk|grep|which|find)['"`]/;
+    const shellers = [];
+    for (const f of readdirSync(join(ROOT, 'scripts'))) {
+      if (!f.endsWith('.mjs')) continue;
+      // This file necessarily contains the pattern it looks for.
+      if (f === 'verify_release_readiness.mjs') continue;
+      // Comments are stripped first. The very fix that prompted this guard
+      // DOCUMENTS the old call in a comment, and a naive scan flagged the
+      // repaired file — a check that cannot tell code from prose only teaches
+      // people to ignore it.
+      const body = readFileSync(join(ROOT, 'scripts', f), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+      if (UNIX_BINS.test(body)) shellers.push(f);
+    }
+    ok('no suite spawns a Unix-only command line utility',
+      shellers.length === 0, shellers.join(', '));
+  }
+
   const behavioural = verify.split(' && ')
     .filter((c) => !c.includes('verify_release_readiness'));
   const sweepIdx = behavioural.findIndex((c) => c.includes('verify_fuzz_sweep.mjs'));

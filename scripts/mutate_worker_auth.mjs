@@ -89,7 +89,7 @@ const MUTANTS = [
 
 const runSuite = () => {
   try {
-    execFileSync('node', ['--experimental-strip-types', 'scripts/verify_worker_auth.mjs'],
+    execFileSync(process.execPath, ['--experimental-strip-types', 'scripts/verify_worker_auth.mjs'],
       { cwd: ROOT, stdio: 'pipe' });
     return true;
   } catch { return false; }

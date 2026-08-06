@@ -44,7 +44,7 @@ const MUTANTS = [
 
 const runSuite = () => {
   try {
-    execFileSync('node', ['--experimental-strip-types', 'scripts/verify_money_precision.mjs'],
+    execFileSync(process.execPath, ['--experimental-strip-types', 'scripts/verify_money_precision.mjs'],
       { cwd: ROOT, stdio: 'pipe' });
     return true;
   } catch { return false; }

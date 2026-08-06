@@ -36,11 +36,19 @@
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { createRequire } from 'node:module';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
+/**
+ * Path relative to the repository root, in forward slashes, on every OS.
+ *
+ * `f.replace(ROOT + '/', '')` assumes a POSIX separator. On Windows the paths
+ * carry backslashes, the prefix never matches, and the result stays absolute —
+ * which silently breaks any comparison or allow-list keyed on `src/...`.
+ */
+const relPath = (f) => relative(ROOT, f).split(sep).join('/');
 
 let pass = 0, fail = 0;
 function t(name, ok, detail = '') {
@@ -243,7 +251,7 @@ console.log('\n[6] The phantom global is gone');
       const body = readFileSync(p, 'utf-8');
       // Ignore the explanatory comment in printHeader.ts.
       const code = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-      if (/__settings/.test(code)) offenders.push(p.replace(ROOT + '/', ''));
+      if (/__settings/.test(code)) offenders.push(relPath(p));
     }
   };
   const require = createRequire(import.meta.url);

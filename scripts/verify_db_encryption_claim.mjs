@@ -44,10 +44,18 @@
  * Run:  node --experimental-strip-types scripts/verify_db_encryption_claim.mjs
  */
 import { readFileSync, readdirSync, writeFileSync, mkdtempSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import Database from 'better-sqlite3';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+/**
+ * Path relative to the repository root, in forward slashes, on every OS.
+ *
+ * `f.replace(ROOT + '/', '')` assumes a POSIX separator. On Windows the paths
+ * carry backslashes, the prefix never matches, and the result stays absolute —
+ * which silently breaks any comparison or allow-list keyed on `src/...`.
+ */
+const relPath = (f) => relative(ROOT, f).split(sep).join('/');
 
 let checks = 0;
 const failures = [];
@@ -129,7 +137,7 @@ try {
           // The pragma as CODE, not as prose in a comment.
           if (/pragma\s*\(\s*[`'"]\s*key\s*=/i.test(line)
             || /pragma\s*\(\s*[`'"]\s*rekey\s*=/i.test(line)) {
-            hits.push(`${p.replace(ROOT + '/', '')}: ${line.trim().slice(0, 80)}`);
+            hits.push(`${relPath(p)}: ${line.trim().slice(0, 80)}`);
           }
         }
       }

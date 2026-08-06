@@ -44,10 +44,20 @@
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
+
+/**
+ * Path relative to the repository root, in forward slashes, on every OS.
+ *
+ * `f.replace(ROOT + '/', '')` assumed a POSIX separator. On Windows the paths
+ * come back with backslashes, the prefix never matches, and the "relative"
+ * path is still absolute — which is how an allow-list keyed on
+ * `src/renderer/...` stopped matching anything at all.
+ */
+const relPath = (f) => relative(ROOT, f).split(sep).join('/');
 const R = f => readFileSync(join(ROOT, f), 'utf-8');
 
 const PASS = [], FAIL = [];
@@ -245,7 +255,15 @@ console.log('\n[7] No unguarded field dereference is left on nullable state');
           // and so is a guarded `x.y?.length` chain.
           if (new RegExp(`${v}\\.${m[1]}\\s*&&|${v}\\?\\.|!${v}\\.${m[1]}`).test(head)) continue;
           if (new RegExp(`${v}\\.${m[1]}\\?\\.`).test(line)) continue;
-          offenders.push(`${f.replace(ROOT + '/', '')}:${i + 1}  ${line.trim().slice(0, 90)}`);
+          // The file is kept SEPARATE from the line number.
+          //
+          // The old form built one string and later split it on ':' to recover
+          // the path. On Windows the path itself contains a colon — `D:\...` —
+          // so `split(':')[0]` returned "D", which matches nothing in ALLOWED
+          // and every permitted site was reported as a NEW violation. MEASURED
+          // on the owner's machine: five files listed as offenders while the
+          // same line printed "0 unguarded".
+          offenders.push({ file: relPath(f), line: i + 1, text: line.trim().slice(0, 90) });
         }
       }
     });
@@ -262,9 +280,10 @@ console.log('\n[7] No unguarded field dereference is left on nullable state');
     // `{stats?.monthlySales?.length > 0 ? …}` wraps the map
     'src/renderer/src/pages/dashboard/Dashboard.tsx',
   ]);
-  const unexpected = offenders.filter(o => !ALLOWED.has(o.split(':')[0]));
+  const unexpected = offenders.filter(o => !ALLOWED.has(o.file));
   check('no NEW unguarded dereference has been introduced',
-    unexpected.length === 0, unexpected.join('\n        '));
+    unexpected.length === 0,
+    unexpected.map(o => `${o.file}:${o.line}  ${o.text}`).join('\n        '));
   console.log(`        (${offenders.length} inside a proven outer guard, 0 unguarded)`);
 }
 

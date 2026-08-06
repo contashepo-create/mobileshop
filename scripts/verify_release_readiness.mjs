@@ -24,9 +24,17 @@
  * Run:  node --experimental-strip-types scripts/verify_release_readiness.mjs
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+/**
+ * Path relative to the repository root, in forward slashes, on every OS.
+ *
+ * `f.replace(ROOT + '/', '')` assumes a POSIX separator. On Windows the paths
+ * carry backslashes, the prefix never matches, and the result stays absolute —
+ * which silently breaks any comparison or allow-list keyed on `src/...`.
+ */
+const relPath = (f) => relative(ROOT, f).split(sep).join('/');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 const verify = pkg.scripts.verify;
 
@@ -404,7 +412,7 @@ console.log('── 5. nothing is left half-finished ──');
     const lines = readFileSync(f, 'utf8').split('\n');
     lines.forEach((l, i) => {
       if (/\b(FIXME|XXX|HACK)\b/.test(l) && !l.trim().startsWith('*')) {
-        markers.push(`${f.replace(ROOT + '/', '')}:${i + 1}`);
+        markers.push(`${relPath(f)}:${i + 1}`);
       }
     });
   }
@@ -414,7 +422,7 @@ console.log('── 5. nothing is left half-finished ──');
   // `debugger` reaching a customer freezes the renderer against a closed
   // DevTools.
   const dbg = files.filter(f => /^\s*debugger\s*;?\s*$/m.test(readFileSync(f, 'utf8')))
-    .map(f => f.replace(ROOT + '/', ''));
+    .map(f => relPath(f));
   ok('no debugger statement', dbg.length === 0, dbg.join(', '));
 }
 

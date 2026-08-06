@@ -126,6 +126,12 @@ console.log('\n── 1. every readiness axis has a suite, and it runs ──');
     // with destroyed pages passed it and was copied over the live books.
     ['data: a bad backup cannot overwrite good books', 'verify_restore_safety.mjs'],
     ['stability: the whole program compiles', 'verify_build.mjs'],
+    // Compiling is not starting. 1.0.0 passed every suite, built, uploaded and
+    // published — then died on first launch with `Cannot find module
+    // 'better-sqlite3'`, because the Vite plugin's packager filter keeps only
+    // `.vite` and dropped all of node_modules. Every existing suite tested the
+    // SOURCE; nothing looked at what was actually copied into the installer.
+    ['stability: the packaged app can start', 'verify_packaged_app.mjs'],
     ['stability: renderer crash recovery', 'verify_renderer_crash.mjs'],
     ['stability: scale', 'verify_scale_load.mjs'],
     ['supply chain: dependency advisories', 'verify_dependency_security.mjs'],

@@ -20,6 +20,7 @@
     "rescue:keys": "node scripts/rescue-keys.js",
     "check:env": "node scripts/check-env.js",
     "check:keypair": "node scripts/check-keypair.js",
+    "check:published": "node scripts/check-published.js",
     "dev:sign": "node scripts/dev-sign.js",
     "release": "node scripts/publish-release.js",
     "verify:scale": "node --experimental-strip-types scripts/verify_scale_load.mjs"

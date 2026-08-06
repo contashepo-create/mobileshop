@@ -225,9 +225,31 @@ console.log('\n📢 إبلاغ الخادم بالإصدار الجديد …');
     die(`رفض الخادم النشر (${res.status}): ${body.error || 'سبب غير معروف'}`);
   }
 
-  // ---- 3. verify it end-to-end, as Squirrel would --------------------------
+  // ---- 3. verify the MANIFEST, as Squirrel would ---------------------------
+  //
   // Publishing "successfully" and still not serving the update is the whole
   // failure mode this script exists to prevent, so it is checked, not assumed.
+  //
+  // BUT NOTE WHAT THIS CAN AND CANNOT PROVE.
+  //
+  // `sha1` and `size` were computed a few lines above, from the file on THIS
+  // machine, and then sent to the Worker. Comparing the manifest against them
+  // compares this machine against itself: it proves the Worker recorded what
+  // it was told, and nothing whatsoever about the bytes that reached R2.
+  //
+  // That distinction is not theoretical here. This package is 133 MB, the
+  // upload is a single unresumable PUT, and it died mid-transfer with
+  // `fetch failed` before it finally went through. A PUT that dies part-way
+  // can leave a SHORT object in the bucket — and the manifest would still
+  // advertise the full length and the correct hash, because both came from
+  // here.
+  //
+  // Squirrel checks the hash before installing, so the result of that is not
+  // a visible error: every customer downloads 133 MB, finds the hash wrong,
+  // discards it, and repeats on the next check, for ever, silently.
+  //
+  // Reading 133 MB back is too slow to force on every publish, so it lives in
+  // `npm run check:published` and is pointed at below rather than skipped.
   console.log('\n🔍 التحقق كما يفعل البرنامج عند العميل …');
   const CLIENT_KEY = process.env.MOBILESHOP_CLIENT_KEY || '';
   if (!CLIENT_KEY) {
@@ -247,5 +269,13 @@ console.log('\n📢 إبلاغ الخادم بالإصدار الجديد …');
     console.log(`   ✅ ${text.trim()}`);
   }
 
-  console.log('\n✅ تم النشر. سيصل التحديث للعملاء خلال ٦ ساعات كحد أقصى.\n');
+  // Deliberately NOT "تم النشر بنجاح". The bucket has not been read back yet,
+  // and a confident final line is exactly how a truncated upload ships.
+  console.log('\n✅ سُجِّل الإصدار على الخادم، والبيان صحيح.');
+  console.log('\n⚠️  لم تُقرأ محتويات الحزمة من R2 بعد.');
+  console.log('   الرفع كان ١٣٣ م.ب في طلب واحد لا يُستأنف، وانقطاعه يترك');
+  console.log('   ملفاً ناقصاً يبدو سليماً في البيان. للتأكد فعلياً شغّل:\n');
+  console.log('       npm run check:published\n');
+  console.log('   يحمّل الحزمة كاملة كما سيفعل العميل ويقارن بصمتها.');
+  console.log('   بعد نجاحه فقط يكون التحديث مضموناً للعملاء.\n');
 })();

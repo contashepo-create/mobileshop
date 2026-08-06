@@ -93,24 +93,60 @@ console.log(`  البصمة  : ${sha1}`);
 console.log(`  الخادم  : ${API_BASE}`);
 console.log('');
 
+/**
+ * Runs wrangler WITHOUT a shell and WITHOUT npx.
+ *
+ * Two failures were measured on the owner's machine before this shape:
+ *
+ *   execFileSync('npx', ...)      -> ENOENT
+ *       npx on Windows is `npx.cmd`, a batch script, and execFileSync runs
+ *       executables directly.
+ *
+ *   execFileSync('npx.cmd', ...)  -> EINVAL
+ *       The file exists, but since CVE-2024-27980 Node refuses to launch
+ *       .cmd/.bat without `shell: true`, because argument handling in batch
+ *       files was an argument-injection hole.
+ *
+ * Adding `shell: true` would work and is the wrong answer here: the package
+ * path is `D:\programing\coding projects\mobile shop\out\...`, which
+ * contains two spaces. Every argument would then need quoting for cmd.exe,
+ * and a quoting mistake produces a malformed command rather than an error.
+ *
+ * So the shell is removed from the problem entirely: Node runs wrangler's own
+ * entry point, and the arguments are passed as an array, where a space is just
+ * a character. `npx` remains only as a fallback for a machine that has no
+ * local install, and there it is invoked through the shell deliberately.
+ */
+function runWrangler(args, cwd) {
+  // A local install, in the server folder or at the repo root.
+  const candidates = [
+    path.join(ROOT, 'server', 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
+    path.join(ROOT, 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
+  ];
+  const local = candidates.find(c => fs.existsSync(c));
+
+  if (local) {
+    return execFileSync(process.execPath, [local, ...args], { stdio: 'inherit', cwd });
+  }
+
+  // No local copy: fall back to npx, which must go through a shell on Windows.
+  // Arguments are quoted here because the shell will re-parse them.
+  const quoted = args.map(a => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a));
+  return execFileSync(`npx wrangler ${quoted.join(' ')}`, {
+    stdio: 'inherit', cwd, shell: true,
+  });
+}
+
 // ---- 1. upload to R2 -------------------------------------------------------
 console.log('⬆️  رفع الحزمة إلى R2 …');
 try {
-  // `npx.cmd` on Windows, `npx` elsewhere.
-  //
-  // `execFileSync('npx', ...)` runs an EXECUTABLE directly, with no shell. On
-  // Windows npx is `npx.cmd`, a batch script, so the spawn fails with ENOENT
-  // before wrangler is ever reached. MEASURED on the owner's machine: the
-  // upload failed instantly and the advice printed below sent them to check a
-  // login and a bucket that were both already correct.
-  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  execFileSync(npx, [
-    'wrangler', 'r2', 'object', 'put',
+  runWrangler([
+    'r2', 'object', 'put',
     `${BUCKET}/win32-x64/${nupkg}`,
     '--file', file,
     '--content-type', 'application/octet-stream',
     '--remote',
-  ], { stdio: 'inherit', cwd: path.join(ROOT, 'server') });
+  ], path.join(ROOT, 'server'));
 } catch (err) {
   // The REAL reason is printed. `catch { die(...) }` swallowed it and replaced
   // every possible fault — a missing npx, an expired token, a network drop, a

@@ -81,7 +81,42 @@ const LOCATIONS = [
   path.join(os.tmpdir(), '.mobileshop-trial'),
   path.join(process.env.ProgramData || 'C:\\ProgramData', 'MobileShopERP', '.mobileshop-trial'),
 ];
-const clean = () => { for (const p of LOCATIONS) { try { fs.unlinkSync(p); } catch { /* absent */ } } };
+/**
+ * Removes every marker copy, INCLUDING the read-only ones.
+ *
+ * `writeTrialAnchor` deliberately chmods each copy to 0o444 on Windows so a
+ * curious user cannot edit it in Notepad. That is the right behaviour for the
+ * product and it breaks a naive test: on Windows a 0o444 file cannot be
+ * unlinked or overwritten, and `fs.unlinkSync` fails with
+ *
+ *     EPERM: operation not permitted, open 'C:\Users\me\.mobileshop-trial'
+ *
+ * MEASURED on the user's machine: `clean()` silently left the real marker in
+ * place, so `nothing is present before the first run` failed, and the first
+ * forgery attempt in section 4 threw EPERM and killed the whole suite.
+ *
+ * Writability is restored before removing. Same reason as `forge` below.
+ */
+const clean = () => {
+  for (const p of LOCATIONS) {
+    try { fs.chmodSync(p, 0o666); } catch { /* absent, or already writable */ }
+    try { fs.unlinkSync(p); } catch { /* absent */ }
+  }
+};
+
+/**
+ * Writes over a marker copy the way an attacker with file access would.
+ *
+ * The product makes these read-only; an attacker would simply clear the flag
+ * first, and so must this test — otherwise it is not testing the signature
+ * check at all, only the file permission, and the signature check would go
+ * unverified on the one platform the product ships on.
+ */
+const forge = (target, contents) => {
+  try { fs.chmodSync(target, 0o666); } catch { /* not present yet */ }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, contents);
+};
 const surviving = () => LOCATIONS.filter(p => { try { return fs.existsSync(p); } catch { return false; } });
 
 clean();
@@ -143,19 +178,19 @@ console.log('\n[4] The marker cannot be forged, edited or imported');
   // this check used a NEWER date, which the "oldest wins" rule discarded on its
   // own — so removing the signature check entirely still passed. The mutant
   // survived and the guard was untested.
-  fs.writeFileSync(LOCATIONS[0], JSON.stringify({
+  forge(LOCATIONS[0], JSON.stringify({
     deviceId: DEV, startDate: '2020-01-01T00:00:00.000Z', sig: 'bogus',
   }));
   t('a tampered start date is ignored even when it is older',
     A.readTrialAnchor(DEV) === genuine, String(A.readTrialAnchor(DEV)));
 
   // An unsigned marker is not evidence of anything.
-  fs.writeFileSync(LOCATIONS[0], JSON.stringify({ deviceId: DEV, startDate: '2019-01-01T00:00:00.000Z' }));
+  forge(LOCATIONS[0], JSON.stringify({ deviceId: DEV, startDate: '2019-01-01T00:00:00.000Z' }));
   t('an unsigned marker is ignored even when it is older',
     A.readTrialAnchor(DEV) === genuine, String(A.readTrialAnchor(DEV)));
 
   // Garbage must not crash the reader — it runs before the UI exists.
-  fs.writeFileSync(LOCATIONS[0], 'not json at all');
+  forge(LOCATIONS[0], 'not json at all');
   t('unparseable content is ignored, not thrown', A.readTrialAnchor(DEV) === genuine);
 
   // A marker copied from another machine must not brand this one as used.
@@ -164,7 +199,7 @@ console.log('\n[4] The marker cannot be forged, edited or imported');
   // The OLDEST surviving date wins, so deleting some copies and letting the
   // app rewrite the rest cannot silently restart the clock.
   A.healTrialAnchor(DEV, genuine);
-  fs.writeFileSync(LOCATIONS[3], JSON.stringify({
+  forge(LOCATIONS[3], JSON.stringify({
     deviceId: DEV, startDate: '2026-07-30T00:00:00.000Z',
     sig: (await import('node:crypto')).createHmac('sha256', 'm0b1l3_sh0p_tr14l_4nch0r_2026')
       .update(`${DEV}|2026-07-30T00:00:00.000Z`).digest('hex'),

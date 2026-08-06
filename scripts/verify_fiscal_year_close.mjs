@@ -60,6 +60,24 @@ import { DatabaseSync } from 'node:sqlite';
 // documented conversion and handles both.
 const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 
+/**
+ * Index of the `{` that opens a function BODY, from `from` onward.
+ *
+ * Written as `indexOf('{\n', from)`, which demanded a Unix line ending. On a
+ * Windows checkout the source holds `{\r\n`, the search returned -1, and the
+ * extraction that followed produced an EMPTY string — the generated module
+ * then contained only its export line and threw
+ * `ReferenceError: <fn> is not defined`. Measured on the owner's machine.
+ *
+ * A brace is a brace; the newline convention after it is not part of the
+ * question being asked.
+ */
+function braceAfter(src, from) {
+  const rel = src.slice(from).search(/\{\r?\n/);
+  return rel < 0 ? -1 : from + rel;
+}
+
+
 let checks = 0;
 const failures = [];
 const ok = (label, cond, detail = '') => {
@@ -82,7 +100,7 @@ function extract(file, name) {
   const at = src.indexOf('function ' + name);
   if (at < 0) return null;
   const paren = src.indexOf(')', at);
-  const open = src.indexOf('{\n', paren);
+  const open = braceAfter(src, paren);
   if (open < 0) return null;
   let depth = 0;
   for (let i = open; i < src.length; i++) {

@@ -64,6 +64,24 @@ import { join } from 'node:path';
 // documented conversion and handles both.
 const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 
+/**
+ * Index of the `{` that opens a function BODY, from `from` onward.
+ *
+ * Written as `indexOf('{\n', from)`, which demanded a Unix line ending. On a
+ * Windows checkout the source holds `{\r\n`, the search returned -1, and the
+ * extraction that followed produced an EMPTY string — the generated module
+ * then contained only its export line and threw
+ * `ReferenceError: <fn> is not defined`. Measured on the owner's machine.
+ *
+ * A brace is a brace; the newline convention after it is not part of the
+ * question being asked.
+ */
+function braceAfter(src, from) {
+  const rel = src.slice(from).search(/\{\r?\n/);
+  return rel < 0 ? -1 : from + rel;
+}
+
+
 let checks = 0;
 const failures = [];
 const ok = (label, cond, detail = '') => {
@@ -216,7 +234,7 @@ console.log('── 5. the rewrite is narrow and it is mirrored ──');
   const at = conn.indexOf('function roundBalanceArithmetic');
   ok('the rewrite lives in one named function', at >= 0);
   if (at >= 0) {
-    const openBrace = conn.indexOf('{\n', conn.indexOf(')', at));
+    const openBrace = braceAfter(conn, conn.indexOf(')', at));
     let d = 0, end = -1;
     for (let i = openBrace; i < conn.length; i++) {
       if (conn[i] === '{') d++;

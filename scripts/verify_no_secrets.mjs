@@ -39,7 +39,7 @@
  */
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync } from 'node:fs';
-import { join, relative, extname } from 'node:path';
+import { join, relative, extname, sep } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -55,6 +55,24 @@ import { createRequire } from 'node:module';
 // — the drive letter twice and the spaces still as %20. `fileURLToPath` is the
 // documented conversion and handles both.
 const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
+
+/** Repo-relative path with forward slashes, on every OS. */
+const rel = (f) => relative(ROOT, f).split(sep).join('/');
+
+/**
+ * True when git tracks this file.
+ *
+ * `git ls-files --error-unmatch` exits non-zero for anything untracked, so the
+ * throw IS the answer. Used to keep an ignored local `.env` out of the scan
+ * while still catching one that was committed.
+ */
+const isTracked = (f) => {
+  try {
+    execFileSync('git', ['ls-files', '--error-unmatch', rel(f)],
+      { cwd: ROOT, stdio: 'ignore' });
+    return true;
+  } catch { return false; }
+};
 const require = createRequire(join(ROOT, 'package.json'));
 
 let checks = 0;
@@ -81,7 +99,16 @@ function walk(dir, out = []) {
     let st;
     try { st = statSync(full); } catch { continue; }
     if (st.isDirectory()) walk(full, out);
-    else if (TEXT_EXT.has(extname(entry)) || entry.startsWith('.env')) out.push(full);
+    else if (TEXT_EXT.has(extname(entry))) out.push(full);
+    // A `.env*` file is scanned ONLY when git tracks it.
+    //
+    // The point of looking at these is to catch one that was COMMITTED. An
+    // untracked, git-ignored `.env` is where the owner's real credentials are
+    // SUPPOSED to live — reporting it is reporting that the secrets file
+    // contains secrets, which is not a finding, and it trains the reader to
+    // ignore this suite's output. `.env.example` stays in scope because it IS
+    // tracked, and a value pasted into it would ship.
+    else if (entry.startsWith('.env') && isTracked(full)) out.push(full);
   }
   return out;
 }
@@ -167,9 +194,16 @@ console.log('\n── 1. no live credential shape anywhere in the tree ──');
   // and is the standard way to write this kind of check. Every OTHER file in
   // the repository is held to the strict rule. The exemption is a fixed list
   // of two paths rather than a pattern, so a third file cannot quietly join it.
+  // Compared through `rel()`, which normalises the separator.
+  //
+  // `relative(ROOT, f)` returns `scripts\\verify_no_secrets.mjs` on Windows,
+  // which never matches a forward-slash entry — so the two SCANNERS stopped
+  // being exempt and reported their own detector patterns as live secrets.
+  // MEASURED on the owner's machine: seven failures, every one of them this
+  // file quoting the shapes it exists to find.
   const DETECTOR_FILES = ['scripts/verify_no_secrets.mjs', 'scripts/verify_security.py'];
   const burned = FILES.filter(f => {
-    if (DETECTOR_FILES.includes(relative(ROOT, f))) return false;
+    if (DETECTOR_FILES.includes(rel(f))) return false;
     try { return deconcat(readFileSync(f, 'utf8')).includes(BURNED); } catch { return false; }
   }).map(f => relative(ROOT, f));
   ok('the previously committed bot token is absent', burned.length === 0, burned.join(', '));
@@ -229,7 +263,7 @@ console.log('\n── 1. no live credential shape anywhere in the tree ──');
   ];
   for (const secret of BURNED_KEYS) {
     const hit = FILES.filter(f => {
-      if (DETECTOR_FILES.includes(relative(ROOT, f))) return false;
+      if (DETECTOR_FILES.includes(rel(f))) return false;
       try { return deconcat(readFileSync(f, 'utf8')).includes(secret); } catch { return false; }
     }).map(f => relative(ROOT, f));
     ok(`the leaked Cloudflare key ${secret.slice(0, 8)}… is absent`,

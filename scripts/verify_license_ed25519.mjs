@@ -30,7 +30,7 @@
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import { register } from 'node:module';
 
@@ -398,7 +398,7 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
     const probe = `
       import { register } from 'node:module';
       register(${JSON.stringify(loader)}, import.meta.url);
-      const D = await import(${JSON.stringify(join(ROOT, 'src/main/security/devAuth.ts'))});
+      const D = await import(${JSON.stringify(pathToFileURL(join(ROOT, 'src/main/security/devAuth.ts')).href)});
       process.stdout.write(String(D.isDevelopmentDevPassword()));
     `;
     // The child must NOT inherit this machine's environment.
@@ -418,6 +418,7 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
     // Only the few variables Node itself needs are forwarded. Everything the
     // case under test cares about is set explicitly, so the child's state is
     // exactly what the case describes.
+    let lastProbeError = '';
     const run = (env) => {
       // SUBTRACT the polluting variables; do not try to LIST the needed ones.
       //
@@ -442,7 +443,17 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
         return execFileSync(process.execPath,
           ['--experimental-strip-types', '--input-type=module', '--eval', probe],
           { env: { ...child, ...env }, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-      } catch { return 'error'; }
+      } catch (err) {
+        // The reason is KEPT, not swallowed.
+        //
+        // `catch { return 'error' }` made every environment or path problem
+        // look identical to a security failure, and cost two rounds of guessing
+        // at a Windows-only fault that could not be reproduced on Linux. The
+        // first line of stderr names it immediately.
+        lastProbeError = String(err && err.stderr ? err.stderr : (err && err.message) || err)
+          .split('\n').filter(Boolean).slice(0, 6).join(' | ').slice(0, 400);
+        return 'error';
+      }
     };
 
     const cleanEnv = { MOBILESHOP_DEV_PASSWORD_HASH: '', MOBILESHOP_DEV_PASSWORD_HASH_B64: '' };
@@ -450,8 +461,10 @@ console.log('\n[7] Production keys come from .env, and a dev build cannot ship')
     // Prove the harness itself works before trusting its verdicts. If the child
     // cannot start at all, every check below would report 'error' and read as a
     // security failure.
+    const probeVerdict = run({ ...cleanEnv });
     t('the probe process runs (its verdicts are meaningful)',
-      run({ ...cleanEnv }) !== 'error');
+      probeVerdict !== 'error',
+      probeVerdict === 'error' ? lastProbeError : '');
     t('a truncated raw hash is refused, falling back rather than breaking login',
       run({ ...cleanEnv, MOBILESHOP_DEV_PASSWORD_HASH: '$2a$12' }) === 'true');
     t('a truncated base64 hash is refused too',

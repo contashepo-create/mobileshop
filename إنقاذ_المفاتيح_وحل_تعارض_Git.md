@@ -68,7 +68,7 @@ git pull origin master
 MOBILESHOP_LICENSE_PUBLIC_KEY=<أُنقِذ تلقائياً>
 MOBILESHOP_DEV_PASSWORD_HASH=<أُنقِذ تلقائياً>
 MOBILESHOP_API_BASE=https://mobileshop-licensing.mobileshop2026.workers.dev
-MOBILESHOP_CLIENT_KEY=uCubrNqc4TLTophMzNdx2zvBG2u3NypeMo3mbxDazOU=
+MOBILESHOP_CLIENT_KEY=<الصق هنا قيمة CLIENT_KEY — لا تكتبها في أي ملف داخل المستودع>
 ```
 
 ### الخطوة ٦: تأكد

@@ -162,6 +162,68 @@ console.log('\n── 1. no live credential shape anywhere in the tree ──');
     try { return deconcat(readFileSync(f, 'utf8')).includes(BURNED); } catch { return false; }
   }).map(f => relative(ROOT, f));
   ok('the previously committed bot token is absent', burned.length === 0, burned.join(', '));
+
+  // ---------------------------------------------------------------- keyless
+  // A SECRET WITH NO RECOGNISABLE PREFIX.
+  //
+  // Every detector above keys off a vendor prefix — `sk_`, `ghp_`, `AKIA`,
+  // `sbp_`. That is why they all passed while THIS was sitting in the tree, in
+  // a tracked Arabic setup guide, on the default branch:
+  //
+  //     MOBILESHOP_ADMIN_KEY=Gdea+r1P83v2YQkO1uXKMzoyj+Wt/S/cwFiRdAP6Ujw=
+  //     MOBILESHOP_CLIENT_KEY=uCubrNqc4TLTophMzNdx2zvBG2u3NypeMo3mbxDazOU=
+  //
+  // Found by scanning a FRESH clone of the repository rather than the working
+  // copy. `ADMIN_KEY` is the credential that opens `/issue` (mint a licence),
+  // `/devices` (every customer this product has), `/config`, `/message` and
+  // `/release` — five routes, full control of the licensing backend. It was
+  // pasted as an EXAMPLE VALUE, which is exactly how this class of leak
+  // happens: nobody thinks documentation is code.
+  //
+  // This project's own keys are `openssl rand -base64 32` — 44 characters of
+  // random base64 ending in '='. They have no prefix to key off, so the shape
+  // has to be matched instead, and the match has to be anchored to an
+  // ASSIGNMENT to a secret-sounding name. A bare base64 blob is far too common
+  // to flag on its own: this file would drown in false positives from hashes,
+  // icons and test fixtures.
+  const KEYLESS = /\b([A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSPHRASE|CREDENTIAL)[A-Z0-9_]*)\s*[=:]\s*['"`]?([A-Za-z0-9+/_-]{32,}={0,2})['"`]?/g;
+
+  // Names whose VALUE is public by design, so an assignment is not a leak.
+  const PUBLIC_BY_DESIGN = /PUBLIC_KEY|PUBKEY|_HASH$|PASSWORD_HASH/;
+
+  const leaks = [];
+  for (const file of FILES) {
+    const rel = relative(ROOT, file);
+    if (DETECTOR_FILES.includes(rel)) continue;
+    let body;
+    try { body = readFileSync(file, 'utf8'); } catch { continue; }
+    for (const m of body.matchAll(KEYLESS)) {
+      const [, name, value] = m;
+      if (PUBLIC_BY_DESIGN.test(name)) continue;
+      if (looksFake(value) || looksFake(name)) continue;
+      // A bcrypt hash is not a secret to be stolen, it is the stored form.
+      if (/^\$2[aby]\$/.test(value)) continue;
+      leaks.push(`${rel}: ${name}=${value.slice(0, 12)}…`);
+    }
+  }
+  ok('no secret-named assignment holds a real-looking value',
+    leaks.length === 0,
+    leaks.slice(0, 4).join(' | '));
+
+  // ...and the two that WERE leaked must never come back, by value.
+  // Split so this file does not itself carry them.
+  const BURNED_KEYS = [
+    'Gdea+r1P83v2YQkO' + '1uXKMzoyj+Wt/S/cwFiRdAP6Ujw=',
+    'uCubrNqc4TLTophM' + 'zNdx2zvBG2u3NypeMo3mbxDazOU=',
+  ];
+  for (const secret of BURNED_KEYS) {
+    const hit = FILES.filter(f => {
+      if (DETECTOR_FILES.includes(relative(ROOT, f))) return false;
+      try { return deconcat(readFileSync(f, 'utf8')).includes(secret); } catch { return false; }
+    }).map(f => relative(ROOT, f));
+    ok(`the leaked Cloudflare key ${secret.slice(0, 8)}… is absent`,
+      hit.length === 0, hit.join(', '));
+  }
 }
 
 // ===========================================================================

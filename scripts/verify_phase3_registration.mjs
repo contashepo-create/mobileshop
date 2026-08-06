@@ -331,7 +331,14 @@ console.log('\n[6] Nothing new can break the printed page');
   // actually matters is that fontFamily can only ever hold a value this file
   // wrote itself.
   {
-    const decl = /const fontFamily = ([\s\S]*?);\n/.exec(raw)?.[1] || '';
+    // `\r?\n`, not `\n`.
+    //
+    // Git checks this repository out with CRLF line endings on Windows, so the
+    // declaration ends `;\r\n` there and a pattern anchored on `;\n` matched
+    // far more text than intended. MEASURED: with LF the capture holds three
+    // font stacks and both checks pass; with CRLF it holds none and both fail —
+    // on identical, correct source. The product was never wrong.
+    const decl = /const fontFamily = ([\s\S]*?);\r?\n/.exec(raw)?.[1] || '';
     // The font stacks are double-quoted (they contain single quotes inside),
     // so match both forms rather than assuming one.
     const literals = decl.match(/"[^"]*"|'[^']*'/g) || [];

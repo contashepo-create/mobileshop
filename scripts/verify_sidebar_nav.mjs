@@ -248,7 +248,7 @@ console.log('\n[2] Routes and menu agree, in both directions');
   // no home would be dropped during the split — quietly, which is the fault
   // this whole file exists to prevent.
   const store = raw('src/renderer/src/stores/sidebar.store.ts');
-  const homesBlock = /const RETIRED_SCREEN_HOMES: Record<string, string> = \{([\s\S]*?)\n\};/.exec(store);
+  const homesBlock = /const RETIRED_SCREEN_HOMES: Record<string, string> = \{([\s\S]*?)\r?\n\};/.exec(store);
   const homes = homesBlock
     ? [...homesBlock[1].replace(/\/\/[^\n]*/g, '').matchAll(/'([^']+)':\s*'([^']+)'/g)]
         .map((x) => [x[1], x[2]])

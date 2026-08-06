@@ -297,7 +297,7 @@ console.log('── 4. no handler returns a raw runtime error any more ──');
     return out;
   })()]) {
     const body = readFileSync(f, 'utf8');
-    if (/message:\s*[^,;\n]*\.stack|return[^;\n]*\.stack/.test(body)) {
+    if (/message:\s*[^,;\r\n]*\.stack|return[^;\r\n]*\.stack/.test(body)) {
       stacks.push(relative(ROOT, f));
     }
   }

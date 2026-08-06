@@ -282,7 +282,11 @@ try {
       /if \(!probe\.ok\) \{[\s\S]{0,400}?return \{/.test(src));
   }
 } finally {
-  rmSync(dir, { recursive: true, force: true });
+  // Windows may still hold a lock on a just-closed SQLite file; a
+  // leftover temp folder must not abort the suites that follow.
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch { /* disposable */ }
 }
 
 // ===========================================================================

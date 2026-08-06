@@ -90,12 +90,30 @@ if (Database) {
   await db.backup(safe);                          // the NEW db:autoBackup (async!)
 
   const readBack = f => {
+    // The handle is closed in `finally`, not after the query.
+    //
+    // This function is called on a DELIBERATELY BROKEN backup — the whole point
+    // of the check is that `copyFileSync` on a WAL database produces a file
+    // whose `sales` table is missing. So the `prepare()` throws, `d.close()` is
+    // skipped, and the connection stays open for the rest of the process.
+    //
+    // On Linux that is invisible: an open file can still be unlinked. On
+    // Windows the file stays locked, and the `fs.rmSync(tmp)` at the end of
+    // this block fails with
+    //
+    //     EPERM, Permission denied: ...\Temp\mobileshop-backup-XXXX
+    //
+    // which killed the whole verify chain AFTER its four checks had passed —
+    // measured on the owner's machine.
+    let d = null;
     try {
-      const d = new Database(f, { readonly: true });
-      const r = d.prepare('SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM sales').get();
-      d.close();
-      return r;
-    } catch { return null; }
+      d = new Database(f, { readonly: true });
+      return d.prepare('SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM sales').get();
+    } catch {
+      return null;
+    } finally {
+      try { d?.close(); } catch { /* already gone */ }
+    }
   };
 
   const fromNaive = readBack(naive);
@@ -137,7 +155,16 @@ if (Database) {
 
   d2.close();
   db.close();
-  fs.rmSync(tmp, { recursive: true, force: true });
+  // Cleanup must never fail the suite.
+  //
+  // Windows can hold a lock briefly after the last handle closes (indexer,
+  // antivirus). The temp directory is disposable; a leftover folder is not a
+  // reason to abort the remaining sixty suites.
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (err) {
+    console.log(`        (temp folder left behind: ${err.code || err.message})`);
+  }
 } else {
   console.log('  SKIP  (native module unavailable)');
 }
@@ -282,7 +309,11 @@ console.log('\n[7] A restore can never target a different file from the live one
     check('corrupt settings: both fall back to the default together',
       resolveOpen('{ "dbPath": ') === fallback && configuredDbPath('{ "dbPath": ') === null);
 
-    fs.rmSync(tmp, { recursive: true, force: true });
+    // Same reasoning as the cleanup in section 1: a temp folder Windows has
+    // not released yet must not abort the suites that follow.
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch { /* disposable */ }
   }
 }
 

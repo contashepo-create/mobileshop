@@ -288,7 +288,7 @@ console.log('\n[6] A full round trip: backup, disaster, restore, keep trading');
   t('the backup passes the header check', hdr.toString('utf-8', 0, 15) === 'SQLite format 3');
   copyFileSync(live, `${live}.before-restore`);
   copyFileSync(backup, live);
-  for (const s of ['-wal', '-shm']) { const p = live + s; if (existsSync(p)) rmSync(p); }
+  for (const s of ['-wal', '-shm']) { const p = live + s; try { if (existsSync(p)) rmSync(p, { force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* locked; harmless */ } }
 
   const re = new Database(live);
   re.pragma('journal_mode = WAL');

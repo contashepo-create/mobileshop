@@ -118,7 +118,11 @@ console.log('\n[2] WAL is not forced onto a network share');
       again.close();
       t('no -wal file is left on a network-mode database', !existsSync(`${f}-wal`));
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      // Windows may still hold a lock on a just-closed SQLite file; a
+      // leftover temp folder must not abort the suites that follow.
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      } catch { /* disposable */ }
     }
   }
 }
@@ -179,7 +183,11 @@ console.log('\n[3] A second machine waits instead of failing');
       t('fifteen seconds lets the sale through instead of failing it',
         runPair(15000) === 'ok');
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      // Windows may still hold a lock on a just-closed SQLite file; a
+      // leftover temp folder must not abort the suites that follow.
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      } catch { /* disposable */ }
     }
   }
 }

@@ -230,7 +230,12 @@ console.log('\n[2] The real entry points bundle, the way electron-forge builds t
           .join(' | ');
         return { ok: false, err: msg || String(e.message || e).slice(0, 160) };
       } finally {
-        rmSync(tmp, { recursive: true, force: true });
+        // A locked temp folder on Windows must not replace the build result
+        // with an EPERM. The verdict above is what this function exists to
+        // report; the folder is disposable.
+        try {
+          rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        } catch { /* disposable */ }
       }
     }
 

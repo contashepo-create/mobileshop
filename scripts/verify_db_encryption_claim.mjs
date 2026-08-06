@@ -203,16 +203,44 @@ try {
   // =========================================================================
   {
     // Encryption is deferred; file permissions are not a substitute, but a
-    // database created world-readable would make the exposure worse than it
+    // database created world-writable would make the exposure worse than it
     // needs to be.
+    //
+    // POSIX ONLY, and the platform check is the point of this comment.
+    //
+    // Windows does not implement POSIX permission bits. `fs.stat().mode` there
+    // is SYNTHESISED by Node: 0o666 for any writable file, 0o444 for one
+    // carrying the read-only attribute. The real access control lives in ACLs,
+    // which `fs.stat` never reports. MEASURED on the owner's machine:
+    //
+    //     created with mode 666
+    //     ✗ a new database is not group- or world-WRITABLE — 666
+    //
+    // — a failure on a correctly-secured file, because the question does not
+    // exist on that platform. Asserting it there is not a stricter test, it is
+    // a wrong one, and a check that always fails teaches the reader to skip
+    // the output.
+    //
+    // The real Windows control is the ACL on %APPDATA%, which is per-user by
+    // default. That is asserted by the app choosing `app.getPath('userData')`,
+    // not by this suite.
     const p = join(dir, 'perm.db');
     const d = new Database(p);
     d.exec('CREATE TABLE t(a)');
     d.close();
     const mode = statSync(p).mode & 0o777;
-    console.log(`   created with mode ${mode.toString(8)}`);
-    ok('a new database is not group- or world-WRITABLE', (mode & 0o022) === 0,
-      mode.toString(8));
+    console.log(`   created with mode ${mode.toString(8)}`
+      + (process.platform === 'win32' ? '  (synthesised by Node; Windows uses ACLs)' : ''));
+    if (process.platform === 'win32') {
+      // Still assert something real: the file must exist and be readable back.
+      const reopened = new Database(p, { readonly: true, fileMustExist: true });
+      let ok2 = false;
+      try { reopened.prepare('SELECT 1 AS x').get(); ok2 = true; } finally { reopened.close(); }
+      ok('a new database is created and readable (POSIX mode not applicable on Windows)', ok2);
+    } else {
+      ok('a new database is not group- or world-WRITABLE', (mode & 0o022) === 0,
+        mode.toString(8));
+    }
   }
 } finally {
   // Windows may still hold a lock on a just-closed SQLite file; a

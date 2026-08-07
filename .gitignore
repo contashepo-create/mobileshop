@@ -2,6 +2,8 @@ node_modules/
 dist/
 .vite/
 out/
+# NSIS installer output (the Setup exe, its differential .blockmap and latest.yml)
+dist-installer/
 mem-log/
 *.log
 .DS_Store

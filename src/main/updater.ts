@@ -74,7 +74,7 @@ export function startUpdater(): void {
       url: `${API_BASE}/update-nsis/win32-x64/${app.getVersion()}`
         + (device ? `?device=${encodeURIComponent(device)}` : ''),
     });
-    autoUpdater.setRequestHeaders({ 'X-Client-Key': CLIENT_KEY, 'Cache-Control': 'no-cache' });
+    autoUpdater.requestHeaders = { 'X-Client-Key': CLIENT_KEY, 'Cache-Control': 'no-cache' };
   } catch (err) {
     console.log('[Updater] could not configure:', (err as Error).message);
     return;

@@ -5,37 +5,82 @@ import { app } from 'electron';
 
 let db: Database.Database | null = null;
 
-/** Where the custom-path setting lives. Read before the database is open. */
+/**
+ * The directory the application was installed into.
+ *
+ * SUPPORTS BOTH PACKAGING SYSTEMS, WHICH DIFFER in where the exe sits:
+ *
+ * Squirrel (the old installer):
+ *   C:\Users\me\AppData\Local\MobileShopERP\app-1.0.0\MobileShopERP.exe
+ *   A version-specific `app-x.x.x` folder that is replaced on every update,
+ *   so data lives in its PARENT (the Squirrel root) to survive updates.
+ *
+ * NSIS (the current installer):
+ *   C:\Program Files\MobileShopERP\MobileShopERP.exe      (all users)
+ *   C:\Users\me\AppData\Local\Programs\...\MobileShopERP.exe (per-user)
+ *   The exe sits DIRECTLY in the install directory — there is no `app-x.x.x`
+ *   layer. For a per-machine install that directory is under Program Files,
+ *   which a normal user cannot write, so business data is never kept there
+ *   either; see defaultDbPath() / settingsFile() below.
+ *
+ * The layout is told apart by the name of the folder holding the exe: a
+ * Squirrel version folder is `app-<version>`, an NSIS install folder is not.
+ */
+function installRoot(): string {
+  if (app.isPackaged) {
+    const exe = app.getPath('exe');
+    const appDir = path.dirname(exe);          // ...\MobileShopERP\app-1.0.0\  or  ...\MobileShopERP\
+    const dirName = path.basename(appDir);
+    if (/^app-/.test(dirName)) {
+      return path.dirname(appDir);             // Squirrel root
+    }
+    return appDir;                              // NSIS install directory
+  }
+  return app.getPath('userData');
+}
+
+/**
+ * The user-scoped data folder: `%APPDATA%\MobileShopERP` (Roaming).
+ *
+ * This is the ONE folder the app can always write to, whatever the install
+ * mode: per-user NSIS installs are user-writable, per-machine installs point
+ * at Program Files, which a normal login cannot write to. The database and the
+ * settings file live here so a store on a shared PC keeps its own data and a
+ * per-machine update cannot be blocked by a read-only install directory.
+ */
+function userDataRoot(): string {
+  return path.join(app.getPath('userData'), 'mobile-shop-erp');
+}
+
+/**
+ * Where the custom-path setting lives. Read before the database is open.
+ *
+ * Written to userDataRoot (writable) so the app's own "change DB path"
+ * action is not blocked on a per-machine install; also read from the install
+ * directory so the NSIS installer's chosen path (written at install time to
+ * `$INSTDIR\db_settings.json`, where the elevated installer CAN write) is
+ * honoured on the very first launch. The install-dir copy only ever tells the
+ * app where to START — after that, changes go to the user-scoped copy.
+ */
 function settingsFile(): string {
-  return path.join(installRoot(), 'db_settings.json');
+  if (app.isPackaged) {
+    const installed = path.join(installRoot(), 'db_settings.json');
+    const user = path.join(userDataRoot(), 'db_settings.json');
+    // Prefer the installer's choice while it is the only one; once the app has
+    // written a user-scoped copy, that copy is authoritative.
+    return fs.existsSync(user) ? user : installed;
+  }
+  return path.join(app.getPath('userData'), 'db_settings.json');
 }
 
 /** The default location, used whenever no valid custom path is configured. */
 function defaultDbPath(): string {
-  return path.join(installRoot(), 'mobile_shop.db');
-}
-
-/**
- * The directory the application was installed into.
- *
- * In a packaged Squirrel build the exe lives at:
- *   C:\Users\me\AppData\Local\MobileShopERP\app-1.0.0\MobileShopERP.exe
- *
- * The version-specific `app-x.x.x` folder is replaced on every update, so the
- * database must NOT live there. Its PARENT — the Squirrel root — persists
- * across updates and is the right home for the shop's data.
- *
- * In development `app.isPackaged` is false and we fall back to `userData`,
- * which is the Roaming folder — the same location the app always used.
- */
-function installRoot(): string {
   if (app.isPackaged) {
-    const exe = app.getPath('exe');           // ...\MobileShopERP\app-1.0.0\MobileShopERP.exe
-    const appDir = path.dirname(exe);          // ...\MobileShopERP\app-1.0.0\
-    const root = path.dirname(appDir);         // ...\MobileShopERP\
-    return root;
+    // NSIS per-machine installs land under Program Files, which is read-only
+    // for a normal user — never store data there. Roaming is always writable.
+    return path.join(userDataRoot(), 'mobile_shop.db');
   }
-  return app.getPath('userData');
+  return path.join(app.getPath('userData'), 'mobile_shop.db');
 }
 
 /**
@@ -61,7 +106,12 @@ function configuredDbPath(): string | null {
   const file = settingsFile();
   if (!fs.existsSync(file)) return null;
   try {
-    const settings = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    const raw = fs.readFileSync(file);
+    // The NSIS installer writes db_settings.json as UTF-16LE (FileWriteUTF16LE
+    // in a Unicode NSIS build) so Arabic paths survive; the app's own
+    // `setDbPath` writes plain UTF-8. Read whichever encoding the file uses.
+    const text = decodeSettings(raw);
+    const settings = JSON.parse(text);
     const p = settings?.dbPath;
     return typeof p === 'string' && p.trim() ? p : null;
   } catch (err) {
@@ -73,21 +123,72 @@ function configuredDbPath(): string | null {
   }
 }
 
+/**
+ * Decodes db_settings.json whatever encoding produced it.
+ *
+ * The NSIS installer writes UTF-16LE with a BOM; `fs.writeFileSync` writes
+ * UTF-8 (optionally with a BOM). A BOM is authoritative when present; without
+ * one, UTF-16 is detected by the runs of NUL bytes that ASCII in UTF-16LE
+ * produces.
+ */
+function decodeSettings(buf: Buffer): string {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    return buf.toString('utf16le', 2);
+  }
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return buf.toString('utf8', 3);
+  }
+  // No BOM. ASCII in UTF-16LE is interleaved with 0x00 bytes; ASCII/UTF-8 is
+  // not. Check the first few bytes for the UTF-16 pattern.
+  const probe = Math.min(buf.length, 512);
+  let utf16 = true;
+  for (let i = 0; i + 1 < probe; i += 2) {
+    if (buf[i + 1] !== 0x00) { utf16 = false; break; }
+  }
+  return utf16 ? buf.toString('utf16le') : buf.toString('utf8');
+}
+
 export function getDb(): Database.Database {
   if (!db) {
     const configured = configuredDbPath();
     let dbPath = configured ?? defaultDbPath();
 
     if (configured && !fs.existsSync(configured)) {
-      // Loud, because the shop is about to work in the WRONG database. This
-      // used to happen silently whenever a network share was unavailable.
-      console.error(
-        `[DB] Configured database not found: ${configured}\n` +
-        '[DB] Falling back to the default location. If this database lives on a ' +
-        'network share, check the connection BEFORE entering any data — work ' +
-        'saved now will not be in the shared database.',
-      );
-      dbPath = defaultDbPath();
+      // The database FILE is missing. Two very different situations arrive
+      // here and they must not be treated the same way:
+      //
+      //   1. A FRESH INSTALL. The NSIS installer wrote db_settings.json with
+      //      the shop's chosen data directory, but no `mobile_shop.db` has
+      //      been created yet — SQLite creates it on first open. Falling back
+      //      here would silently abandon the path the owner picked and use a
+      //      different empty database instead.
+      //   2. A NETWORK SHARE THAT IS OFFLINE. The file lives somewhere the
+      //      machine cannot reach right now. Falling back is deliberate, but
+      //      must be LOUD, because the shop is about to work in the WRONG
+      //      database — work saved now will not be in the shared database.
+      //
+      // The two are told apart by the DIRECTORY: on a fresh install it exists
+      // (the installer created it) or can be created; on an offline share the
+      // mkdir fails. So the directory, not the file, decides.
+      const dir = path.dirname(configured);
+      let dirOk = true;
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch {
+        dirOk = false;
+      }
+      if (!dirOk) {
+        console.error(
+          `[DB] Configured database not found and its directory is not ` +
+          `reachable: ${configured}\n` +
+          '[DB] Falling back to the default location. If this database lives on a ' +
+          'network share, check the connection BEFORE entering any data — work ' +
+          'saved now will not be in the shared database.',
+        );
+        dbPath = defaultDbPath();
+      } else {
+        console.log('[DB] First run with configured database path:', dbPath);
+      }
     } else if (configured) {
       console.log('[DB] Using custom database path:', dbPath);
     }

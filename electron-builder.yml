@@ -31,10 +31,12 @@ publish:
   provider: generic
   url: https://mobileshop-licensing.mobileshop2026.workers.dev/update-nsis/win32-x64
 
-# NSIS installer: traditional Windows installer with path selection
+# NSIS installer: traditional Windows installer with path selection.
+# `perMachine` is NOT set so the installer asks the user whether to install for
+# all users or the current user only (electron-builder's assisted installer
+# shows that page when INSTALL_MODE_PER_ALL_USERS is undefined).
 nsis:
   oneClick: false
-  perMachine: false
   allowToChangeInstallationDirectory: true
   allowElevation: true
   createDesktopShortcut: true
@@ -44,11 +46,22 @@ nsis:
   runAfterFinish: true
   deleteAppDataOnUninstall: false
   uninstallDisplayName: نظام إدارة محلات الموبايلات
+  # build/installer.nsh adds a page asking for the shop's data directory and
+  # writes the choice to <INSTDIR>\db_settings.json (see connection.ts).
+  include: installer.nsh
+  # Differential updates: NSIS installers produced by electron-builder include
+  # a `.blockmap` next to the Setup exe. electron-updater uses it to download
+  # only the changed 256 KB blocks instead of the whole installer, so a
+  # one-line change ships as a ~5-10 MB patch rather than the full 130+ MB exe.
+  differentialPackage: true
 
 win:
   target:
     - target: nsis
       arch:
         - x64
+  # Deterministic installer name so the server's latest.yml paths and the
+  # publish script can reference the exact filename.
+  artifactName: MobileShopERP-Setup-${version}.${ext}
 
 electronVersion: 43.3.0

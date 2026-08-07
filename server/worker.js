@@ -268,6 +268,16 @@ async function ensureSchema(env) {
       PRIMARY KEY (platform, version)
     )`),
   ]);
+  // The `releases` table gained a `sha512` column (for NSIS differential
+  // updates) after the very first deploy, which created the table without it.
+  // `CREATE TABLE IF NOT EXISTS` cannot add a column to an existing table, so
+  // migration must be explicit. If a column is already present the ALTER fails
+  // harmlessly (duplicate column) and is swallowed.
+  try {
+    await env.DB.prepare(`ALTER TABLE releases ADD COLUMN sha512 TEXT`).run();
+  } catch {
+    // duplicate column — already migrated
+  }
 }
 
 /**
@@ -882,14 +892,54 @@ async function handleNsisFile(request, env, url) {
     return new Response('bad file', { status: 400 });
   }
 
-  const obj = await env.UPDATES.get(`nsis/${platform}/${file}`);
+  const key = `nsis/${platform}/${file}`;
+  const obj = await env.UPDATES.get(key);
   if (!obj) return new Response('not found', { status: 404 });
+
+  // electron-updater fetches only the changed 256 KB blocks for a differential
+  // update via HTTP Range. Without honouring `Range`, the whole ~130 MB
+  // installer downloads on every update and the blockmap is pointless. R2's
+  // `get(key, { range })` reads just that slice; we mirror it back with a 206.
+  const rangeHeader = request.headers.get('Range');
+  if (rangeHeader) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (m) {
+      const startRaw = m[1], endRaw = m[2];
+      const total = obj.size;
+      let start, end;
+      if (startRaw === '' && endRaw !== '') {
+        // suffix range: last N bytes
+        const n = Number(endRaw);
+        start = Math.max(total - n, 0);
+        end = total - 1;
+      } else if (startRaw !== '') {
+        start = Number(startRaw);
+        end = endRaw === '' ? total - 1 : Math.min(Number(endRaw), total - 1);
+      }
+      if (Number.isFinite(start) && Number.isFinite(end) && start <= end && start < total) {
+        const ranged = await env.UPDATES.get(key, { range: { offset: start, length: end - start + 1 } });
+        if (ranged) {
+          return new Response(ranged.body, {
+            status: 206,
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'Content-Length': String(end - start + 1),
+              'Content-Range': `bytes ${start}-${end}/${total}`,
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'public, max-age=31536000, immutable',
+            },
+          });
+        }
+      }
+    }
+  }
 
   return new Response(obj.body, {
     status: 200,
     headers: {
       'Content-Type': 'application/octet-stream',
       'Content-Length': String(obj.size),
+      'Accept-Ranges': 'bytes',
       'Cache-Control': 'public, max-age=31536000, immutable',
     },
   });

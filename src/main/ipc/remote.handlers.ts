@@ -4,7 +4,7 @@ import {
   ensureRemoteTables, listRemoteMessages, listUnreadMessages, markMessageRead,
   getRemoteOverrides, getRemoteState, setRemoteState,
 } from '../remote/remoteStore';
-import { lastSyncInfo, runHeartbeat, telemetryEnabled } from '../remote/heartbeat';
+import { lastSyncInfo, runHeartbeat } from '../remote/heartbeat';
 import { REMOTE_MANAGED_KEYS } from '../remote/remoteConfig';
 import {
   evaluateOfflineNotice, evaluateExpiryNotice, OFFLINE_REMINDER_DAYS,
@@ -14,8 +14,10 @@ import {
  * Renderer-facing surface for the remote-management feature.
  *
  * Everything here is read-only from the customer's point of view except
- * `remote:markRead` (a local acknowledgement) and `remote:setTelemetry`
- * (their own privacy switch). The server can never be asked to do anything
+ * `remote:markRead` (a local acknowledgement). There is deliberately no
+ * telemetry on/off: the check-in is mandatory whenever a server is configured
+ * (see heartbeat.ts), so the developer can reach every install with updates,
+ * messages and renewed branding. The server can never be asked to do anything
  * from this side.
  */
 export function registerRemoteHandlers(
@@ -98,21 +100,13 @@ export function registerRemoteHandlers(
   });
 
   ipcMain.handle('remote:syncInfo', async () => {
-    return { ...lastSyncInfo(), telemetry: telemetryEnabled() };
+    return { ...lastSyncInfo() };
   });
 
   /** Manual "check now" button. */
   ipcMain.handle('remote:syncNow', async () => {
     const ok = await runHeartbeat(getDeviceId(), getLicense());
     return { success: ok, ...lastSyncInfo() };
-  });
-
-  /** The customer's own privacy switch. */
-  ipcMain.handle('remote:setTelemetry', async (_event, enabled: boolean) => {
-    const db = getDb();
-    db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('telemetry_enabled', ?)")
-      .run(enabled ? '1' : '0');
-    return { success: true, enabled };
   });
 
   /** Full disclosure of what a check-in transmits, rendered in the UI. */

@@ -129,7 +129,9 @@ const AUTHENTICATED_ONLY = new Set<string>([
   'permissions:getOverrides',
   'print:preview',
   'print:invoice',
-  // Remote management: read-only for the customer plus their own privacy switch.
+  // The About page shows the real installed build number.
+  'app:getVersion',
+  // Remote management: read-only for the customer.
   'remote:messages',
   'remote:markRead',
   'remote:syncInfo',
@@ -326,7 +328,6 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   // ---- Settings / admin
   'settings:set': 'settings.edit',
   'remote:syncNow': 'settings.edit',
-  'remote:setTelemetry': 'settings.edit',
   // Retuning the alert rules changes what every user of this install sees,
   // so it is an administrative action rather than a personal preference.
   'notifications:setPrefs': 'settings.edit',

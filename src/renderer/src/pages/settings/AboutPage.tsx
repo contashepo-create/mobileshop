@@ -24,9 +24,13 @@ export function AboutPage() {
 
   const load = async () => {
     const s = await window.api.invoke('settings:getAll');
+    // The version shown here is the REAL installed build, not the `app_version`
+    // setting (a branding value the developer can change remotely). app:getVersion
+    // returns what the packaging tool stamped into the exe, i.e. what is running.
+    const installed = await window.api.invoke('app:getVersion').catch(() => s.app_version || '');
     setInfo({
       app_name: s.app_name || 'موبايل شوب سيستم',
-      app_version: s.app_version || '1.0.0',
+      app_version: installed || s.app_version || '1.0.0',
       app_edition: s.app_edition || '',
       latest_version: s.latest_version || '',
       release_notes: s.release_notes || '',
@@ -217,7 +221,7 @@ export function AboutPage() {
                   </div>
                 </>
               ) : (
-                <div>الاتصال بخادم المطور غير مُفعّل — البرنامج يعمل بالكامل بدونه.</div>
+                <div>البرنامج يسجل اتصاله تلقائياً بخادم المطور ليستقبل التحديثات والرسائل; وحين يتعذّر الاتصال (لا إنترنت) يتابع عملك بلا توقف.</div>
               )}
             </div>
             {sync.enabled && (

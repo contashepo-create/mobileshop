@@ -113,6 +113,14 @@ console.log('\n[1] The picker accepts real images and refuses everything else');
     const bytes = m ? eval(m[1]) : NaN;
     t('the cap is a sane size for a logo', bytes === 512 * 1024, String(bytes));
   }
+
+  // A data URL is far larger than the generic per-setting character cap (20k).
+  // Saving a logo must not trip that cap, or the shop gets "قيمة الإعداد أطول
+  // من الحد المسموح" for any image past ~15 KB — the exact bug that made a
+  // normal logo fail to save. The handler has to exempt logo_path explicitly.
+  t('logo_path is exempt from the generic value-length cap',
+    /LOGO_VALUE_LIMIT/.test(s)
+    && /key === 'logo_path' && String\(value\)\.length <= LOGO_VALUE_LIMIT/.test(s));
 }
 
 // ---------------------------------------------------------------- 2

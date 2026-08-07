@@ -355,12 +355,13 @@ console.log('\n[9] Sessions end, telemetry is silent, handlers cannot vanish');
   }
 
   const hb = raw('src/main/remote/heartbeat.ts');
-  // `!== '0'` is also true when the row is ABSENT, so a database predating the
-  // setting transmitted by default.
-  t('telemetry requires an explicit opt-in',
-    /setting\('telemetry_enabled'\) === '1'/.test(hb));
-  t('the default stored value is off',
-    /\['telemetry_enabled', '0'\]/.test(raw('src/main/database/migrations/index.ts')));
+  // The check-in is MANDATORY whenever a server is configured (no opt-in): it
+  // delivers updates, developer messages and renewed branding. Mandatory means
+  // it always attempts when online — it never blocks the app offline.
+  t('the check-in is mandatory (no opt-in gate)',
+    hb.includes('configuredServer') && !/setting\('telemetry_enabled'\) === '1'/.test(hb));
+  t('and no customer-facing off switch survives',
+    hb.includes('!API_BASE || !CLIENT_KEY'));
 
   const g = raw('src/main/security/ipcGuard.ts');
   // ~30 handlers carry no try/catch; a throw crossed IPC as an unhandled

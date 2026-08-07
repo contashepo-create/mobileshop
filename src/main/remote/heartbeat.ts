@@ -21,8 +21,9 @@ import {
  * receipts, not personal data about a third party. It can be suppressed with the
  * `telemetry_share_shop_name` setting.
  *
- * The whole feature is OFF unless `telemetry_enabled = '1'`, and the
- * customer is told about it on the activation screen.
+ * The check-in is mandatory whenever a server is configured (there is no
+ * customer-facing on/off): updates, developer messages and renewed branding all
+ * arrive through it. It never blocks the app while offline — see notices.ts.
  *
  * RELIABILITY
  * -----------
@@ -62,15 +63,26 @@ function setting(key: string): string | null {
 }
 
 /**
- * Telemetry is OPT-IN. It sends nothing unless the setting is exactly '1'.
+ * The remote check-in is MANDATORY — the developer pushes updates, developer
+ * messages, renewal reminders and the About-page branding through it, so it runs
+ * on every launch as long as a server is configured and internet is available.
  *
- * It used to be opt-out, and the test was `!== '0'` — which also returns true
- * when the row is ABSENT. A database created before the setting existed, or
- * one where the row was removed, therefore transmitted by default. Requiring
- * an explicit '1' means silence is silence.
+ * It never BLOCKS the application: every heartbeat failure is swallowed and
+ * retried, and a shop with no internet simply keeps using the last values it
+ * received. "Mandatory" here means the app always attempts to call home when it
+ * can; it does not mean the app stops working when it cannot. See notices.ts.
+ *
+ * The old `telemetry_enabled` opt-in switch is gone — there is no customer-visible
+ * on/off, so the only thing that determines whether a check-in can happen is
+ * whether a server is configured at all.
  */
+export function configuredServer(): boolean {
+  return !!API_BASE && !!CLIENT_KEY;
+}
+
+/** @deprecated kept for callers that only need to know if a server is set. */
 export function telemetryEnabled(): boolean {
-  return setting('telemetry_enabled') === '1';
+  return configuredServer();
 }
 
 export interface HeartbeatPayload {
@@ -94,7 +106,7 @@ export function buildPayload(
   const shareName = setting('telemetry_share_shop_name') !== '0';
   return {
     deviceId,
-    appVersion: setting('app_version') || app.getVersion?.() || '0.0.0',
+    appVersion: app.getVersion?.() || setting('app_version') || '0.0.0',
     platform: process.platform,
     licenseStatus: String(license?.status ?? 'unknown'),
     licenseExpiry: license?.expiry ?? null,
@@ -136,7 +148,6 @@ export async function runHeartbeat(
   license: { status?: string; expiry?: string | null },
 ): Promise<boolean> {
   if (!API_BASE || !CLIENT_KEY) return false;
-  if (!telemetryEnabled()) return false;
 
   try {
     ensureRemoteTables();
@@ -203,6 +214,8 @@ export function lastSyncInfo() {
   return {
     lastSync: getRemoteState('last_sync'),
     lastSyncOk: getRemoteState('last_sync_ok') === '1',
-    enabled: !!API_BASE && !!CLIENT_KEY && telemetryEnabled(),
+    // Always "on" when a server is configured — the remote feature cannot be
+    // switched off by the customer, it only reflects whether the server exists.
+    enabled: configuredServer(),
   };
 }

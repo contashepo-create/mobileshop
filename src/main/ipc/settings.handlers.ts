@@ -19,6 +19,12 @@ import { checkAttemptAllowed, recordAttemptFailure, recordAttemptSuccess, lockou
 import { stripControlChars, LIMITS } from '../../shared/validate';
 
 export function registerSettingsHandlers() {
+  // The real installed version. The About page used to read the `app_version`
+  // setting, which defaults to a hard-coded '1.0.0' in migrations and so never
+  // advanced as new releases shipped. This reports the version the packaging
+  // tool stamped into the exe (app.getVersion), which IS the running build.
+  ipcMain.handle('app:getVersion', async () => app.getVersion());
+
   // ===== DEVELOPER AUTHENTICATION =====
   // Verifying developer credentials in the MAIN process (bcrypt + lockout) and
   // handing back a short-lived token. Previously the renderer compared a
@@ -213,6 +219,15 @@ export function registerSettingsHandlers() {
   ]);
 
   /**
+   * Maximum stored size for a value (in CHARACTERS). `logo_path` carries a
+   * base64 data URL, so a 512 KB image becomes ~680 KB of text — far past the
+   * generic 20,000-char cap that fits normal preferences. It gets its own,
+   * matching the image-size cap in settings:pickLogo (512 KB -> ~683 KB base64
+   * + the `data:image/png;base64,` prefix).
+   */
+  const LOGO_VALUE_LIMIT = 1024 * 1024; // characters, ~= a 768 KB image
+
+  /**
    * True for a key the generic setter must refuse.
    *
    * The `cloud_`, `sync_` and `telegram_` families are matched by PREFIX, the
@@ -242,7 +257,8 @@ export function registerSettingsHandlers() {
     if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
       return 'قيمة الإعداد يجب أن تكون نصاً';
     }
-    if (String(value).length > LIMITS.SETTING_VALUE) {
+    if (String(value).length > LIMITS.SETTING_VALUE
+        && !(key === 'logo_path' && String(value).length <= LOGO_VALUE_LIMIT)) {
       return 'قيمة الإعداد أطول من الحد المسموح';
     }
     if (BOOLEAN_KEYS.has(key) && String(value) !== '0' && String(value) !== '1') {

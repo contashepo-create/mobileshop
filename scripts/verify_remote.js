@@ -72,13 +72,14 @@ console.log('\n[3] The heartbeat sends only non-business data');
   const banned = /\b(customers|suppliers|sales|invoices|purchases|balance|amount|profit|PasswordHash|items)\b/i;
   check('no business table is referenced in the payload', !banned.test(payload));
   check('shop name can be suppressed', beat.includes('telemetry_share_shop_name'));
-  // Was opt-OUT, tested as `!== '0'`. That expression is also true when the
-  // row is ABSENT, so a database created before the setting existed
-  // transmitted by default. Sending a shop's data anywhere should be a
-  // decision the owner makes, not one they have to discover and undo.
-  check('telemetry is opt-IN', beat.includes("setting('telemetry_enabled') === '1'"));
-  check('and the stored default is off',
-    R('src/main/database/migrations/index.ts').includes("['telemetry_enabled', '0']"));
+  // The check-in is MANDATORY: there is no `telemetry_enabled` opt-in switch,
+  // so the only gate is whether a server is configured at all. Mandatory means
+  // "always attempts when online", never "blocks while offline".
+  check('the check-in is mandatory whenever a server is configured',
+    beat.includes('configuredServer') && beat.includes('!API_BASE || !CLIENT_KEY'));
+  check('and there is no customer-facing on/off escape hatch',
+    !beat.includes("setting('telemetry_enabled') === '1'")
+    && !R('src/main/ipc/remote.handlers.ts').includes('remote:setTelemetry'));
 }
 
 // ---------------------------------------------------------------- 4
@@ -165,7 +166,7 @@ console.log('\n[8] The customer is told, in the app, what is sent');
   check('it lists what is sent AND what never is',
     remote.includes('sends:') && remote.includes('neverSends:'));
   check('the About page renders it', about.includes('privacy.sends') && about.includes('privacy.neverSends'));
-  check('the customer can switch telemetry off', remote.includes('remote:setTelemetry'));
+  check('the check-in cannot be turned off by the customer', !remote.includes('remote:setTelemetry'));
   check('sync status is visible', about.includes('remote:syncInfo'));
 }
 

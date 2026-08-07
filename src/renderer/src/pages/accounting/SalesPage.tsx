@@ -9,6 +9,7 @@ import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
 
 interface CartItem {
+  uid: string; // unique per cart entry, stable across add/remove
   ItemID?: number; ItemName: string; SerialID?: number; IMEI?: string;
   Quantity: number; UnitPrice: number; UnitCost?: number; isService?: boolean;
   ServiceCost?: number;
@@ -77,6 +78,12 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
   const [serviceCost, setServiceCost] = useState('');
   const [serviceQty, setServiceQty] = useState('1');
 
+  // Stable unique key for each cart entry. Using array index as React key
+  // breaks when items are removed from the middle — React's reconciliation
+  // shifts the indices, causing input fields to lose focus and state.
+  let cartUid = 0;
+  const nextUid = () => `cart-${Date.now()}-${cartUid++}`;
+
   // Transfer cost (when paying via wallet/transfer, the fee charged by the provider)
   const [transferCost, setTransferCost] = useState('');
   // Who absorbs the machine's commission: the shop, or the customer.
@@ -119,7 +126,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
       const serial = availableSerials.find(s => s.SerialID === parseInt(selectedSerial));
       if (!serial) return;
       if (cart.find(c => c.SerialID === serial.SerialID)) { showToast('error', 'هذا الجهاز في السلة بالفعل'); return; }
-      setCart([...cart, { ItemID: item.ItemID, ItemName: item.ItemName, SerialID: serial.SerialID, IMEI: serial.IMEI, Quantity: 1, UnitPrice: parseFloat(itemPrice) || item.SalePrice || 0, UnitCost: item.CostPrice }]);
+      setCart([...cart, { uid: nextUid(), ItemID: item.ItemID, ItemName: item.ItemName, SerialID: serial.SerialID, IMEI: serial.IMEI, Quantity: 1, UnitPrice: parseFloat(itemPrice) || item.SalePrice || 0, UnitCost: item.CostPrice }]);
       setSelectedSerial('');
     } else {
       const qty = parseInt(itemQty) || 1;
@@ -138,7 +145,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
         showToast('error', `الكمية المتاحة: ${maxStock} (في السلة: ${alreadyInCart})`);
         return;
       }
-      setCart([...cart, { ItemID: item.ItemID, ItemName: item.ItemName, Quantity: qty, UnitPrice: parseFloat(itemPrice) || item.SalePrice || 0, UnitCost: item.CostPrice }]);
+      setCart([...cart, { uid: nextUid(), ItemID: item.ItemID, ItemName: item.ItemName, Quantity: qty, UnitPrice: parseFloat(itemPrice) || item.SalePrice || 0, UnitCost: item.CostPrice }]);
     }
     setSelectedItem('');
     setItemPrice('');
@@ -149,6 +156,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
     if (!serviceName.trim()) { showToast('error', 'أدخل اسم الخدمة'); return; }
     if (!servicePrice || parseFloat(servicePrice) <= 0) { showToast('error', 'أدخل سعر الخدمة'); return; }
     setCart([...cart, {
+      uid: nextUid(),
       ItemName: serviceName.trim(),
       Quantity: parseInt(serviceQty) || 1,
       UnitPrice: parseFloat(servicePrice),
@@ -162,7 +170,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
     setServiceQty('1');
   };
 
-  const removeFromCart = (idx: number) => setCart(cart.filter((_, i) => i !== idx));
+  const removeFromCart = (uid: string) => setCart(cart.filter(c => c.uid !== uid));
 
   const onItemSelected = async (itemId: string) => {
     setSelectedItem(itemId);
@@ -381,6 +389,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
     setCustomerName(sale.CustomerName || '');
     setCustomerPhone(sale.CustomerPhone || '');
     setCart((details || []).map((d: any) => ({
+      uid: `edit-${d.DetailID || Date.now()}-${Math.random()}`,
       ItemID: d.ItemID || undefined,
       ItemName: d.ItemName || d.IMEI || 'بند',
       SerialID: d.SerialID || undefined,
@@ -696,7 +705,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
                     const lineCost = (item.UnitCost || 0) * item.Quantity;
                     const lineProfit = lineTotal - lineCost;
                     return (
-                    <tr key={idx} className="border-t border-slate-100 dark:border-slate-700/50">
+                    <tr key={item.uid} className="border-t border-slate-100 dark:border-slate-700/50">
                       <td className="px-3 py-2 font-medium">{item.ItemName}</td>
                       <td className="px-3 py-2 font-mono text-xs">{item.IMEI || '—'}</td>
                       <td className="px-3 py-2">
@@ -707,7 +716,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
                       <td className="px-3 py-2 text-slate-500 dark:text-slate-500 dark:text-slate-400">{(item.UnitCost || 0).toFixed(2)}</td>
                       <td className={`px-3 py-2 font-bold ${lineProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{lineProfit.toFixed(2)}</td>
                       <td className="px-3 py-2 font-bold">{lineTotal.toFixed(2)}</td>
-                      <td className="px-3 py-2"><button onClick={() => removeFromCart(idx)} className="text-red-500 hover:text-red-600"><Trash2 size={14} /></button></td>
+                      <td className="px-3 py-2"><button onClick={() => removeFromCart(item.uid)} className="text-red-500 hover:text-red-600"><Trash2 size={14} /></button></td>
                     </tr>
                     );
                   })

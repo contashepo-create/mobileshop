@@ -1420,6 +1420,18 @@ export default {
           return await handleUpdatePackage(request, env, url);
         }
       }
+      // NSIS (electron-updater) — `latest.yml` + the Setup exe + its blockmap.
+      // electron-updater appends "/latest.yml" to the feed URL, then fetches
+      // the files named inside it, relative to the same directory. Served
+      // from R2 bucket `UPDATES` (key prefix `nsis/<platform>/`).
+      if (request.method === 'GET' && url.pathname.startsWith('/update-nsis/')) {
+        if (url.pathname.endsWith('/latest.yml')) {
+          return await handleNsisManifest(request, env, url);
+        }
+        if (url.pathname.endsWith('.exe') || url.pathname.endsWith('.blockmap')) {
+          return await handleNsisFile(request, env, url);
+        }
+      }
       if (url.pathname === '/health') return json({ ok: true });
       return json({ ok: false, error: 'not found' }, 404);
     } catch (err) {

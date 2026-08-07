@@ -7,12 +7,35 @@ let db: Database.Database | null = null;
 
 /** Where the custom-path setting lives. Read before the database is open. */
 function settingsFile(): string {
-  return path.join(app.getPath('userData'), 'db_settings.json');
+  return path.join(installRoot(), 'db_settings.json');
 }
 
 /** The default location, used whenever no valid custom path is configured. */
 function defaultDbPath(): string {
-  return path.join(app.getPath('userData'), 'mobile_shop.db');
+  return path.join(installRoot(), 'mobile_shop.db');
+}
+
+/**
+ * The directory the application was installed into.
+ *
+ * In a packaged Squirrel build the exe lives at:
+ *   C:\Users\me\AppData\Local\MobileShopERP\app-1.0.0\MobileShopERP.exe
+ *
+ * The version-specific `app-x.x.x` folder is replaced on every update, so the
+ * database must NOT live there. Its PARENT — the Squirrel root — persists
+ * across updates and is the right home for the shop's data.
+ *
+ * In development `app.isPackaged` is false and we fall back to `userData`,
+ * which is the Roaming folder — the same location the app always used.
+ */
+function installRoot(): string {
+  if (app.isPackaged) {
+    const exe = app.getPath('exe');           // ...\MobileShopERP\app-1.0.0\MobileShopERP.exe
+    const appDir = path.dirname(exe);          // ...\MobileShopERP\app-1.0.0\
+    const root = path.dirname(appDir);         // ...\MobileShopERP\
+    return root;
+  }
+  return app.getPath('userData');
 }
 
 /**

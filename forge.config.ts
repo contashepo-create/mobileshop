@@ -87,10 +87,16 @@ const config: ForgeConfig = {
       return true;
     },
   },
-  rebuildConfig: {},
+  rebuildConfig: {
+    onlyModules: ['better-sqlite3'],
+  },
   makers: [
     new MakerSquirrel({
       name: 'MobileShopERP',
+      setupExe: 'MobileShopERP-Setup',
+      title: 'تثبيت نظام إدارة محلات الموبايلات',
+      authors: 'محاسب / محمد عبدة',
+      description: 'نظام إدارة محلات الموبايلات والصيانة',
     }),
     new MakerZIP({}, ['win32']),
   ],

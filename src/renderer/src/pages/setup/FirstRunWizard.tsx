@@ -73,8 +73,8 @@ export function FirstRunWizard() {
         showToast('error', 'يرجى إدخال اسم المستخدم وكلمة المرور');
         return;
       }
-      if (admin.password.length < 4) {
-        showToast('error', 'كلمة المرور يجب أن تكون 4 أحرف على الأقل');
+      if (admin.password.length < 6) {
+        showToast('error', 'كلمة المرور يجب أن تكون 6 أحرف على الأقل');
         return;
       }
       if (admin.password !== admin.confirmPassword) {
@@ -93,14 +93,17 @@ export function FirstRunWizard() {
         customer,
         admin,
       });
-      if (result.success) {
+      if (result?.success) {
         showToast('success', 'تم إعداد النظام بنجاح');
-        navigate('/login');
+        // Reload the app so App.tsx re-checks setup:isComplete and routes
+        // to login instead of staying on the wizard.
+        setTimeout(() => window.location.reload(), 1000);
       } else {
-        showToast('error', result.message || 'فشل الإعداد');
+        showToast('error', result?.message || 'فشل الإعداد');
       }
-    } catch {
-      showToast('error', 'حدث خطأ أثناء الإعداد');
+    } catch (err: any) {
+      console.error('[Setup] Error:', err);
+      showToast('error', 'حدث خطأ أثناء الإعداد: ' + (err?.message || err));
     } finally {
       setLoading(false);
     }

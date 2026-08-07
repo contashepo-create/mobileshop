@@ -1,0 +1,54 @@
+appId: com.mobileshop.erp
+productName: MobileShopERP
+copyright: © 2026 محاسب / محمد عبدة
+
+directories:
+  buildResources: build
+  output: dist-installer
+
+# electron-builder reads the app from the electron-forge output directory
+extraMetadata:
+  main: .vite/build/index.js
+
+files:
+  - .vite/build/**/*
+  - .vite/renderer/**/*
+  - package.json
+  - node_modules/better-sqlite3/**/*
+  - node_modules/bcryptjs/**/*
+  - node_modules/bindings/**/*
+  - node_modules/file-uri-to-path/**/*
+  - "!**/.DS_Store"
+
+# Native modules must be unpacked from asar
+asarUnpack:
+  - node_modules/better-sqlite3/**
+
+# Where the update files are served. electron-updater reads latest.yml from
+# `${publish.url}/...`. We keep it pointing at the same Cloudflare Worker so
+# the client key + device gating applies. The actual files sit in R2.
+publish:
+  provider: generic
+  url: https://mobileshop-licensing.mobileshop2026.workers.dev/update-nsis/win32-x64
+
+# NSIS installer: traditional Windows installer with path selection
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MobileShopERP
+  license: build/license.txt
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  uninstallDisplayName: نظام إدارة محلات الموبايلات
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+electronVersion: 43.3.0

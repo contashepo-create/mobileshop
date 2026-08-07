@@ -61,8 +61,11 @@ export function isValidEgyptianMobile(value: unknown): boolean {
  */
 export function isValidEmail(value: unknown): boolean {
   const email = String(value ?? '').trim().toLowerCase();
+  // Latin-only local part: Arabic, CJK, Cyrillic etc. are not valid in email
+  // addresses without Punycode/IDN, and a shop owner typing Arabic into the
+  // email field is a mistake, not an internationalised address.
   // One @, something either side, a dot in the domain, no spaces.
-  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) return false;
+  if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email)) return false;
   const domain = email.split('@')[1];
   if (DISPOSABLE_EMAIL_DOMAINS.has(domain)) return false;
   // "a@a.aa" passes the pattern but is not a real inbox.

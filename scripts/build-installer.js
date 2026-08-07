@@ -31,10 +31,11 @@ if (!/^\d+\.\d+\.\d+/.test(version)) {
 const pkgDir = path.join(root, 'out', 'MobileShopERP-win32-x64');
 if (!fs.existsSync(pkgDir)) {
   console.log('[installer] Running electron-forge package...');
-  execSync('npx electron-forge package', {
-    stdio: 'inherit',
-    env: { ...process.env, NODE_ENV: 'development' },
-  });
+  // NODE_INSTALLER=npm skips yarn-or-npm's binary detection, which resolves the
+  // detected package manager to a PowerShell shim under nvm4w and makes forge's
+  // "checking package manager version" step return undefined and abort.
+  const env = { ...process.env, NODE_ENV: 'development', NODE_INSTALLER: 'npm' };
+  execSync('npx electron-forge package', { stdio: 'inherit', env });
 }
 
 // Step 2: Build NSIS installer from the prepackaged app.

@@ -99,29 +99,47 @@ console.log('');
  * Runs wrangler WITHOUT a shell (an npx.cmd cannot be launched directly, and a
  * quoted shell command breaks paths containing spaces — same rationale as
  * publish-release.js).
+ *
+ * `stdinFile` feeds a file to wrangler's `--pipe` on standard input. The
+ * handle is opened rather than read into memory: streaming is the whole point.
  */
-function runWrangler(args, cwd) {
+function runWrangler(args, cwd, stdinFile) {
   const { execFileSync } = require('node:child_process');
+  const stdio = stdinFile
+    ? [fs.openSync(stdinFile, 'r'), 'inherit', 'inherit']
+    : 'inherit';
   const candidates = [
     path.join(ROOT, 'server', 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
     path.join(ROOT, 'node_modules', 'wrangler', 'bin', 'wrangler.js'),
   ];
   const local = candidates.find(c => fs.existsSync(c));
   if (local) {
-    return execFileSync(process.execPath, [local, ...args], { stdio: 'inherit', cwd, maxBuffer: 1024 * 1024 * 1024 });
+    return execFileSync(process.execPath, [local, ...args], { stdio, cwd, maxBuffer: 1024 * 1024 * 1024 });
   }
-  return execFileSync(`npx wrangler ${args.join(' ')}`, { stdio: 'inherit', cwd, shell: true, maxBuffer: 1024 * 1024 * 1024 });
+  const quoted = args.map(a => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a));
+  return execFileSync(`npx wrangler ${quoted.join(' ')}`, { stdio, cwd, shell: true, maxBuffer: 1024 * 1024 * 1024 });
 }
 
 function putObject(key, file, contentType) {
-  return runWrangler([
+  const args = [
     'r2', 'object', 'put', `${BUCKET}/${key}`,
     '--content-type', contentType,
-    '--remote', '--file', file,
-  ], path.join(ROOT, 'server'));
+    '--remote',
+  ];
+  const dir = path.join(ROOT, 'server');
+  try {
+    // Stream on stdin first: a single non-resumable PUT can die part-way on a
+    // multi-minute ~110 MB upload (the same failure reporter for the Squirrel
+    // package). `--pipe` streams the file instead. Fall back to `--file`.
+    return runWrangler([...args, '--pipe'], dir, file);
+  } catch (pipeErr) {
+    console.log('      (التدفّق تعذّر، تجربة الرفع المباشر …)');
+    return runWrangler([...args, '--file', file], dir);
+  }
 }
 
 console.log('⬆️   رفع الملفات إلى R2 …');
+console.log(`   (${(size / 1048576).toFixed(1)} MB — قد يستغرق عدة دقائق)`);
 const manifests = [
   [`nsis/${PLATFORM}/${exeName}`, exe, 'application/octet-stream'],
   [`nsis/${PLATFORM}/${blockName}`, blockmap, 'application/octet-stream'],
@@ -132,7 +150,7 @@ for (const [key, file, ct] of manifests) {
     putObject(key, file, ct);
     console.log(`   ✓ ${key}`);
   } catch (err) {
-    die(`تعذّر رفع ${key} إلى R2:\n   ${String((err && err.message) || err).split('\n')[0]}`);
+    die(`تعشّر رفع ${key} إلى R2:\n   ${String((err && err.message) || err).split('\n')[0]}`);
   }
 }
 

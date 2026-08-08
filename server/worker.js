@@ -882,12 +882,37 @@ async function handleNsisFile(request, env, url) {
   const parts = url.pathname.split('/').filter(Boolean);
   const platform = parts[1] || '';
   const file = parts[parts.length - 1] || '';
+  return serveNsisFile(request, env, platform, file);
+}
 
+/**
+ * `GET /download-nsis/<platform>/<file>` — PUBLIC distribution of the installer.
+ *
+ * The update feed (`/update-nsis/...`) requires the client key the app embeds,
+ * so a browser clicking a share link gets 401. A brand-new shop has nothing
+ * installed yet and must be able to fetch the Setup exe from a plain link, so
+ * the installer and its blockmap are also published here WITHOUT the key. The
+ * manifest (`latest.yml`) stays keyed to the update feed: a customer who can
+ * read the manifest could already see the latest.yml served on the public R2
+ * anyway, but keeping the gating means addresses a brand-new install in a
+ * browser _can_ download the exe, which is the whole point of a distribution
+ * link. Platform + filename are still validated exactly like the update feed.
+ */
+async function handleDownloadNsis(request, env, url) {
+  if (!env.UPDATES) return new Response('no storage configured', { status: 503 });
+  const parts = url.pathname.split('/').filter(Boolean);
+  const platform = parts[1] || '';
+  const file = parts[parts.length - 1] || '';
+  return serveNsisFile(request, env, platform, file);
+}
+
+/** Shared Streaming-file logic for the NSIS installer and its blockmap. */
+async function serveNsisFile(request, env, platform, file) {
   if (!/^(win32|darwin|linux)-(x64|arm64|ia32)$/.test(platform)) {
     return new Response('bad platform', { status: 400 });
   }
   // NSIS setup names contain spaces and a version, e.g.
-  // "MobileShopERP Setup 1.0.2.exe" and "<same>.blockmap".
+  // "MobileShopERP Setup 1.0.2.exe" and ".blockmap".
   if (!/^[A-Za-z0-9._ -]+\.(exe|blockmap)$/.test(file) || file.includes('..')) {
     return new Response('bad file', { status: 400 });
   }
@@ -1572,6 +1597,13 @@ export default {
         }
         if (url.pathname.endsWith('.exe') || url.pathname.endsWith('.blockmap')) {
           return await handleNsisFile(request, env, url);
+        }
+      }
+      // Public installer distribution: a plain browser link with no client key.
+      // Share this URL with a new customer so they can download the Setup exe.
+      if (request.method === 'GET' && url.pathname.startsWith('/download-nsis/')) {
+        if (url.pathname.endsWith('.exe') || url.pathname.endsWith('.blockmap')) {
+          return await handleDownloadNsis(request, env, url);
         }
       }
       if (url.pathname === '/health') return json({ ok: true });

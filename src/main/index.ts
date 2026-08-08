@@ -35,6 +35,7 @@ import { registerDeleteHandlers } from './ipc/delete.handlers';
 import { runMigrations } from './database/migrations';
 import { migrateWithSafetyNet, SchemaTooNewError } from './database/schemaVersion';
 import { startUpdater } from './updater';
+import { startCodeUpdater, applyStagedCode, markCodeBootOk } from './codeUpdate';
 import { installIpcGuard } from './security/ipcGuard';
 import { registerRemoteHandlers } from './ipc/remote.handlers';
 import { startHeartbeat } from './remote/heartbeat';
@@ -331,6 +332,16 @@ app.whenReady().then(() => {
     // about it. The first check is minutes away so start-up is not slowed.
     startUpdater();
 
+    // Fast-lane code updates (app.asar swap). Started AFTER the full updater:
+    // both feeds run, but a staged code push is preferred on the next restart
+    // for the same reason the line above exists — a quiet, small swap.
+    startCodeUpdater();
+
+    // A staged swap helper waits for this flag before keeping the new build.
+    // Written only now: the database migration and every fatal startup step
+    // above already succeeded, so a fresh boot has PROVEN itself.
+    markCodeBootOk();
+
     // Daily check-in with the developer's server. Deliberately started AFTER
     // the window exists and is fully fail-safe: no network, no effect.
     startHeartbeat(currentDeviceId, currentLicenseSummary);
@@ -374,6 +385,13 @@ app.on('before-quit', () => {
     console.error('[Main] WAL checkpoint failed:', err);
   }
   closeDb();
+
+  // A staged fast-lane code push is swapped by a DETACHED helper that outlives
+  // this process, so it must be armed here, at the very end, where nothing can
+  // cancel it. The helper renames app.asar -> app.asar.bak, moves the staged
+  // copy in, relaunches, and restores the backup if the new build fails to
+  // boot — see codeUpdate.ts.
+  applyStagedCode();
 });
 
 // Auto backup function - saves to userData/backups

@@ -1,6 +1,6 @@
 {
   "name": "mobile-shop-erp",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "نظام إدارة محلات الموبايلات والصيانة",
   "main": ".vite/build/index.js",
   "author": "Acc. Mohamed Abdou",
@@ -25,6 +25,7 @@
     "dev:sign": "node scripts/dev-sign.js",
     "release": "node scripts/publish-release.js",
     "release:nsis": "node scripts/publish-nsis.js",
+    "code:push": "node scripts/publish-code.js",
     "verify:scale": "node --experimental-strip-types scripts/verify_scale_load.mjs",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "postinstall": "electron-rebuild -f -w better-sqlite3"

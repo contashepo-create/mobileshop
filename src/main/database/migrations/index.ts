@@ -622,7 +622,6 @@ export function runMigrations(db: Database.Database) {
       TotalCost           REAL DEFAULT 0,
       LaborCost           REAL DEFAULT 0,
       PartsCost           REAL DEFAULT 0,
-      AdditionalCosts     REAL DEFAULT 0,
       UserID              INTEGER NOT NULL,
       CreatedAt           TEXT DEFAULT (datetime('now','localtime')),
       FOREIGN KEY (FiscalYearID) REFERENCES fiscal_years(FiscalYearID),
@@ -667,7 +666,6 @@ export function runMigrations(db: Database.Database) {
       CustomerName      TEXT NOT NULL,
       PartsCost         REAL NOT NULL,
       LaborCost         REAL NOT NULL,
-      AdditionalCosts   REAL DEFAULT 0,
       TotalCost         REAL NOT NULL,
       PaidAmount        REAL NOT NULL,
       RemainingAmount   REAL DEFAULT 0,
@@ -678,14 +676,6 @@ export function runMigrations(db: Database.Database) {
       CreatedAt         TEXT DEFAULT (datetime('now','localtime')),
       FOREIGN KEY (TicketID) REFERENCES maintenance_tickets(TicketID),
       FOREIGN KEY (UserID) REFERENCES users(UserID)
-    );
-
-    CREATE TABLE IF NOT EXISTS maintenance_additional_costs (
-      CostID      INTEGER PRIMARY KEY AUTOINCREMENT,
-      DeliveryID  INTEGER NOT NULL,
-      Description TEXT NOT NULL,
-      Amount      REAL NOT NULL,
-      FOREIGN KEY (DeliveryID) REFERENCES maintenance_deliveries(DeliveryID)
     );
 
     CREATE TABLE IF NOT EXISTS maintenance_returns (
@@ -1436,6 +1426,54 @@ export function runMigrations(db: Database.Database) {
   try {
     db.exec(`ALTER TABLE sales ADD COLUMN TransferCostBearer TEXT DEFAULT 'shop'`);
   } catch {}
+
+  // =============================================
+  // FOLD THE LEGACY CUSTOMER-PAID FEE INTO THE INVOICE TOTAL
+  // =============================================
+  //
+  // Before this change, a fee the CUSTOMER absorbed was stored in
+  // `TransferCost` but left OUT of `TotalAmount`: the invoice showed only the
+  // items, the machine was credited the full `PaidAmount` (no fee deducted,
+  // because the customer paid the fee on top), and the fee was invisible to
+  // revenue. The shop was neither better nor worse off, so nothing leaked.
+  //
+  // The create/update/delete handlers now fold that fee into the invoice:
+  // `TotalAmount = items + fee`, and the account is credited
+  // `PaidAmount - TransferCost` in BOTH bearer cases. Existing rows therefore
+  // must be restated the same way, or their totals and their reversal figures
+  // no longer agree with the code that owns them. Reversing a legacy row with
+  // the new formula would subtract a fee the old create never deducted —
+  // destroying that fee's worth of cash on every edit or delete.
+  //
+  // Restating a row:
+  //   TotalAmount  := TotalAmount  + TransferCost
+  //   PaidAmount   := PaidAmount   + TransferCost
+  //
+  // `RemainingAmount` and every customer balance stay IDENTICAL: both sides of
+  // the remainder equation move together, so no debt moves and no account is
+  // touched. The provider kept the fee when the sale was made, and the machine
+  // balance already reflects what actually landed; folding the fee into the
+  // paper figures does not move any money.
+  //
+  // IDEMPOTENT BY CONSTRUCTION: once folded, `TotalAmount` no longer equals
+  // `Subtotal - Discount + TaxAmount`, so the predicate below matches no row
+  // on any later run. No version flag is needed and none can be forgotten.
+  {
+    const legacy = db.prepare(`
+      UPDATE sales SET
+        TotalAmount = ROUND(TotalAmount + COALESCE(TransferCost,0), 2),
+        PaidAmount  = ROUND(PaidAmount  + COALESCE(TransferCost,0), 2)
+      WHERE IsVoided = 0
+        AND COALESCE(Source,'direct') <> 'maintenance'
+        AND COALESCE(TransferCost,0) > 0
+        AND COALESCE(TransferCostBearer,'shop') = 'customer'
+        AND ABS(TotalAmount - (Subtotal - COALESCE(Discount,0) + COALESCE(TaxAmount,0))) < 0.01
+    `);
+    const n = legacy.run().changes;
+    if (n > 0) {
+      console.log(`[Migration] folded customer-paid transfer fee into ${n} legacy sale total(s)`);
+    }
+  }
 
   // Track WHICH warehouse each sale line was taken from, so a return/delete
   // credits the same warehouse it originally debited. Without this the reversal

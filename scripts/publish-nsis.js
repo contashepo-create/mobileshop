@@ -154,6 +154,23 @@ for (const [key, file, ct] of manifests) {
   }
 }
 
+// The CODE (fast-lane) feed needs to know the version of the FULL shell that is
+// out in the world, so it can default its `min_app_version` to that floor.
+// Record it now, under the same code/ prefix: the code push tool reads it.
+{
+  const markerTmp = path.join(ROOT, '.shell-version.tmp');
+  fs.writeFileSync(markerTmp, version);
+  try {
+    putObject(`code/${PLATFORM}/shell.version`, markerTmp, 'text/plain');
+    console.log(`   ✓ code/${PLATFORM}/shell.version (أساس الكود = ${version})`);
+  } catch (err) {
+    // Non-fatal: `publish-code.js` falls back to asking the developer for the
+    // floor. Do not block a full release on it.
+    console.log(`   ⚠ تعذّر كتابة shell.version: ${String((err && err.message) || err).split('\n')[0]}`);
+  }
+  fs.unlinkSync(markerTmp);
+}
+
 console.log('\n📢   إبلاغ الخادم بالإصدار الجديد …');
 (async () => {
   let res;

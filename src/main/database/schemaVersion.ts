@@ -57,8 +57,11 @@ import path from 'node:path';
  * History:
  *   1 — first versioned release. Everything shipped before this point is
  *       treated as version 0 and upgraded on first launch.
+ *   2 — `maintenance_additional_costs` and the `AdditionalCosts` columns on
+ *       maintenance tables removed (extra costs folded into TotalCost instead
+ *       of stored separately).
  */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 /** How many pre-upgrade snapshots to keep before pruning the oldest. */
 const KEEP_SNAPSHOTS = 5;

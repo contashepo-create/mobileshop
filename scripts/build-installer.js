@@ -27,15 +27,39 @@ if (!/^\d+\.\d+\.\d+/.test(version)) {
   process.exit(1);
 }
 
-// Step 1: Package with electron-forge (if not already done)
+// Step 1: Package with electron-forge.
+//
+// WHY rebuild unless we can PROVE the existing asar matches this release:
+// electron-builder stamps the installer filename/latest.yml from package.json,
+// but the code INSIDE the exe comes from `out/MobileShopERP-win32-x64/...asar`,
+// which electron-forge must have repacked AFTER the version bump. Reusing a
+// stale `out/` produced an installer named 1.0.4 that was really still running
+// 1.3 code — the About page said 1.3 while the installer claimed 1.4, and the
+// old code had no update UI. So: extract the packaged app's own version and
+// rebuild on ANY mismatch.
 const pkgDir = path.join(root, 'out', 'MobileShopERP-win32-x64');
-if (!fs.existsSync(pkgDir)) {
-  console.log('[installer] Running electron-forge package...');
+const embeddedVersion = (() => {
+  try {
+    const asar = require('@electron/asar');
+    const pkgPath = path.join(pkgDir, 'resources', 'app.asar');
+    if (!fs.existsSync(pkgPath)) return null;
+    const buf = asar.extractFile(pkgPath, 'package.json');
+    const pkg = JSON.parse(buf.toString('utf-8'));
+    return String(pkg.version || '').trim();
+  } catch {
+    return null;
+  }
+})();
+
+if (embeddedVersion !== version) {
+  console.log(`[installer] asar version ${embeddedVersion || '(غير موجود)'} != target ${version} — إعادة تصنيع`);
   // NODE_INSTALLER=npm skips yarn-or-npm's binary detection, which resolves the
   // detected package manager to a PowerShell shim under nvm4w and makes forge's
   // "checking package manager version" step return undefined and abort.
   const env = { ...process.env, NODE_ENV: 'development', NODE_INSTALLER: 'npm' };
   execSync('npx electron-forge package', { stdio: 'inherit', env });
+} else {
+  console.log(`[installer] asar version ${version} — reuse package`);
 }
 
 // Step 2: Build NSIS installer from the prepackaged app.

@@ -114,7 +114,13 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
   const subtotal = cart.reduce((sum, item) => sum + item.Quantity * item.UnitPrice, 0);
   const discountAmount = parseFloat(discount) || 0;
   const taxAmount = taxEnabled ? (subtotal - discountAmount) * (taxRate / 100) : 0;
-  const total = subtotal - discountAmount + taxAmount;
+  // A fee the CUSTOMER pays is part of the invoice: the customer hands over
+  // items + fee and the provider keeps the fee, so TotalAmount covers both.
+  // A fee the shop absorbs stays outside the invoice and is a cost instead.
+  // Without this the `total` (and therefore `remaining`) disagreed with the
+  // server, and a customer-paid walk-in sale always looked "unpaid" by the fee.
+  const customerFee = feeBearer === 'customer' ? (parseFloat(transferCost) || 0) : 0;
+  const total = subtotal - discountAmount + taxAmount + customerFee;
 
   const addToCart = async () => {
     if (!selectedItem) { showToast('error', 'اختر صنفاً'); return; }
@@ -807,9 +813,10 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
                               </>
                             ) : (
                               <>
-                                <div>العميل يدفع: <b>{((parseFloat(paidAmount) || 0) + (parseFloat(transferCost) || 0)).toFixed(2)}</b> (الفاتورة + العمولة)</div>
-                                <div>يصل إلى حسابك: <b>{(parseFloat(paidAmount) || 0).toFixed(2)}</b></div>
-                                <div className="pt-1 border-t border-amber-200 dark:border-amber-800">لا تُسجَّل كمصروف — العميل هو من دفعها.</div>
+                                <div>العميل يدفع: <b>{(parseFloat(paidAmount) || 0).toFixed(2)}</b> (الفاتورة تشمل العمولة)</div>
+                                <div>الماكينة تخصم: <b>{(parseFloat(transferCost) || 0).toFixed(2)}</b></div>
+                                <div>يصل إلى حسابك: <b>{((parseFloat(paidAmount) || 0) - (parseFloat(transferCost) || 0)).toFixed(2)}</b></div>
+                                <div className="pt-1 border-t border-amber-200 dark:border-amber-800">العمولة داخل الفاتورة — يدفعها العميل ولا تُسجَّل كمصروف.</div>
                               </>
                             )}
                           </div>

@@ -83,10 +83,13 @@ export function registerDeleteHandlers() {
         // machine's commission, so the reversal must remove the same net
         // figure — subtracting the gross would destroy the fee's worth of cash
         // on every deleted card sale.
-        const shopBorneFee = (sale.TransferCostBearer ?? 'shop') === 'shop'
-          ? (sale.TransferCost || 0)
-          : 0;
-        const netReceived = +((sale.PaidAmount || 0) - shopBorneFee).toFixed(2);
+        //
+        // The fee is subtracted for BOTH bearers. When the customer bears it,
+        // the invoice and PaidAmount include it, so PaidAmount alone is gross
+        // to the preserve the fee; netting it keeps the reversal symmetric with
+        // the create.
+        const fee = sale.TransferCost || 0;
+        const netReceived = +((sale.PaidAmount || 0) - fee).toFixed(2);
 
         if (sale.CashAccountID && sale.PaidAmount > 0) {
           db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(netReceived, sale.CashAccountID);
@@ -655,7 +658,6 @@ export function registerDeleteHandlers() {
         }
 
         // Delete delivery
-        db.prepare('DELETE FROM maintenance_additional_costs WHERE DeliveryID = ?').run(deliveryId);
         db.prepare('DELETE FROM maintenance_deliveries WHERE DeliveryID = ?').run(deliveryId);
       });
       tx();

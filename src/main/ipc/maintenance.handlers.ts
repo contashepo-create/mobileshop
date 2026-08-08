@@ -523,7 +523,7 @@ export function registerMaintenanceHandlers() {
   // ===== DELIVER (also creates sale invoice) =====
   ipcMain.handle('maintenance:deliver', async (_event, data: {
     TicketID: number; CustomerID?: number; CustomerName: string; CustomerPhone?: string;
-    LaborCost: number; AdditionalCosts: { Description: string; Amount: number }[];
+    LaborCost: number;
     PaymentMethod: string; PaidAmount: number;
     CashAccountID?: number; PaymentMethodID?: number;
     Discount?: number; FinalPrice?: number; FinalNotes?: string;
@@ -571,12 +571,6 @@ export function registerMaintenanceHandlers() {
         return { success: false, message: `${label} يجب أن يكون رقماً غير سالب` };
       }
     }
-    for (const ac of data.AdditionalCosts || []) {
-      const v = num(ac?.Amount ?? 0);
-      if (!Number.isFinite(v) || v < 0) {
-        return { success: false, message: 'المصاريف الإضافية يجب أن تكون أرقاماً غير سالبة' };
-      }
-    }
     if (data.FinalPrice != null) {
       const fp = num(data.FinalPrice);
       if (!Number.isFinite(fp) || fp < 0) {
@@ -585,7 +579,6 @@ export function registerMaintenanceHandlers() {
     }
 
     const partsCost = ticket.PartsCost || 0;
-    const additionalTotal = data.AdditionalCosts.reduce((sum, a) => sum + a.Amount, 0);
 
     // Get service costs
     const svcCosts = db.prepare('SELECT SUM(PriceToClient) as total FROM maintenance_service_costs WHERE TicketID = ?').get(data.TicketID) as any;
@@ -607,7 +600,7 @@ export function registerMaintenanceHandlers() {
 
     const isWarranty = ticket.MaintenanceType === 'warranty' || ticket.MaintenanceType === 'rework';
 
-    const grossTotal = isWarranty ? 0 : (partsSalePrice + serviceCostTotal + data.LaborCost + additionalTotal);
+    const grossTotal = isWarranty ? 0 : (partsSalePrice + serviceCostTotal + data.LaborCost);
     const discount = isWarranty ? 0 : (data.Discount || 0);
     const totalCost = isWarranty ? 0 : (data.FinalPrice || (grossTotal - discount));
     const paidAmount = isWarranty ? 0 : data.PaidAmount;
@@ -626,23 +619,19 @@ export function registerMaintenanceHandlers() {
       const effectiveCustomerName = data.CustomerName || ticket.CustomerName || 'عميل';
       const result = db.prepare(`
         INSERT INTO maintenance_deliveries (DeliveryNumber, TicketID, Date, CustomerID, CustomerName,
-          PartsCost, LaborCost, AdditionalCosts, TotalCost, PaidAmount, RemainingAmount,
+          PartsCost, LaborCost, TotalCost, PaidAmount, RemainingAmount,
           PaymentMethod, CashAccountID, PaymentMethodID, UserID,
           ServiceCostTotal, TotalCostOnUs, TotalProfit)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         deliveryNumber, data.TicketID, dateStr, effectiveCustomerId, effectiveCustomerName,
-        partsCost, isWarranty ? 0 : data.LaborCost, isWarranty ? 0 : additionalTotal, totalCost, paidAmount, remaining,
+        partsCost, isWarranty ? 0 : data.LaborCost, totalCost, paidAmount, remaining,
         isWarranty ? 'warranty' : data.PaymentMethod,
         data.PaymentMethodID ? null : (data.CashAccountID ?? null), data.PaymentMethodID ?? null, data.userId,
         serviceCostTotal, totalCostOnUs, totalProfit
       );
 
       const deliveryId = result.lastInsertRowid;
-
-      for (const ac of data.AdditionalCosts) {
-        db.prepare('INSERT INTO maintenance_additional_costs (DeliveryID, Description, Amount) VALUES (?, ?, ?)').run(deliveryId, ac.Description, ac.Amount);
-      }
 
       // 2. Create sale invoice (for customer - no costs/profits shown)
       const customerName = effectiveCustomerName;
@@ -726,15 +715,6 @@ export function registerMaintenanceHandlers() {
         `).run(saleId, laborPrice, laborPrice, 'أجرة صيانة');
       }
 
-      // Additional costs
-      for (const ac of data.AdditionalCosts) {
-        const acPrice = isWarranty ? 0 : ac.Amount;
-        db.prepare(`
-          INSERT INTO sale_details (SaleID, ItemID, Quantity, UnitPrice, UnitCost, Total, Description)
-          VALUES (?, NULL, 1, ?, ?, ?, ?)
-        `).run(saleId, acPrice, 0, acPrice, ac.Description);
-      }
-
       // 3. Update ticket
       db.prepare("UPDATE maintenance_tickets SET Status = 'delivered', TotalCost = ?, LaborCost = ? WHERE TicketID = ?")
         .run(totalCost, isWarranty ? 0 : data.LaborCost, data.TicketID);
@@ -784,7 +764,6 @@ export function registerMaintenanceHandlers() {
       totalCost, totalCostOnUs, totalProfit, remaining,
       totalPartsCost: partsCost,
       serviceCostTotal,
-      totalAdditional: additionalTotal,
       isWarranty
     };
   });

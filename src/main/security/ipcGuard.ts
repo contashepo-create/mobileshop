@@ -320,6 +320,7 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'customerStatement:get': 'reports.view',
   'supplierStatement:get': 'reports.view',
   'cashAccount:statement': 'reports.view',
+  'paymentMethod:statement': 'reports.view',
 
   // ---- Opening balances (they rewrite balances directly => treat as settlement)
   'openingBalances:overview': 'settlements.view',

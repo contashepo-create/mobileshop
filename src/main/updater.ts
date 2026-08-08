@@ -29,6 +29,7 @@
 import { app, dialog, BrowserWindow, ipcMain, webContents } from 'electron';
 import electronUpdater from 'electron-updater';
 import { getDeviceId } from './security/deviceId';
+import { checkForCodeUpdatesNow, applyStagedCode } from './codeUpdate';
 
 /** Base URL of the developer's Cloudflare Worker (licensed updates). */
 const API_BASE = (process.env.MOBILESHOP_API_BASE || '').replace(/\/$/, '');
@@ -56,6 +57,9 @@ function broadcast(state: Record<string, unknown>): void {
 
 /** Manually trigger a check from the About screen. */
 export function checkForUpdatesNow(): Promise<{ ok: boolean; message?: string }> {
+  // Fast lane first: a small code push is the normal case and is independent
+  // of the NSIS channel. 204 / no manifest is a non-event.
+  void checkForCodeUpdatesNow();
   if (!app.isPackaged || process.platform !== 'win32' || !updaterInstance) {
     return Promise.resolve({ ok: false, message: 'التحديث التلقائي غير متاح في هذا الإصدار' });
   }
@@ -71,11 +75,30 @@ export function checkForUpdatesNow(): Promise<{ ok: boolean; message?: string }>
   }
 }
 
+/**
+ * The only place this app installs a downloaded update. It runs only when the
+ * owner chose to: either the download dialog's "restart now" (response 0) or
+ * the About screen's explicit restart button, which funnels here too. Keeping
+ * the literal call in one guarded spot makes "never without asking" a fact.
+ */
+function applyOwnerChoice(choice: { response: number }): void {
+  if (choice.response === 0) {
+    if (downloaded && updaterInstance) updaterInstance.quitAndInstall();
+  }
+}
+
 /** Restart and install the already-downloaded update (About-screen button). */
 export function quitAndInstallNow(): { ok: boolean } {
+  // If a fast-lane code push is staged, an EXTERNAL helper performs the swap,
+  // so "restart now" must quit cleanly and let it run. Prefer it: it is the
+  // cheap fix that most closely matches what the shop asked for.
+  if (applyStagedCode()) {
+    app.quit();
+    return { ok: true };
+  }
   if (downloaded && updaterInstance) {
-    downloaded = false;
-    updaterInstance.quitAndInstall();
+    // The owner clicked "restart now": the same explicit answer as the dialog.
+    applyOwnerChoice({ response: 0 });
     return { ok: true };
   }
   return { ok: false };
@@ -135,8 +158,10 @@ export function startUpdater(): void {
 
   autoUpdater.on('error', (err) => {
     // Never a dialog. No internet is the normal state for many shops.
+    // The renderer gets a fixed sentence — a raw err.message carries paths
+    // and server internals that belong in the developer's log, not the UI.
     console.log('[Updater] check failed (not an error for the user):', err?.message ?? err);
-    broadcast({ state: 'error', message: err?.message ?? 'تعذر الاتصال بخادم التحديثات' });
+    broadcast({ state: 'error', message: 'تعذر الاتصال بخادم التحديثات' });
   });
 
   autoUpdater.on('update-not-available', () => {
@@ -177,10 +202,7 @@ export function startUpdater(): void {
     };
 
     const handle = (result: { response: number }) => {
-      if (result.response === 0) {
-        // The renderer may be holding an unsaved form; the owner chose this.
-        autoUpdater.quitAndInstall();
-      }
+      applyOwnerChoice(result);
     };
 
     if (win) dialog.showMessageBox(win, options).then(handle);

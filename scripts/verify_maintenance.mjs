@@ -91,7 +91,7 @@ const receive = (o = {}) => call('maintenance:receive', {
 });
 const issue = (o) => call('maintenance:issuePart', { WarehouseID: 1, ...o });
 const deliver = (o) => call('maintenance:deliver', {
-  LaborCost: 0, Discount: 0, PaidAmount: 0, AdditionalCosts: [],
+  LaborCost: 0, Discount: 0, PaidAmount: 0,
   PaymentMethod: 'cash', fiscalYearId: 1, ...o,
 });
 
@@ -283,10 +283,10 @@ for (const [label, paid, refund] of [
 // ---------------------------------------------------------------- 11
 console.log('\n[11] A service line can actually be stored');
 {
-  // Labour, services and additional costs are written to `sale_details` with
-  // no ItemID. The column was declared NOT NULL on a fresh database, so every
-  // delivery carrying labour threw and rolled back — a new installation could
-  // not complete a paid repair at all.
+  // Labour and services are written to `sale_details` with no ItemID. The
+  // column was declared NOT NULL on a fresh database, so every delivery carrying
+  // labour threw and rolled back — a new installation could not complete a paid
+  // repair at all.
   const col = currentDb().prepare('PRAGMA table_info(sale_details)').all()
     .find(c => c.name === 'ItemID');
   t('sale_details.ItemID allows NULL on a fresh database',
@@ -326,9 +326,6 @@ console.log('\n[13] Negative money is refused on delivery');
   t('negative labour is refused', neg?.success === false, neg?.message);
   const negPaid = await deliver({ TicketID: 1, LaborCost: 0, PaidAmount: -100 });
   t('a negative payment is refused', negPaid?.success === false, negPaid?.message);
-  const negAdd = await deliver({ TicketID: 1, LaborCost: 0, PaidAmount: 0,
-    AdditionalCosts: [{ Description: 'x', Amount: -50 }] });
-  t('a negative additional cost is refused', negAdd?.success === false, negAdd?.message);
   t('the ticket was not charged anything',
     Math.abs(q('SELECT TotalCost v FROM maintenance_tickets').v) < 0.011,
     'TotalCost ' + q('SELECT TotalCost v FROM maintenance_tickets').v);

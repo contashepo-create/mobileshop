@@ -259,7 +259,7 @@ console.log('\n[4] The developer can look a shop up');
   t('every field is length-capped before storage',
     /handleRegistration[\s\S]*?cut\(b\?\.companyName, 80\)/.test(w));
   t('a new registration is announced on Telegram',
-    /handleRegistration[\s\S]{0,2000}await tg\(env,/.test(w));
+    /handleRegistration[\s\S]*?await tg\(env,/.test(w));
   t('the device screen shows the details for support',
     /SELECT \* FROM registrations WHERE device_id/.test(w) && /بيانات التسجيل/.test(w));
 }

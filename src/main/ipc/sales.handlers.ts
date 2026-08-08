@@ -143,6 +143,17 @@ export function registerSalesHandlers() {
         };
       }
 
+      // === CARD/WALLET COMMISSION ===
+      // Who pays the machine's fee. A fee the SHOP absorbs sits outside the
+      // invoice total and is charged as an operating cost. A fee the CUSTOMER
+      // absorbs is part of the INVOICE TOTAL: the customer pays items + fee,
+      // the provider keeps the fee, and the shop's revenue is the items. The
+      // provider always settles net of its fee, so what lands in our account
+      // is `paidAmount - transferCost` in BOTH cases.
+      const transferCost = Number.isFinite(num(data.TransferCost)) ? Math.max(0, num(data.TransferCost)) : 0;
+      const feeBearer = data.TransferCostBearer === 'customer' ? 'customer' : 'shop';
+      const customerBorneFee = feeBearer === 'customer' ? transferCost : 0;
+
       // === PAYMENT TARGET MUST EXIST AND BE ACTIVE ===
       // `UPDATE ... WHERE ID = ?` against a missing id affects zero rows and
       // raises nothing, so the money simply evaporated while the invoice was
@@ -174,7 +185,7 @@ export function registerSalesHandlers() {
       // `sales:update` and the screen already enforced this; `sales:create` did
       // not, so calling the channel directly bypassed the rule entirely.
       {
-        const provisionalRemaining = money((rawSubtotal - discountIn + taxIn) - paidIn);
+        const provisionalRemaining = money((rawSubtotal - discountIn + taxIn + customerBorneFee) - paidIn);
         if (!data.CustomerID && Math.abs(provisionalRemaining) > 0.005) {
           return {
             success: false,
@@ -184,16 +195,6 @@ export function registerSalesHandlers() {
           };
         }
       }
-      const transferCost = Number.isFinite(num(data.TransferCost)) ? Math.max(0, num(data.TransferCost)) : 0;
-      // Who absorbs the machine's commission. Anything other than an explicit
-      // 'customer' means the shop pays it, which is the safer default: it books
-      // the fee as a cost rather than silently assuming the customer covered it.
-      const feeBearer = data.TransferCostBearer === 'customer' ? 'customer' : 'shop';
-      // Only a fee the SHOP bears reduces what lands in our account and counts
-      // as an expense. A fee passed on to the customer is collected from them
-      // and handed straight to the provider — the shop is neither richer nor
-      // poorer, so it must not be expensed.
-      const shopBorneFee = feeBearer === 'shop' ? transferCost : 0;
       // Check if customer is suspended
       if (data.CustomerID) {
         const customer = db.prepare('SELECT Status, Balance FROM customers WHERE CustomerID = ?').get(data.CustomerID) as any;
@@ -236,7 +237,11 @@ export function registerSalesHandlers() {
       }
 
       const subtotal = money(data.items.reduce((sum, item) => sum + (item.Quantity * item.UnitPrice), 0));
-      const totalAmount = money(subtotal - data.Discount + data.TaxAmount);
+      // A fee the customer pays is part of the invoice: the customer hands over
+      // items + fee, the provider keeps the fee, and the shop books the items.
+      // A fee the shop pays is a cost of doing business, so it stays OUT of the
+      // invoice and is charged in the profit & loss report instead.
+      const totalAmount = money(subtotal - data.Discount + data.TaxAmount + customerBorneFee);
       const paidAmount = money(data.PaidAmount || 0);
       // Rounded, and a residue under one piastre is treated as settled.
       //
@@ -444,14 +449,11 @@ export function registerSalesHandlers() {
         // credited the paid amount twice, inventing cash out of thin air.
         if (paidAmount > 0) {
           // The commission never reaches the shop: a card machine or wallet
-          // settles the sale MINUS its fee. Crediting the gross amount
-          // overstated the asset by the fee on every single card sale, and the
-          // fee itself was never expensed, so profit was overstated twice over.
-          //
-          // The customer still owes the full TotalAmount — only what lands in
-          // our account is reduced. The fee is carried on the sale row as
-          // TransferCost and charged as a cost in the profit & loss report.
-          const netReceived = +(paidAmount - shopBorneFee).toFixed(2);
+          // settles the sale MINUS its fee, whoever "owns" that fee — if the
+          // shop paid it the fee is expensed, if the customer paid it the fee
+          // already sat inside TotalAmount. Either way the provider pockets it,
+          // so only `paidAmount - transferCost` lands in our account.
+          const netReceived = +(paidAmount - transferCost).toFixed(2);
           if (paymentMethodId) {
             db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(netReceived, paymentMethodId);
           } else if (cashAccountId) {
@@ -1005,7 +1007,9 @@ export function registerSalesHandlers() {
 
       const transferCost = Number.isFinite(num(data.TransferCost)) ? Math.max(0, num(data.TransferCost)) : 0;
       const feeBearer = data.TransferCostBearer === 'customer' ? 'customer' : 'shop';
-      const shopBorneFee = feeBearer === 'shop' ? transferCost : 0;
+      // Mirror of `sales:create`: a customer-paid fee is part of the invoice
+      // total; a shop-paid fee is charged as a cost instead.
+      const customerBorneFee = feeBearer === 'customer' ? transferCost : 0;
 
       const allowNegativeStockOnUpdate = (db.prepare(
         "SELECT Value FROM settings WHERE Key = 'allow_negative_stock'",
@@ -1014,7 +1018,7 @@ export function registerSalesHandlers() {
       // Same rounding rule as `sales:create`: money is two decimals, and a
       // residue under one piastre is settled, not owed.
       const subtotal = money(rawSubtotal);
-      const totalAmount = money(subtotal - discountIn + taxIn);
+      const totalAmount = money(subtotal - discountIn + taxIn + customerBorneFee);
       const rawRemaining = money(totalAmount - paidIn);
       const remaining = Math.abs(rawRemaining) < 0.01 ? 0 : rawRemaining;
       const status = remaining > 0 ? (paidIn > 0 ? 'partial' : 'unpaid') : 'completed';
@@ -1067,8 +1071,11 @@ export function registerSalesHandlers() {
           db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?')
             .run(Math.abs(original.RemainingAmount), original.CustomerID);
         }
-        const oldShopFee = (original.TransferCostBearer ?? 'shop') === 'shop' ? (original.TransferCost || 0) : 0;
-        const oldNet = +((original.PaidAmount || 0) - oldShopFee).toFixed(2);
+        // The amount that reached the account was net of the machine's
+        // commission for BOTH bearers: a customer-paid fee arrived inside the
+        // payment and then went out to the provider, a shop-paid fee was
+        // deducted before credit. Same net figure either way.
+        const oldNet = +((original.PaidAmount || 0) - (original.TransferCost || 0)).toFixed(2);
         if (original.CashAccountID && original.PaidAmount > 0) {
           db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?')
             .run(oldNet, original.CashAccountID);
@@ -1168,7 +1175,9 @@ export function registerSalesHandlers() {
         }
 
         if (paidIn > 0) {
-          const netReceived = +(paidIn - shopBorneFee).toFixed(2);
+          // The provider keeps the commission whether the shop or the customer
+          // absorbed it, so the account always receives paid minus the fee.
+          const netReceived = +(paidIn - transferCost).toFixed(2);
           if (newPaymentMethodId) {
             db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(netReceived, newPaymentMethodId);
           } else if (newCashAccountId) {

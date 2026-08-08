@@ -120,6 +120,8 @@ const RETIRED_SCREEN_HOMES: Record<string, string> = {
   '/accounting/vouchers': 'السندات والرواتب والإيجارات',
   '/inventory/warehouses': 'المخازن والتسوية الجردية',
   '/inventory/items': 'المخازن والتسوية الجردية',
+  '/accounting/sale-returns': 'المبيعات',
+  '/accounting/purchase-returns': 'المشتريات',
 };
 
 function migrateAccountingSplit(config: SidebarConfig): SidebarConfig {

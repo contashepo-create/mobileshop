@@ -74,10 +74,11 @@ report('ALTER TABLE sales ADD COLUMN TransferCost REAL DEFAULT 0' in MIGR,
        'so it existed as prose but could never be summed by any report')
 report("data.Notes ?? null" in SALES and 'عمولة تحويل' not in SALES,
        'Notes no longer carries accounting data')
-report('const netReceived = +(paidAmount - shopBorneFee).toFixed(2);' in SALES,
-       'the machine is credited NET of any fee the SHOP bears',
+report('const netReceived = +(paidAmount - transferCost).toFixed(2);' in SALES,
+       'the machine is credited NET of the fee, whoever pays it',
        'a card machine settles the sale minus its commission; crediting the\n'
-       'gross amount overstated the asset on every card sale')
+       'gross amount overstated the asset on every card sale, and the fee\n'
+       'lands inside the payment whether the shop or the customer absorbed it')
 report('saleTransferCost' in REPORTS and '+ saleTransferCost.total' in REPORTS,
        'the fee is charged as a cost in the profit & loss report')
 
@@ -152,9 +153,10 @@ after = snapshot()
 report(before == after,
        'stock, inventory value, machine balance and customer balance all return to zero drift',
        f'before {before}\nafter  {after}')
-report('const netReceived = +((sale.PaidAmount || 0) - shopBorneFee).toFixed(2);' in DELETE,
+report('const netReceived = +((sale.PaidAmount || 0) - fee).toFixed(2);' in DELETE,
        'the reversal subtracts the net figure, matching what was credited',
-       'subtracting the gross would destroy the fee\'s worth of cash each time')
+       'subtracting the gross would destroy the fee\'s worth of cash each time,\n'
+       'and the fee is subtracted for BOTH bearers since the payment carried it')
 report("FROM sale_returns WHERE SaleID = ?" in DELETE and 'blockIfReferenced' in DELETE,
        'a sale with returns, vouchers or a repair delivery cannot be deleted',
        'prevents orphaned documents pointing at a missing invoice')

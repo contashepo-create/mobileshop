@@ -52,8 +52,6 @@ import {
   Smartphone,
   ArrowRightLeft,
   Shield,
-  Undo2,
-  PackageX,
   Building2,
   TrendingUp,
   TrendingDown,
@@ -129,16 +127,15 @@ export const NAV_TOP_ORDER: string[] = [
 export const NAV_DESTINATIONS: NavDestination[] = [
   { path: '/', label: 'لوحة التحكم', icon: LayoutDashboard, section: null },
 
-  // Sales. Returns are a separate destination, not a tab on the sales screen:
-  // they are their own task, often done by a different person, and hiding them
-  // behind a tab meant the shop had to already know where they lived.
+  // Sales. Returns are a TAB on the sales screen, not a menu item of their
+  // own: the shop works with both from one screen and does not have to choose
+  // in advance which one it wants. The old separate routes still exist as
+  // NAV_ALIASES so an old bookmark keeps working; they are just not offered.
   { path: '/accounting/sales', label: 'مبيعات', icon: ShoppingCart, section: 'المبيعات' },
   { path: '/accounting/services', label: 'تحويل وشحن', icon: Smartphone, section: 'المبيعات' },
   { path: '/accounting/maintenance', label: 'صيانة', icon: Wrench, section: 'المبيعات' },
-  { path: '/accounting/sale-returns', label: 'مرتجعات المبيعات', icon: Undo2, section: 'المبيعات' },
 
   { path: '/accounting/purchases', label: 'مشتريات', icon: Truck, section: 'المشتريات' },
-  { path: '/accounting/purchase-returns', label: 'مرتجعات المشتريات', icon: PackageX, section: 'المشتريات' },
 
   // Receipts and payments are split: a shop thinks "money in" and "money out",
   // and they are different daily tasks.
@@ -186,6 +183,8 @@ export const NAV_ALIASES: { path: string; label: string; reason: string }[] = [
   { path: '/accounting/vouchers', label: 'سندات', reason: 'صار قسمين: سندات القبض وسندات الصرف' },
   { path: '/inventory/warehouses', label: 'المخازن', reason: 'نفس شاشة المخازن والأصناف' },
   { path: '/inventory/items', label: 'الأصناف', reason: 'نفس شاشة المخازن والأصناف' },
+  { path: '/accounting/sale-returns', label: 'مرتجعات المبيعات', reason: 'تبويب داخل شاشة المبيعات، لا عنصر قائمة مستقل' },
+  { path: '/accounting/purchase-returns', label: 'مرتجعات المشتريات', reason: 'تبويب داخل شاشة المشتريات، لا عنصر قائمة مستقل' },
 ];
 
 /** Routes that exist outside the shell, so the sidebar never draws them. */

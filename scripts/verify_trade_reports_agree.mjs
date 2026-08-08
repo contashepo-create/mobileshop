@@ -228,5 +228,35 @@ console.log('\n[7] A machine sale: the fee is charged once, not twice');
     `difference ${fp?.capital?.difference}`);
 }
 
+// ---------------------------------------------------------------- 8
+console.log('\n[8] A machine sale where the CUSTOMER pays the fee');
+{
+  seed(OPENING);
+  // Items 250 + fee 5 the customer hands over = invoice 255. The provider
+  // keeps the 5, so the wallet receives 250 and revenue books 250.
+  await sale({ PaymentMethod: 'card', PaidAmount: 255, CashAccountID: undefined,
+    PaymentMethodID: 1, TransferCost: 5, TransferCostBearer: 'customer' });
+  const pl = await call('reports:profitLoss', {});
+  const fp = await call('reports:financialPosition');
+  const wallet = currentDb().prepare('SELECT Balance v FROM payment_methods WHERE PaymentMethodID=1').get().v;
+
+  t('the invoice total includes the fee the customer pays',
+    near(currentDb().prepare('SELECT TotalAmount v FROM sales ORDER BY SaleID DESC LIMIT 1').get().v, 255),
+    'invoice 255 (items + customer fee)');
+  t('the wallet received the amount net of the fee (255 - 5)',
+    near(wallet, 20000 + 250), `wallet ${r2(wallet)} (expected ${20000 + 250})`);
+  t('revenue books the items, not the fee',
+    near(pl?.revenue?.salesGross, 250), `salesGross ${r2(pl?.revenue?.salesGross)}`);
+  t('the customer-paid fee is NOT charged as an expense',
+    near(pl?.costs?.saleTransferCosts, 0), `fee charged ${r2(pl?.costs?.saleTransferCosts)}`);
+  t('profit is the full margin (150 - 0)',
+    near(pl?.grossProfit, 150), `profit ${r2(pl?.grossProfit)}`);
+  t('the balance sheet agrees',
+    near(fp?.capital?.netProfit, pl?.grossProfit),
+    `${r2(fp?.capital?.netProfit)} vs ${r2(pl?.grossProfit)}`);
+  t('the balance sheet balances', near(fp?.capital?.difference, 0),
+    `difference ${fp?.capital?.difference}`);
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

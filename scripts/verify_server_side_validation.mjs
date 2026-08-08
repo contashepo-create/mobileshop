@@ -179,7 +179,7 @@ console.log('── 2. maintenance:updateStatus — terminal states need their o
   const cashBefore = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = 1').get().Balance;
   const d = await call('maintenance:deliver', {
     TicketID: t.ticketId, CustomerID: 1, CustomerName: 'عميل الاختبار',
-    LaborCost: 800, AdditionalCosts: [], PaymentMethod: 'cash', PaidAmount: 800,
+    LaborCost: 800, PaymentMethod: 'cash', PaidAmount: 800,
     CashAccountID: 1, userId: 1, fiscalYearId: 1,
   });
   accepted('maintenance:deliver still bills the customer', d);

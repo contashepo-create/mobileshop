@@ -261,7 +261,7 @@ console.log('\n[2] MAINTENANCE -> STOCK -> CASH — the six-section flow');
 
   const delivered = await call('maintenance:deliver', {
     TicketID: tid, CustomerID: 1, CustomerName: 'Ahmed',
-    LaborCost: 200, AdditionalCosts: [],
+    LaborCost: 200,
     PaymentMethod: 'cash', PaidAmount: 400, CashAccountID: 1, fiscalYearId: 1, userId: 1,
   });
   t('the repair is delivered and charged', ok(delivered), why(delivered));
@@ -332,7 +332,7 @@ console.log('\n[2b] A part that is genuinely FREE must stay free');
     fiscalYearId: 1, userId: 1 });
   await call('maintenance:deliver', {
     TicketID: tk.ticketId, CustomerID: 1, CustomerName: 'A',
-    LaborCost: 50, AdditionalCosts: [], PaymentMethod: 'cash',
+    LaborCost: 50, PaymentMethod: 'cash',
     PaidAmount: 50, CashAccountID: 1, fiscalYearId: 1, userId: 1 });
 
   const hdr = q1("SELECT Subtotal FROM sales WHERE Source='maintenance'");

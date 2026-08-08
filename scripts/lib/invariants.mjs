@@ -82,7 +82,13 @@ export function identity(db, opening) {
 
   // Profit realised so far: revenue less cost of what was sold, net of returns,
   // less any commission the shop absorbed.
-  const revenue = g(`SELECT COALESCE(SUM(TotalAmount),0) v FROM sales
+  //
+  // A fee the CUSTOMER pays is part of the invoice (`TotalAmount` includes it)
+  // but the provider keeps it, so counting `TotalAmount` verbatim would inflate
+  // profit by every passed-on fee. Net it out exactly as `reports:profitLoss`
+  // does for `salesGross`.
+  const revenue = g(`SELECT COALESCE(SUM(TotalAmount - CASE WHEN COALESCE(TransferCostBearer,'shop') = 'customer'
+                            THEN COALESCE(TransferCost,0) ELSE 0 END),0) v FROM sales
                      WHERE IsVoided=0 AND IsWarranty=0 AND COALESCE(Source,'direct')<>'maintenance'`);
   const salesReturned = g(`SELECT COALESCE(SUM(r.TotalAmount),0) v FROM sale_returns r
                            JOIN sales s ON r.SaleID=s.SaleID WHERE s.IsVoided=0`);
@@ -235,14 +241,17 @@ export function invoiceLinesMatchHeader(db) {
     : null;
 }
 
-/** Total = Subtotal - Discount + Tax, always. */
+/** Total = Subtotal - Discount + Tax, plus a customer-paid fee (which the
+ * customer hands over as part of the invoice and the provider keeps). */
 export function invoiceArithmetic(db) {
   const bad = db.prepare(`
-    SELECT SaleNumber, Subtotal, Discount, TaxAmount, TotalAmount FROM sales
+    SELECT SaleNumber, Subtotal, Discount, TaxAmount, TotalAmount,
+           TransferCost, TransferCostBearer FROM sales
   `).all().filter(r =>
-    Math.abs((r.Subtotal - r.Discount + r.TaxAmount) - r.TotalAmount) > 0.011);
+    Math.abs((r.Subtotal - r.Discount + r.TaxAmount +
+      (r.TransferCostBearer === 'customer' ? (r.TransferCost || 0) : 0)) - r.TotalAmount) > 0.011);
   return bad.length
-    ? `invoice total does not equal subtotal - discount + tax: ` +
+    ? `invoice total does not equal subtotal - discount + tax (+ customer fee): ` +
       bad.map(b => b.SaleNumber).join(', ')
     : null;
 }

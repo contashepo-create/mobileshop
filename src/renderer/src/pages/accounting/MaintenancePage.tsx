@@ -67,7 +67,7 @@ export function MaintenancePage() {
 
   // Delivery
   const [showDeliver, setShowDeliver] = useState(false);
-  const [deliverForm, setDeliverForm] = useState({ LaborCost: '', AdditionalCosts: '', PaidAmount: '', CashAccountID: '', PaymentMethodID: '', Discount: '', FinalPrice: '', FinalNotes: '' });
+  const [deliverForm, setDeliverForm] = useState({ LaborCost: '', PaidAmount: '', CashAccountID: '', PaymentMethodID: '', Discount: '', FinalPrice: '', FinalNotes: '' });
 
   // Cancel
   const [showCancel, setShowCancel] = useState(false);
@@ -276,7 +276,6 @@ export function MaintenancePage() {
     const t = wbData?.ticket;
     setDeliverForm({
       LaborCost: t?.AgreedCost?.toString() || '',
-      AdditionalCosts: '',
       PaidAmount: finSummary?.totalPriceToClient?.toFixed(2) || '',
       CashAccountID: '', PaymentMethodID: '', Discount: '', FinalPrice: '',
       FinalNotes: '',
@@ -305,20 +304,12 @@ export function MaintenancePage() {
     const activeFy = await window.api.invoke('fiscalYear:getActive');
     if (!activeFy) { showToast('error', 'لا توجد سنة مالية مفتوحة'); return; }
 
-    const additionalCosts = deliverForm.AdditionalCosts
-      ? deliverForm.AdditionalCosts.split('\n').filter(l => l.trim()).map(line => {
-          const [desc, amount] = line.split('|');
-          return { Description: desc?.trim() || 'تكلفة إضافية', Amount: parseFloat(amount?.trim() || '0') || 0 };
-        })
-      : [];
-
     const result = await window.api.invoke('maintenance:deliver', {
       TicketID: workbenchTicketId,
       CustomerID: effectiveCustomerId,
       CustomerName: wbData?.ticket?.CustomerName,
       CustomerPhone: wbData?.ticket?.CustomerPhone,
       LaborCost: parseFloat(deliverForm.LaborCost) || 0,
-      AdditionalCosts: additionalCosts,
       PaymentMethod: paidAmount > 0 ? 'cash' : 'credit',
       PaidAmount: paidAmount,
       CashAccountID: deliverForm.CashAccountID ? parseInt(deliverForm.CashAccountID) : undefined,
@@ -426,12 +417,9 @@ export function MaintenancePage() {
   const usageCostOnUs = wbData?.serviceUsage?.reduce((s: number, u: any) => s + ((u.CostOnUs || 0) * (u.Quantity || 1)), 0) || 0;
   const usagePrice = wbData?.serviceUsage?.reduce((s: number, u: any) => s + ((u.PriceToClient || 0) * (u.Quantity || 1)), 0) || 0;
   const laborCost = parseFloat(deliverForm.LaborCost) || 0;
-  const additionalTotal = (deliverForm.AdditionalCosts?.split('\n').filter(l => l.trim()).reduce((s: number, l: string) => {
-    return s + (parseFloat(l.split('|')[1]?.trim() || '0') || 0);
-  }, 0)) || 0;
   const deliveryDiscount = parseFloat(deliverForm.Discount) || 0;
   const deliveryPartsTotal = partsSalePrice;
-  const deliveryTotal = deliveryPartsTotal + servicesPrice + usagePrice + laborCost + additionalTotal;
+  const deliveryTotal = deliveryPartsTotal + servicesPrice + usagePrice + laborCost;
   const deliveryFinalPrice = parseFloat(deliverForm.FinalPrice) || (deliveryTotal - deliveryDiscount);
   const totalCostOnUs = partsCostOnUs + servicesCostOnUs + usageCostOnUs;
   const expectedProfit = deliveryFinalPrice - totalCostOnUs;
@@ -793,7 +781,6 @@ export function MaintenancePage() {
               <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">قطع الغيار:</span><span className="font-bold text-slate-700 dark:text-slate-200">{deliveryPartsTotal.toFixed(2)}</span></div>
               <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">الخدمات:</span><span className="font-bold text-slate-700 dark:text-slate-200">{(servicesPrice + usagePrice).toFixed(2)}</span></div>
               <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">المصنعية:</span><span className="font-bold text-slate-700 dark:text-slate-200">{laborCost.toFixed(2)}</span></div>
-              {additionalTotal > 0 && <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">تكاليف إضافية:</span><span className="font-bold text-orange-600">{additionalTotal.toFixed(2)}</span></div>}
               <div className="flex justify-between text-sm font-bold border-t border-slate-200 dark:border-slate-700 pt-2">
                 <span className="text-slate-800 dark:text-white">الإجمالي:</span><span className="text-primary-600">{deliveryTotal.toFixed(2)}</span>
               </div>
@@ -812,7 +799,6 @@ export function MaintenancePage() {
               <Input label="السعر النهائي" type="number" value={deliverForm.FinalPrice} onChange={(e: any) => setDeliverForm({...deliverForm, FinalPrice: e.target.value})} hint={`تلقائي: ${(deliveryTotal - deliveryDiscount).toFixed(2)}`} />
             </div>
 
-            <Textarea label="تكاليف إضافية (وصف|مبلغ في كل سطر)" value={deliverForm.AdditionalCosts} onChange={(e: any) => setDeliverForm({...deliverForm, AdditionalCosts: e.target.value})} rows={2} placeholder={'مثال:\nشحن|20.00\nمواصلات|10.00'} />
             <Textarea label="ملاحظات الفاتورة (تظهر للعميل)" value={deliverForm.FinalNotes} onChange={(e: any) => setDeliverForm({...deliverForm, FinalNotes: e.target.value})} rows={2} placeholder="ملاحظات إضافية على الفاتورة..." />
 
             <Input label="المبلغ المحصّل من العميل" type="number" value={deliverForm.PaidAmount} onChange={(e: any) => setDeliverForm({...deliverForm, PaidAmount: e.target.value})} />

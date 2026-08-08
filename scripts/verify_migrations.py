@@ -150,8 +150,84 @@ def test_extra_column_safe():
     db.close()
 
 
+FOLD_LEGACY_FEE = """
+UPDATE sales SET
+  TotalAmount = ROUND(TotalAmount + COALESCE(TransferCost,0), 2),
+  PaidAmount  = ROUND(PaidAmount  + COALESCE(TransferCost,0), 2)
+WHERE IsVoided = 0
+  AND COALESCE(Source,'direct') <> 'maintenance'
+  AND COALESCE(TransferCost,0) > 0
+  AND COALESCE(TransferCostBearer,'shop') = 'customer'
+  AND ABS(TotalAmount - (Subtotal - COALESCE(Discount,0) + COALESCE(TaxAmount,0))) < 0.01
+"""
+
+
+def test_fold_legacy_customer_fee():
+    print("\n[5] Fold legacy customer-paid fee into TotalAmount/PaidAmount once")
+    db = sqlite3.connect(':memory:')
+    db.isolation_level = None
+    db.executescript("""
+      CREATE TABLE sales(
+        SaleID INTEGER PRIMARY KEY, SaleNumber TEXT, Date TEXT,
+        TotalAmount REAL, PaidAmount REAL, RemainingAmount REAL,
+        Subtotal REAL, Discount REAL, TaxAmount REAL,
+        IsVoided INTEGER DEFAULT 0, IsWarranty INTEGER DEFAULT 0,
+        Source TEXT, TransferCost REAL, TransferCostBearer TEXT DEFAULT 'shop',
+        CashAccountID INTEGER, Status TEXT);
+    """)
+    # 1: legacy customer-paid fee, invoice did NOT include it -> must fold.
+    db.execute("""INSERT INTO sales(SaleID,TotalAmount,PaidAmount,RemainingAmount,Subtotal,Discount,TaxAmount,
+                  TransferCost,TransferCostBearer,Status)
+                  VALUES(1,250,250,0,250,0,0,5,'customer','paid')""")
+    # 2) shop-paid fee, never folded -> must stay untouched.
+    db.execute("""INSERT INTO sales(SaleID,TotalAmount,PaidAmount,RemainingAmount,Subtotal,Discount,TaxAmount,
+                  TransferCost,TransferCostBearer,Status)
+              VALUES(2,250,250,0,250,0,0,5,'shop','paid')""")
+    # 3) legacy customer paid on a partial-payment invoice -> both sides move, remainder intact.
+    db.execute("""INSERT INTO sales(SaleID,TotalAmount,PaidAmount,RemainingAmount,Subtotal,Discount,TaxAmount,
+                  TransferCost,TransferCostBearer,Status)
+              VALUES(3,100,40,60,100,0,0,3,'customer','partial')""")
+    # 4) maintenance source -> excluded, even if customer bearer.
+    db.execute("""INSERT INTO sales(SaleID,TotalAmount,PaidAmount,RemainingAmount,Subtotal,Discount,TaxAmount,
+                  TransferCost,TransferCostBearer,Source,Status)
+              VALUES(4,250,250,0,250,0,0,5,'customer','maintenance','paid')""")
+    # 5) voided legacy customer row -> excluded.
+    db.execute("""INSERT INTO sales(SaleID,TotalAmount,PaidAmount,RemainingAmount,Subtotal,Discount,TaxAmount,
+                  TransferCost,TransferCostBearer,IsVoided,Status)
+              VALUES(5,250,250,0,250,0,0,5,'customer',1,'voided')""")
+    # 6) already-folded row (TotalAmount already != items sum) -> untouched.
+    db.execute("""INSERT INTO sales(SaleID,TotalAmount,PaidAmount,RemainingAmount,Subtotal,Discount,TaxAmount,
+                  TransferCost,TransferCostBearer,Status)
+              VALUES(6,255,255,0,250,0,0,5,'customer','paid')""")
+
+    first = db.execute(FOLD_LEGACY_FEE)
+    check("exactly the two legacy customer rows folded", first.rowcount == 2, f"changed={first.rowcount}")
+    row1 = db.execute("SELECT TotalAmount,PaidAmount,RemainingAmount FROM sales WHERE SaleID=1").fetchone()
+    check("legacy customer-paid invoice includes the fee (250 -> 255)",
+          row1 == (255.0, 255.0, 0.0), str(row1))
+    row3 = db.execute("SELECT TotalAmount,PaidAmount,RemainingAmount FROM sales WHERE SaleID=3").fetchone()
+    check("partial folds both sides, remainder unchanged (100,40 -> 103,43, rem 60)",
+          row3 == (103.0, 43.0, 60.0), str(row3))
+    # 2,4,5 must not move; 6 (already folded) must keep its 255/255 restated total.
+    row2 = db.execute("SELECT TotalAmount,PaidAmount FROM sales WHERE SaleID=2").fetchone()
+    row4 = db.execute("SELECT TotalAmount,PaidAmount FROM sales WHERE SaleID=4").fetchone()
+    row5 = db.execute("SELECT TotalAmount,PaidAmount FROM sales WHERE SaleID=5").fetchone()
+    row6 = db.execute("SELECT TotalAmount,PaidAmount FROM sales WHERE SaleID=6").fetchone()
+    check("shop/maintenance/voided rows untouched", (row2, row4, row5) == ((250.0, 250.0),) * 3,
+          f"{row2} {row4} {row5}")
+    check("already-folded row keeps its restated total", row6 == (255.0, 255.0), str(row6))
+    # Idempotency: second run must be a no-op.
+    second = db.execute(FOLD_LEGACY_FEE).rowcount
+    check("re-running the fold is a no-op", second == 0, f"second run changed {second} rows")
+    # Remainder invariant across the whole table.
+    for r in db.execute("SELECT SaleID,TotalAmount,PaidAmount,RemainingAmount FROM sales"):
+        check(f"row {r[0]} keeps TotalAmount - PaidAmount == RemainingAmount",
+              abs((r[1] - r[2]) - r[3]) < 0.005, str(r))
+    db.close()
+
+
 def test_full_schema_repeatable():
-    print("\n[5] Full runMigrations is repeatable and leaves no orphan tables")
+    print("\n[6] Full runMigrations is repeatable and leaves no orphan tables")
     ts = open(os.path.join(ROOT, 'src/main/database/migrations/index.ts'), encoding='utf-8').read()
     blocks = parse_blocks(ts)
     db = sqlite3.connect(':memory:')
@@ -191,6 +267,7 @@ def main():
     test_service_line_storable()
     test_idempotent()
     test_extra_column_safe()
+    test_fold_legacy_customer_fee()
     test_full_schema_repeatable()
     print("\n" + "=" * 70)
     print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")

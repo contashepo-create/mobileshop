@@ -316,8 +316,8 @@ console.log('\n[3] The default layout is the one asked for — and it DRAWS');
     menu.filter((x) => x.children).map((x) => [x.label, x.children.map((c) => c.path)]),
   );
   const expect = {
-    'المبيعات': ['/accounting/sales', '/accounting/services', '/accounting/maintenance', '/accounting/sale-returns'],
-    'المشتريات': ['/accounting/purchases', '/accounting/purchase-returns'],
+    'المبيعات': ['/accounting/sales', '/accounting/services', '/accounting/maintenance'],
+    'المشتريات': ['/accounting/purchases'],
     'السندات والرواتب والإيجارات': ['/accounting/vouchers-receipt', '/accounting/vouchers-payment',
       '/accounting/payroll', '/accounting/rents', '/accounting/rent-parties'],
     'السنة المالية والأرصدة الافتتاحية': ['/accounting/fiscal-year', '/accounting/opening-balances'],
@@ -401,8 +401,8 @@ console.log('\n[4] A saved layout is upgraded and COMPLETED, never truncated');
   t('an upgrading shop loses NOTHING', lost.length === 0, lost.join(', '));
 
   // ...including screens that did not exist when it saved its layout.
-  for (const p of ['/accounting/sale-returns', '/accounting/purchase-returns',
-    '/accounting/vouchers-receipt', '/accounting/vouchers-payment', '/accounting/rent-parties']) {
+  for (const p of ['/accounting/vouchers-receipt', '/accounting/vouchers-payment',
+    '/accounting/rent-parties']) {
     t(`the new screen ${p} arrives`, shown.has(p));
   }
 
@@ -451,7 +451,7 @@ console.log('\n[4] A saved layout is upgraded and COMPLETED, never truncated');
     oc.childrenOrder['المبيعات'].slice(0, 2).join(',') === '/accounting/maintenance,/accounting/sales',
     oc.childrenOrder['المبيعات'].join(','));
   t('a screen added later is appended, not inserted over the shop',
-    oc.childrenOrder['المبيعات'].includes('/accounting/sale-returns'));
+    oc.childrenOrder['المبيعات'].includes('/accounting/services'));
   t('a rename by the shop survives', oc.customLabels['المبيعات'] === 'البيع');
   const od = own.buildOrderedMenu(oc);
   t('and the renamed section still draws', od.menu.some((x) => x.label === 'المبيعات'));
@@ -642,7 +642,7 @@ console.log('\n[7] The shop can still arrange it however it likes');
     afterOrder[1] === before[2] && afterOrder[2] === before[1], afterOrder.slice(0, 4).join(' | '));
 
   st.getState().updateChildrenOrder('المبيعات',
-    ['/accounting/maintenance', '/accounting/sales', '/accounting/services', '/accounting/sale-returns']);
+    ['/accounting/maintenance', '/accounting/sales', '/accounting/services']);
   const kids = m.buildOrderedMenu(st.getState().config).menu
     .find((x) => x.label === 'المبيعات').children.map((c) => c.path);
   t('screens can be reordered inside a section', kids[0] === '/accounting/maintenance', kids.join(','));

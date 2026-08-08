@@ -267,6 +267,31 @@ async function ensureSchema(env) {
       is_published INTEGER NOT NULL DEFAULT 1,
       PRIMARY KEY (platform, version)
     )`),
+    // Fast code-only releases. The client swaps its `app.asar` (a few MB) from
+    // this feed instead of running a new NSIS installer:
+    //
+    //   version          the code push's own version (compared by semver)
+    //   asar_url         relative path served by this Worker, e.g.
+    //                    /code/win32-x64/1.0.5/MobileShopERP-1.0.5.asar
+    //   sha256           of the .asar; the client refuses anything that does
+    //                    not match, so a tampered object is never executed
+    //   size             bytes, cross-checked against the downloaded file
+    //   min_app_version  the minimum FULL build (shell + native modules) a
+    //                    machine must be on before this code may run — a code
+    //                    change that needs a newer better-sqlite3 must not be
+    //                    applied on top of an old shell.
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS code_releases (
+      platform        TEXT NOT NULL,
+      version         TEXT NOT NULL,
+      asar_url        TEXT NOT NULL,
+      sha256          TEXT NOT NULL,
+      size            INTEGER NOT NULL,
+      min_app_version TEXT NOT NULL,
+      notes           TEXT,
+      published_at    TEXT,
+      is_published    INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (platform, version)
+    )`),
   ]);
   // The `releases` table gained a `sha512` column (for NSIS differential
   // updates) after the very first deploy, which created the table without it.
@@ -737,6 +762,219 @@ async function mayReceiveUpdates(env, deviceId) {
  * a quiet "nothing to do".
  */
 const noUpdate = () => new Response(null, { status: 204 });
+
+// ---------------------------------------------------------------- code push
+//
+// The "fast lane": a pure code change ships as a replacement `app.asar` (a few
+// MB) rather than a full NSIS installer. The client swaps its asar over this
+// feed; the shell, native modules and installer never change.
+//
+// Route shapes (all client-keyed, same gating as the NSIS feed):
+//
+//   GET /code-update/<platform>/<from>/manifest.json
+//        204                nothing newer worth a swap
+//        200  {"version", "asar_url", "sha256", "size", "min_app_version", "notes"}
+//
+//   GET /code/<platform>/<version>.asar
+//        the code object itself, straight out of R2 (`code/<platform>/<v>.asar`)
+//
+//   POST /release-code      { platform, version, sha256, size, min_app_version, notes }
+//        admin-keyed; registers a published code release so `code-update` may
+//        start serving it.
+//
+// `min_app_version` is the drawer against accidental shell/code mismatch: the
+// publish tool refuses to ship a code bundle whose required shell is newer
+// than the currently-published NSIS build, and the client refuses to apply one
+// whose `min_app_version` its own build does not satisfy. The field is stored
+// here and echoed back verbatim so both sides validate against the SAME bytes.
+
+/** The newest published code release for a platform, or null. */
+async function currentCodeRelease(env, platform) {
+  const row = await env.DB.prepare(
+    `SELECT version, asar_url, sha256, size, min_app_version, notes, published_at
+       FROM code_releases WHERE platform = ? AND is_published = 1
+      ORDER BY published_at DESC LIMIT 1`,
+  ).bind(platform).first();
+  return row || null;
+}
+
+/**
+ * `GET /code-update/<platform>/<from>/manifest.json`
+ *
+ * Mirrors the NSIS manifest contract: 204 when the caller is already current,
+ * otherwise a small JSON describing the single .asar to fetch. `asar` is a path
+ * relative to this Worker so the client builds the URL itself and never trusts
+ * a full URL embedded in the manifest.
+ */
+async function handleCodeManifest(request, env, url) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return new Response('unauthorised', { status: 401 });
+  }
+  if (!env.UPDATES) return new Response('no storage configured', { status: 503 });
+
+  const parts = url.pathname.split('/').filter(Boolean);
+  const platform = parts[1] || '';      // /code-update/win32-x64/<from>/manifest.json
+  const from = parts[2] || '0.0.0';
+  const deviceId = String(url.searchParams.get('device') || '').trim().toLowerCase();
+
+  if (!/^(win32|darwin|linux)-(x64|arm64|ia32)$/.test(platform)) {
+    return json({ ok: false, error: 'bad platform' }, 400);
+  }
+
+  if (!await mayReceiveUpdates(env, deviceId)) return noUpdate();
+
+  const rel = await currentCodeRelease(env, platform);
+  // Nothing published, or the shop already has this exact code.
+  if (!rel || compareVersions(rel.version, from) <= 0) return noUpdate();
+
+  return jsonResponse({
+    version: rel.version,
+    asar: `/code/${platform}/${rel.version}.asar`,
+    sha256: rel.sha256,
+    size: rel.size,
+    min_app_version: rel.min_app_version,
+    notes: rel.notes || '',
+    published_at: rel.published_at || '',
+  });
+}
+
+/**
+ * `GET /code/<platform>/<version>.asar`
+ *
+ * The code object from R2. Both path segments are attacker-controlled and are
+ * concatenated into the object key, so both are locked down exactly like the
+ * .nupkg handler. Range is honoured so a dropped connection resumes instead of
+ * re-downloading the whole object.
+ */
+async function handleCodeFile(request, env, url) {
+  if (!safeEqual(request.headers.get('X-Client-Key') || '', env.CLIENT_KEY || '')) {
+    return new Response('unauthorised', { status: 401 });
+  }
+  if (!env.UPDATES) return new Response('no storage configured', { status: 503 });
+
+  const parts = url.pathname.split('/').filter(Boolean);
+  const platform = parts[1] || '';      // /code/<platform>/<version>.asar
+  const asar = parts[parts.length - 1] || '';
+
+  if (!/^(win32|darwin|linux)-(x64|arm64|ia32)$/.test(platform)) {
+    return new Response('bad platform', { status: 400 });
+  }
+  if (!/^\d+\.\d+\.\d+\.asar$/.test(asar) || asar.includes('..')) {
+    return new Response('bad asar', { status: 400 });
+  }
+
+  const key = `code/${platform}/${asar}`;
+  const obj = await env.UPDATES.get(key);
+  if (!obj) return new Response('not found', { status: 404 });
+
+  const rangeHeader = request.headers.get('Range');
+  if (rangeHeader) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (m) {
+      const startRaw = m[1], endRaw = m[2];
+      const total = obj.size;
+      let start, end;
+      if (startRaw === '' && endRaw !== '') {
+        const n = Number(endRaw);
+        start = Math.max(total - n, 0);
+        end = total - 1;
+      } else if (startRaw !== '') {
+        start = Number(startRaw);
+        end = endRaw === '' ? total - 1 : Math.min(Number(endRaw), total - 1);
+      }
+      if (Number.isFinite(start) && Number.isFinite(end) && start <= end && start < total) {
+        const ranged = await env.UPDATES.get(key, { range: { offset: start, length: end - start + 1 } });
+        if (ranged) {
+          return new Response(ranged.body, {
+            status: 206,
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'Content-Length': String(end - start + 1),
+              'Content-Range': `bytes ${start}-${end}/${total}`,
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'public, max-age=31536000, immutable',
+            },
+          });
+        }
+      }
+    }
+  }
+
+  return new Response(obj.body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(obj.size),
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    },
+  });
+}
+
+/**
+ * `POST /release-code` — register a published code update. Admin only, exactly
+ * like `POST /release`: the developer uploads the .asar to R2 themselves and
+ * this endpoint only records the metadata (with checksums) once the file is in
+ * place, so a half-uploaded object is never advertised.
+ */
+async function handleReleaseCode(request, env) {
+  if (!safeEqual(request.headers.get('X-Admin-Key') || '', env.ADMIN_KEY || '')) {
+    return json({ ok: false, error: 'unauthorised' }, 401);
+  }
+  const b = await request.json().catch(() => null);
+  const platform = String(b?.platform || '').trim();
+  const version = String(b?.version || '').trim();
+  const sha256 = String(b?.sha256 || '').trim();
+  const size = Number(b?.size || 0);
+  const minApp = String(b?.min_app_version || '').trim();
+
+  if (!/^(win32|darwin|linux)-(x64|arm64|ia32)$/.test(platform)) {
+    return json({ ok: false, error: 'bad platform' }, 400);
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(version)) return json({ ok: false, error: 'bad version' }, 400);
+  if (!/^[a-fA-F0-9]{64}$/.test(sha256)) return json({ ok: false, error: 'bad sha256' }, 400);
+  if (!Number.isFinite(size) || size <= 0) return json({ ok: false, error: 'bad size' }, 400);
+  if (!minApp || !/^\d+\.\d+\.\d+$/.test(minApp)) {
+    return json({ ok: false, error: 'bad min_app_version' }, 400);
+  }
+
+  const asarUrl = `${platform}/${version}.asar`;
+
+  await env.DB.prepare(`
+    INSERT INTO code_releases (platform, version, asar_url, sha256, size, min_app_version, notes, published_at, is_published)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(platform, version) DO UPDATE SET
+      asar_url = excluded.asar_url, sha256 = excluded.sha256, size = excluded.size,
+      min_app_version = excluded.min_app_version, notes = excluded.notes,
+      published_at = excluded.published_at, is_published = excluded.is_published
+  `).bind(platform, version, asarUrl, sha256.toLowerCase(), size, minApp,
+    String(b?.notes || ''), new Date().toISOString(), b?.publish === false ? 0 : 1).run();
+
+  // The heartbeat mirrors `latest_version` into About; a code push is still a
+  // newer build for the shop, so advertise it. Guarded so a code version
+  // published before a full release is never treated as "the installed app".
+  const cur = await env.DB.prepare(
+    "SELECT value FROM remote_config WHERE key = 'latest_version' AND target = 'all'",
+  ).first();
+  const known = (cur?.value || '').trim();
+  if (!known || compareVersions(version, known) > 0) {
+    await env.DB.prepare(`
+      INSERT INTO remote_config (key, target, value, updated_at) VALUES ('latest_version', 'all', ?, ?)
+      ON CONFLICT(key, target) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).bind(version, new Date().toISOString()).run();
+  }
+
+  await tg(env, `⚡ <b>تحديث سريع (كود) منشور</b>\nالإصدار: <b>${version}</b>\nالمنصة: ${platform}\nيتطلب نسخة أساس: ${minApp}`);
+  return json({ ok: true, version, platform });
+}
+
+/** A shared tiny wrapper so the account handlers above can return json. */
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  });
+}
 
 /**
  * `GET /update/win32-x64/<version>/RELEASES` — the manifest Squirrel reads.
@@ -1571,6 +1809,7 @@ export default {
           case '/database-reset': return await handleDatabaseReset(request, env);
           case '/registration':   return await handleRegistration(request, env);
           case '/release':        return await handleRelease(request, env);
+          case '/release-code':   return await handleReleaseCode(request, env);
         }
       }
       if (request.method === 'GET' && url.pathname === '/devices') {
@@ -1604,6 +1843,17 @@ export default {
       if (request.method === 'GET' && url.pathname.startsWith('/download-nsis/')) {
         if (url.pathname.endsWith('.exe') || url.pathname.endsWith('.blockmap')) {
           return await handleDownloadNsis(request, env, url);
+        }
+      }
+      // Code push (fast lane): manifest + the swapped `app.asar`, R2-backed.
+      if (request.method === 'GET' && url.pathname.startsWith('/code-update/')) {
+        if (url.pathname.endsWith('/manifest.json')) {
+          return await handleCodeManifest(request, env, url);
+        }
+      }
+      if (request.method === 'GET' && url.pathname.startsWith('/code/')) {
+        if (url.pathname.endsWith('.asar')) {
+          return await handleCodeFile(request, env, url);
         }
       }
       if (url.pathname === '/health') return json({ ok: true });

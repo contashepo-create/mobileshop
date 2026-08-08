@@ -39,10 +39,7 @@ export function registerStatementHandlers() {
         const ticket: any = db.prepare(`
           SELECT TicketNumber, DeviceModel, DeviceIMEI, ProblemDesc FROM maintenance_tickets WHERE TicketID = ?
         `).get(delivery?.TicketID);
-        const additional = db.prepare(`
-          SELECT * FROM maintenance_additional_costs WHERE DeliveryID = ?
-        `).all(refId);
-        return { primary: { ...delivery, ...ticket }, items: additional, title: 'تسليم صيانة' };
+        return { primary: { ...delivery, ...ticket }, items: [], title: 'تسليم صيانة' };
       }
       case 'purchase': {
         const purchase = db.prepare(`
@@ -141,9 +138,14 @@ export function registerStatementHandlers() {
 
     // Sales (money coming IN) — exclude maintenance invoices; the delivery row
     // below already carries the cash movement for those.
+    // The InAmount is PAID MINUS the card/wallet commission. Whatever the
+    // invoice says, the account was credited net of the fee in both bearer
+    // cases, so a statement showing the gross would not reconcile with the
+    // balance it describes.
     const fSales = df('Date');
     const sales = q(`
-      SELECT Date, SaleNumber as RefNumber, CustomerName as Party, PaidAmount as InAmount,
+      SELECT Date, SaleNumber as RefNumber, CustomerName as Party,
+        (PaidAmount - COALESCE(TransferCost,0)) as InAmount,
         0 as OutAmount, 'sale' as OpType, 'فاتورة بيع' as OpLabel, SaleID as RefID
       FROM sales
       WHERE CashAccountID = ? AND PaidAmount > 0 AND IsVoided = 0
@@ -293,6 +295,184 @@ export function registerStatementHandlers() {
     return {
       success: true,
       account: { ...account, OpeningBalance: 0 },
+      operations,
+      totalIn: operations.reduce((s, o) => s + (o.InAmount || 0), 0),
+      totalOut: operations.reduce((s, o) => s + (o.OutAmount || 0), 0),
+      netChange: operations.reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0)
+    };
+  });
+
+  // Statement for a card machine / digital wallet — every movement that touched
+  // its balance, in one document, exactly as a cash account statement is.
+  //
+  // A wallet is settled net of the provider's fee: a sale credits it
+  // `PaidAmount - TransferCost` (a shop-borne fee is a cost, a customer-borne
+  // fee is inside the payment), and a return debits `TransferRefund` plus the
+  // fee again only when the SHOP absorbed it. Mirroring those two rules keeps
+  // the statement reconciling with the balance it describes.
+  ipcMain.handle('paymentMethod:statement', async (_event, methodId: number, filters?: { fromDate?: string; toDate?: string }) => {
+    const db = getDb();
+    const method = db.prepare('SELECT * FROM payment_methods WHERE PaymentMethodID = ?').get(methodId) as any;
+    if (!method) return { success: false, message: 'طريقة الدفع غير موجودة' };
+
+    const from = typeof filters?.fromDate === 'string' && filters.fromDate ? filters.fromDate : null;
+    const to = typeof filters?.toDate === 'string' && filters.toDate ? filters.toDate : null;
+    const df = (field: string) => {
+      const parts: string[] = [];
+      const vals: string[] = [];
+      if (from) { parts.push(`${field} >= ?`); vals.push(from); }
+      if (to) { parts.push(`${field} <= ?`); vals.push(to); }
+      return { sql: parts.length ? `AND ${parts.join(' AND ')}` : '', vals };
+    };
+
+    const operations: any[] = [];
+    const q = (sql: string, f: { sql: string; vals: string[] }) =>
+      db.prepare(sql).all(methodId, ...f.vals) as any[];
+
+    // Sales (money IN). Credited net of the fee in BOTH bearer cases — when the
+    // shop pays the fee it is a cost, when the customer pays it the fee arrived
+    // inside the payment and then left again to the provider. Either way the
+    // wallet balance only ACTUALLY rose by paid minus fee.
+    const fSales = df('Date');
+    const sales = q(`
+      SELECT Date, SaleNumber as RefNumber, COALESCE(CustomerName, c.Name, 'عميل نقدي') as Party,
+        (PaidAmount - COALESCE(TransferCost,0)) as InAmount,
+        0 as OutAmount, 'sale' as OpType, 'فاتورة بيع' as OpLabel, SaleID as RefID
+      FROM sales
+      LEFT JOIN customers c ON sales.CustomerID = c.CustomerID
+      WHERE PaymentMethodID = ? AND PaidAmount > 0 AND IsVoided = 0
+        AND COALESCE(Source,'direct') <> 'maintenance' ${fSales.sql}
+    `, fSales);
+
+    // Sale returns refunded through this machine (money OUT). MORE leaves than
+    // the customer receives when the shop absorbs the provider fee.
+    const fRets = df('r.Date');
+    const rets = q(`
+      SELECT r.Date, r.ReturnNumber as RefNumber, COALESCE(c.Name,'') as Party, 0 as InAmount,
+        (COALESCE(r.TransferRefund,0) + CASE WHEN COALESCE(r.TransferCostBearer,'shop') = 'shop'
+           THEN COALESCE(r.TransferCost,0) ELSE 0 END) as OutAmount,
+        'return' as OpType, 'مرتجع مبيعات' as OpLabel, r.ReturnID as RefID
+      FROM sale_returns r
+      JOIN sales s ON r.SaleID = s.SaleID
+      LEFT JOIN customers c ON s.CustomerID = c.CustomerID
+      WHERE r.PaymentMethodID = ? AND COALESCE(r.TransferRefund,0) > 0 ${fRets.sql}
+    `, fRets);
+
+    // Purchases paid from this machine (money OUT).
+    const fPur = df('p.Date');
+    const purchases = q(`
+      SELECT p.Date, p.PurchaseNumber as RefNumber, su.Name as Party, 0 as InAmount,
+        p.PaidAmount as OutAmount, 'purchase' as OpType, 'فاتورة شراء' as OpLabel, p.PurchaseID as RefID
+      FROM purchases p JOIN suppliers su ON p.SupplierID = su.SupplierID
+      WHERE p.PaymentSource = 'payment_method' AND p.PaymentSourceID = ? AND p.PaidAmount > 0 ${fPur.sql}
+    `, fPur);
+
+    // Purchase returns refunded to this machine (money IN) — the supplier hands
+    // money back into the wallet, net of a fee the SHOP absorbs.
+    const fPR = df('r.Date');
+    const purRets = q(`
+      SELECT r.Date, r.ReturnNumber as RefNumber, su.Name as Party,
+        (COALESCE(r.TransferRefund,0) - CASE WHEN COALESCE(r.TransferCostBearer,'shop') = 'shop'
+           THEN COALESCE(r.TransferCost,0) ELSE 0 END) as InAmount,
+        0 as OutAmount, 'purchase_return' as OpType, 'مرتجع مشتريات' as OpLabel, r.ReturnID as RefID
+      FROM purchase_returns r
+      JOIN purchases p ON r.PurchaseID = p.PurchaseID
+      JOIN suppliers su ON p.SupplierID = su.SupplierID
+      WHERE r.PaymentMethodID = ? AND COALESCE(r.TransferRefund,0) > 0 ${fPR.sql}
+    `, fPR);
+
+    // Service sales funded from this machine (money OUT): the principal pushed
+    // out to the target line plus the service and network costs.
+    const fSrv = df('Date');
+    const services = q(`
+      SELECT Date, ServiceNumber as RefNumber, COALESCE(CustomerName,'') as Party, 0 as InAmount,
+        (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) as OutAmount,
+        'service_sale' as OpType, COALESCE(ServiceType,'خدمة') as OpLabel, ServiceSaleID as RefID
+      FROM service_sales
+      WHERE PaymentMethodID = ? AND COALESCE(Amount,0) > 0 ${fSrv.sql}
+    `, fSrv);
+
+    // Vouchers (receipt = IN, payment = OUT)
+    const fVR = df('Date');
+    const vReceipts = q(`
+      SELECT Date, VoucherNumber as RefNumber, PartyName as Party, Amount as InAmount,
+        0 as OutAmount, 'voucher_receipt' as OpType, 'سند قبض' as OpLabel, VoucherID as RefID
+      FROM vouchers WHERE PaymentMethodID = ? AND VoucherType = 'receipt' AND Amount > 0 ${fVR.sql}
+    `, fVR);
+    const fVP = df('Date');
+    const vPayments = q(`
+      SELECT Date, VoucherNumber as RefNumber, PartyName as Party, 0 as InAmount,
+        Amount as OutAmount, 'voucher_payment' as OpType, 'سند صرف' as OpLabel, VoucherID as RefID
+      FROM vouchers WHERE PaymentMethodID = ? AND VoucherType = 'payment' AND Amount > 0 ${fVP.sql}
+    `, fVP);
+
+    // Maintenance deliveries paid through this machine (money IN)
+    const fMD = df('Date');
+    const maintDel = q(`
+      SELECT Date, DeliveryNumber as RefNumber, COALESCE(CustomerName,'') as Party, PaidAmount as InAmount,
+        0 as OutAmount, 'maintenance_delivery' as OpType, 'تسليم صيانة' as OpLabel, DeliveryID as RefID
+      FROM maintenance_deliveries WHERE PaymentMethodID = ? AND PaidAmount > 0 ${fMD.sql}
+    `, fMD);
+
+    // Maintenance returns refunded through the SAME machine the delivery was
+    // paid through (money OUT) — the refund follows the delivery's source.
+    const fMR = df('r.Date');
+    const maintRets = q(`
+      SELECT r.Date, r.ReturnNumber as RefNumber, COALESCE(d.CustomerName,'') as Party, 0 as InAmount,
+        r.TotalRefund as OutAmount, 'maintenance_return' as OpType, 'مرتجع صيانة' as OpLabel, r.ReturnID as RefID
+      FROM maintenance_returns r
+      JOIN maintenance_deliveries d ON r.DeliveryID = d.DeliveryID
+      WHERE d.PaymentMethodID = ? AND r.TotalRefund > 0 ${fMR.sql}
+    `, fMR);
+
+    // Rent payments (income = IN, expense = OUT)
+    const fRent = df('rp.PaidDate');
+    const rents = q(`
+      SELECT rp.PaidDate as Date, 'RNT-' || rp.RentPaymentID as RefNumber, r.RentName as Party,
+        CASE WHEN r.RentType = 'income' THEN rp.Amount ELSE 0 END as InAmount,
+        CASE WHEN r.RentType = 'expense' THEN rp.Amount ELSE 0 END as OutAmount,
+        'rent' as OpType, CASE WHEN r.RentType = 'income' THEN 'إيجار وارد' ELSE 'إيجار منصرف' END as OpLabel,
+        rp.RentPaymentID as RefID
+      FROM rent_payments rp JOIN rents r ON rp.RentID = r.RentID
+      WHERE rp.PaymentMethodID = ? AND rp.Status = 'paid' ${fRent.sql}
+    `, fRent);
+
+    // Asset transfers (IN = received, OUT = sent plus any separately-funded fee)
+    const fTIn = df('Date');
+    const transfersIn = q(`
+      SELECT Date, TransferNumber as RefNumber, '' as Party,
+        ReceivedAmount as InAmount, 0 as OutAmount,
+        'transfer_in' as OpType, 'تحويل وارد' as OpLabel, TransferID as RefID
+      FROM asset_transfers WHERE ToType = 'payment_method' AND ToID = ? ${fTIn.sql}
+    `, fTIn);
+    const fTOut = df('Date');
+    const transfersOut = q(`
+      SELECT Date, TransferNumber as RefNumber, '' as Party, 0 as InAmount,
+        (Amount + CASE WHEN TransferCostSource = 'separate' THEN TransferCost ELSE 0 END) as OutAmount,
+        'transfer' as OpType, 'تحويل صادر' as OpLabel, TransferID as RefID
+      FROM asset_transfers WHERE FromType = 'payment_method' AND FromID = ? ${fTOut.sql}
+    `, fTOut);
+
+    operations.push(
+      ...sales, ...rets, ...purchases, ...purRets, ...services,
+      ...vReceipts, ...vPayments, ...maintDel, ...maintRets, ...rents,
+      ...transfersIn, ...transfersOut
+    );
+
+    // Sort by date (NULL-safe)
+    operations.sort((a, b) => String(a.Date ?? '').localeCompare(String(b.Date ?? '')));
+
+    // Running balance — the wallet started where it did; every movement after
+    // that is visible here, so the closing figure reconciles with the balance.
+    let runningBalance = 0;
+    for (const op of operations) {
+      runningBalance += (op.InAmount || 0) - (op.OutAmount || 0);
+      op.Balance = runningBalance;
+    }
+
+    return {
+      success: true,
+      method: { ...method, OpeningBalance: 0 },
       operations,
       totalIn: operations.reduce((s, o) => s + (o.InAmount || 0), 0),
       totalOut: operations.reduce((s, o) => s + (o.OutAmount || 0), 0),

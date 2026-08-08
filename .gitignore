@@ -21,6 +21,9 @@ electron_out.txt
 __pycache__/
 *.pyc
 
+# Mutation-testing backups created/removed by verify_trade_mutation.mjs
+*.mutbak
+
 # Developer-only licensing material — must never be committed
 # Ed25519 PRIVATE licence key — the only thing that can mint a licence.
 # Committing it would undo the whole point of asymmetric signing.

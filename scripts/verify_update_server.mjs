@@ -74,10 +74,11 @@ console.log('\n[0] The client points at the private feed, not the public service
     !/github\.com\/[\w-]+\/[\w-]+\/releases/.test(up));
   t('the feed is built from the configured API base', /MOBILESHOP_API_BASE/.test(up));
   t('and it sends the client key', /'X-Client-Key': CLIENT_KEY/.test(up));
-  // Squirrel appends /RELEASES itself, so the feed must be a DIRECTORY. A
-  // trailing filename would make it fetch `.../1.0.0/RELEASES/RELEASES`.
-  t('the feed is a directory, as Squirrel requires',
-    /\/update\/win32-\$\{process\.arch\}\/\$\{app\.getVersion\(\)\}/.test(up));
+  // electron-updater (NSIS) appends /latest.yml itself, so the feed must still
+  // be a DIRECTORY. A trailing filename would make it fetch
+  // `.../${version}/latest.yml/latest.yml`.
+  t('the feed is a directory, as electron-updater requires',
+    /\/update-nsis\/win32-x64\/\$\{app\.getVersion\(\)\}/.test(up));
   t('an unconfigured build checks nowhere at all',
     /if \(!API_BASE \|\| !CLIENT_KEY\)/.test(up));
   t('the device id is sent so a lapsed licence can be held back',
@@ -192,7 +193,7 @@ const sha1 = createHash('sha1').update(pkg).digest('hex');
   const cases = [
     ['a malformed version', { version: 'abc', filename: 'x.nupkg', sha1: 'a'.repeat(40), size: 1 }],
     ['a traversing filename', { version: '1.0.2', filename: '../evil.nupkg', sha1: 'a'.repeat(40), size: 1 }],
-    ['a non-nupkg filename', { version: '1.0.2', filename: 'evil.exe', sha1: 'a'.repeat(40), size: 1 }],
+    ['a non-package filename', { version: '1.0.2', filename: 'evil.bat', sha1: 'a'.repeat(40), size: 1 }],
     ['a bad hash', { version: '1.0.2', filename: 'x.nupkg', sha1: 'nothex', size: 1 }],
     ['a zero size', { version: '1.0.2', filename: 'x.nupkg', sha1: 'a'.repeat(40), size: 0 }],
   ];
@@ -313,6 +314,87 @@ console.log('\n[8] The licensing API and the bot are unaffected');
     hj.config?.all?.latest_version === '1.0.10', JSON.stringify(hj.config?.all));
   t('an unknown path is still a 404', (await call('/nope')).status === 404);
   t('the telegram route is still registered', /case '\/telegram'/.test(raw('server/worker.js')));
+}
+
+// ------------------------------------------------------------------ 9
+console.log('\n[9] Fast lane (code push): manifest, object, gating, admin guard');
+{
+  const code = Buffer.from('FAKE-ASAR-BYTES'.repeat(1000));
+  const sha256 = createHash('sha256').update(code).digest('hex');
+
+  // Publishing requires the ADMIN key — the caller uploads the .asar to R2,
+  // then tells the Worker the metadata. Note the .asar exists BEFORE the
+  // metadata, so a half-uploaded object can never be advertised.
+  await R2.put('code/win32-x64/1.0.5.asar', code);
+  const bad = await call('/release-code', {
+    method: 'POST', headers: { 'X-Client-Key': CLIENT_KEY },
+    body: { version: '1.0.5' }, // wrong credential path
+  });
+  t('a code release needs the ADMIN key', bad.status === 401, 'got ' + bad.status);
+
+  const ok = await call('/release-code', {
+    method: 'POST', headers: { 'X-Admin-Key': ADMIN_KEY },
+    body: { platform: 'win32-x64', version: '1.0.5', sha256,
+      size: code.length, min_app_version: '1.0.4', notes: 'badge fix' },
+  });
+  t('a well-formed code release is accepted', ok.status === 200 && (await ok.json()).ok === true);
+
+  const relCases = [
+    ['a bad sha256', { version: '1.0.6', sha256: 'zz', size: 1, min_app_version: '1.0.4' }],
+    ['a zero size', { version: '1.0.6', sha256: 'a'.repeat(64), size: 0, min_app_version: '1.0.4' }],
+    ['a bad min_app_version', { version: '1.0.6', sha256: 'a'.repeat(64), size: 1, min_app_version: 'x.y' }],
+    ['a malformed version', { version: 'abc', sha256: 'a'.repeat(64), size: 1 }],
+  ];
+  for (const [name, body] of relCases) {
+    const r = await call('/release-code', { method: 'POST',
+      headers: { 'X-Admin-Key': ADMIN_KEY }, body: { platform: 'win32-x64', ...body } });
+    t(`/${name} is rejected`, r.status === 400, 'got ' + r.status);
+  }
+
+  const manifest = async (from) =>
+    call('/code-update/win32-x64/' + from + '/manifest.json',
+      { headers: { 'X-Client-Key': CLIENT_KEY } });
+
+  t('an up-to-date code client gets 204',
+    (await manifest('1.0.5')).status === 204);
+  t('a newer code client is never dragged backwards',
+    (await manifest('2.0.0')).status === 204);
+  const m = await manifest('1.0.4');
+  const mj = await m.json().catch(() => null);
+  t('an older client gets 200 with the manifest', m.status === 200 && !!mj,
+    'status ' + m.status);
+  t('the manifest names the exact asar, hash, size and min_app_version',
+    mj && mj.version === '1.0.5' && mj.asar === '/code/win32-x64/1.0.5.asar'
+      && mj.sha256 === sha256 && mj.size === code.length
+      && mj.min_app_version === '1.0.4');
+  t('the code manifest needs the key too',
+    (await call('/code-update/win32-x64/1.0.4/manifest.json')).status === 401);
+
+  const f = await call('/code/win32-x64/1.0.5.asar',
+    { headers: { 'X-Client-Key': CLIENT_KEY } });
+  t('the code object downloads', f.status === 200
+      && Buffer.from(await f.arrayBuffer()).equals(code));
+  t('a bad asar name is refused',
+    (await call('/code/win32-x64/../1.0.5.asar', { headers: { 'X-Client-Key': CLIENT_KEY } })).status === 400);
+  t('a missing version is a 404, not a crash',
+    (await call('/code/win32-x64/9.9.9.asar', { headers: { 'X-Client-Key': CLIENT_KEY } })).status === 404);
+
+  // Subscription gating: the code feed uses the SAME device rules as full.
+  const expired = await call('/code-update/win32-x64/1.0.4/manifest.json?device=expireddevice1234567890abcdef',
+    { headers: { 'X-Client-Key': CLIENT_KEY } });
+  t('an EXPIRED licence gets no code push', expired.status === 204);
+  await call('/release-code', { method: 'POST',
+    headers: { 'X-Admin-Key': ADMIN_KEY },
+    body: { platform: 'win32-x64', version: '1.0.6', sha256: 'b'.repeat(64),
+      size: code.length, min_app_version: '1.0.5' } });
+  // A code push older than the last full build must NOT overwrite the About
+  // screen's advertised version (the full 1.0.10 dominates).
+  const hb2 = await call('/heartbeat', { method: 'POST',
+    headers: { 'X-Client-Key': CLIENT_KEY },
+    body: { deviceId: 'activedevice1234567890abcdef0', appVersion: '1.0.10' } });
+  const hj2 = await hb2.json();
+  t('a code version older than the full build never hides the full build',
+    hj2.config?.all?.latest_version === '1.0.10', JSON.stringify(hj2.config?.all));
 }
 
 console.log('\n' + '='.repeat(72));

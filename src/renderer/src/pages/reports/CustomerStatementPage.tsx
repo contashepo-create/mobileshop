@@ -24,7 +24,7 @@ const fieldLabels: Record<string, Record<string, string>> = {
   maintenance_delivery: {
     DeliveryNumber: 'رقم التسليم', Date: 'التاريخ', CustomerName: 'العميل',
     TicketNumber: 'تذكرة الصيانة', DeviceModel: 'الجهاز',
-    PartsCost: 'تكلفة القطع', LaborCost: 'تكلفة الصيانة', AdditionalCosts: 'تكاليف إضافية',
+    PartsCost: 'تكلفة القطع', LaborCost: 'تكلفة الصيانة',
     TotalCost: 'الإجمالي', PaidAmount: 'المدفوع', RemainingAmount: 'المتبقي', PaymentMethod: 'طريقة الدفع',
   },
   purchase: {

@@ -276,8 +276,8 @@ def op_maintenance(db, parts_cost, labor, charge, paid, mtype='normal', wh=2, it
     rem = charge - paid
     dnum = seq(db, 'maintenance_deliveries', 'DeliveryNumber', 'DLV', d)
     db.execute("""INSERT INTO maintenance_deliveries(DeliveryNumber,TicketID,Date,CustomerID,CustomerName,
-        PartsCost,LaborCost,AdditionalCosts,TotalCost,PaidAmount,RemainingAmount,PaymentMethod,CashAccountID,
-        UserID,ServiceCostTotal,TotalCostOnUs,TotalProfit) VALUES(?,?,?,1,'Ahmed',?,?,0,?,?,?,'cash',1,1,0,?,?)""",
+        PartsCost,LaborCost,TotalCost,PaidAmount,RemainingAmount,PaymentMethod,CashAccountID,
+        UserID,ServiceCostTotal,TotalCostOnUs,TotalProfit) VALUES(?,?,?,1,'Ahmed',?,?,?,?,?,'cash',1,1,0,?,?)""",
         (dnum, tid, d, parts_cost, labor, charge, paid, rem, parts_cost, charge - parts_cost))
     did = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     snum = seq(db, 'sales', 'SaleNumber', 'INV', d)

@@ -80,11 +80,13 @@ function postFromDocuments(db) {
   const add = (m, k, v) => { if (k != null) m.set(k, (m.get(k) || 0) + v); };
 
   // --- SALES. The customer is charged the invoice total; whatever they paid
-  //     arrives in the drawer or the machine, net of any fee the shop absorbed.
+  //     arrived in the drawer or the machine, net of the fee — whoever took it.
+  //     A customer-paid fee rides inside the payment and goes out to the
+  //     provider; a shop-paid fee is carved off before the money is credited.
+  //     Same net figure either way, exactly what the handler books.
   for (const s of all(`SELECT * FROM sales WHERE IsVoided = 0`)) {
     const paid = s.PaidAmount || 0;
-    const shopFee = (s.TransferCostBearer ?? 'shop') === 'shop' ? (s.TransferCost || 0) : 0;
-    const received = paid - shopFee;
+    const received = paid - (s.TransferCost || 0);
     if (s.PaymentMethodID) wallet += received;
     else if (s.CashAccountID) cash += received;
     add(cust, s.CustomerID, (s.TotalAmount || 0) - paid);

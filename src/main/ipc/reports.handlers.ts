@@ -28,10 +28,16 @@ export function registerReportsHandlers() {
     const REAL_SALES = "IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance'";
 
     const todayInvoiced = db.prepare(
-      `SELECT COALESCE(SUM(TotalAmount),0) as total FROM sales WHERE Date = ? AND ${REAL_SALES}`,
+      `SELECT COALESCE(SUM(TotalAmount - CASE WHEN COALESCE(TransferCostBearer,'shop') = 'customer'
+          THEN COALESCE(TransferCost,0) ELSE 0 END),0) as total
+       FROM sales WHERE Date = ? AND ${REAL_SALES}`,
     ).get(today) as any;
+    // What actually landed in the account, whether the fee was the shop's or
+    // the customer's. A customer-paid fee is inside PaidAmount but went to the
+    // provider — and a shop-paid fee came out of the receipt — so the money
+    // received is always PaidAmount minus the fee.
     const todayCollected = db.prepare(
-      `SELECT COALESCE(SUM(PaidAmount),0) as total FROM sales WHERE Date = ? AND ${REAL_SALES}`,
+      `SELECT COALESCE(SUM(PaidAmount - COALESCE(TransferCost,0)),0) as total FROM sales WHERE Date = ? AND ${REAL_SALES}`,
     ).get(today) as any;
 
     const pendingMaintenance = db.prepare("SELECT COUNT(*) as count FROM maintenance_tickets WHERE Status NOT IN ('delivered','cancelled','returned')").get() as any;
@@ -306,7 +312,19 @@ export function registerReportsHandlers() {
     // 'maintenance') so the customer gets a printable invoice. That same money
     // is reported below as `maintenanceRevenue`, so those rows MUST be excluded
     // here or every maintenance job is counted as revenue twice.
-    const salesGross = db.prepare(`SELECT COALESCE(SUM(TotalAmount),0) as total FROM sales WHERE IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance' ${dateFilter}`).get(...params) as any;
+    // Revenue is the INVOICE total net of any fee the CUSTOMER paid. A fee the
+    // shop passes on is folded into TotalAmount (the invoice shows it, the
+    // customer hands it over) but the provider keeps it, so counting it as
+    // income would inflate profit by every passed-on fee. Fees the SHOP absorbs
+    // are never in TotalAmount and are charged separately in `saleTransferCost`
+    // below. Netting only the customer-borne share keeps both bearer cases on
+    // the same footing: the shop books the items either way.
+    const salesGross = db.prepare(`
+      SELECT COALESCE(SUM(TotalAmount - CASE WHEN COALESCE(TransferCostBearer,'shop') = 'customer'
+             THEN COALESCE(TransferCost,0) ELSE 0 END),0) as total
+      FROM sales WHERE IsVoided = 0 AND IsWarranty = 0
+        AND COALESCE(Source,'direct') <> 'maintenance' ${dateFilter}
+    `).get(...params) as any;
     const salesReturns = db.prepare(`
       SELECT COALESCE(SUM(r.TotalAmount),0) as total
       FROM sale_returns r
@@ -661,7 +679,15 @@ export function registerReportsHandlers() {
     // Net profit - using SAME methodology as P&L (all-time, exclude voided/warranty)
     // Maintenance-sourced sales rows are excluded (counted via maintenance_deliveries),
     // and service revenue is net of the pass-through principal — mirroring reports:profitLoss.
-    const salesRevenue = db.prepare("SELECT COALESCE(SUM(TotalAmount),0) as total FROM sales WHERE IsVoided = 0 AND IsWarranty = 0 AND COALESCE(Source,'direct') <> 'maintenance'").get() as any;
+    // Net of any fee the customer paid, mirroring `reports:profitLoss` — see
+    // the note on `salesGross` there. Both reports must net the same figure or
+    // they diverge by every passed-on fee.
+    const salesRevenue = db.prepare(`
+      SELECT COALESCE(SUM(TotalAmount - CASE WHEN COALESCE(TransferCostBearer,'shop') = 'customer'
+             THEN COALESCE(TransferCost,0) ELSE 0 END),0) as total
+      FROM sales WHERE IsVoided = 0 AND IsWarranty = 0
+        AND COALESCE(Source,'direct') <> 'maintenance'
+    `).get() as any;
     const salesReturns = db.prepare('SELECT COALESCE(SUM(r.TotalAmount),0) as total FROM sale_returns r JOIN sales s ON r.SaleID = s.SaleID WHERE s.IsVoided = 0').get() as any;
     const maintenanceRevenue = db.prepare('SELECT COALESCE(SUM(TotalCost),0) as total FROM maintenance_deliveries WHERE VoidedSaleID IS NULL').get() as any;
     const maintenanceReturns = db.prepare('SELECT COALESCE(SUM(TotalRefund),0) as total FROM maintenance_returns').get() as any;

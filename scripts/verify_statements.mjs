@@ -194,10 +194,12 @@ console.log('\n[6] Statements refuse to invent a party that does not exist');
   const b = await call('supplierStatement:get', 9999, {});
   const c = await call('employeeStatement:get', 9999);
   const d = await call('cashAccount:statement', 9999, {});
+  const e = await call('paymentMethod:statement', 9999, {});
   t('an unknown customer is refused, not shown as zero', a?.success === false, JSON.stringify(a).slice(0, 70));
   t('an unknown supplier is refused', b?.success === false, JSON.stringify(b).slice(0, 70));
   t('an unknown employee is refused', c?.success === false, JSON.stringify(c).slice(0, 70));
   t('an unknown cash account is refused', d?.success === false, JSON.stringify(d).slice(0, 70));
+  t('an unknown payment method is refused', e?.success === false, JSON.stringify(e).slice(0, 70));
 }
 
 // ---------------------------------------------------------------- 7
@@ -230,6 +232,66 @@ console.log('\n[8] The employee statement agrees with what the employee is owed'
     JSON.stringify(st?.totals).slice(0, 120));
   t('an advance not yet deducted is still outstanding',
     near(st.totals?.pendingAdvances, 500), `pending ${st.totals?.pendingAdvances}`);
+}
+
+// ---------------------------------------------------------------- 9
+console.log('\n[9] A machine payment method statement nets the provider fee');
+{
+  seed();
+  const opening = q('SELECT Balance v FROM payment_methods WHERE PaymentMethodID=1').v;
+  // Card sale of 500 items + 5 fee the CUSTOMER pays: invoice 505, wallet
+  // credited 500 (the 5 went to the provider).
+  await call('sales:create', {
+    CustomerID: 1, items: [{ ItemID: 1, Quantity: 5, UnitPrice: 100 }],
+    Discount: 0, TaxRate: 0, TaxAmount: 0, PaidAmount: 505,
+    PaymentMethod: 'card', PaymentMethodID: 1, TransferCost: 5, TransferCostBearer: 'customer',
+    fiscalYearId: 1, userId: 1,
+  });
+  const st = await call('paymentMethod:statement', 1, {});
+  t('the sale appears on the machine statement', (st.operations || []).length === 1,
+    `${(st.operations || []).length} rows`);
+  t('the wallet was credited net of the fee (paid 505 - 5)',
+    near(st.totalIn, 500), `totalIn ${r2(st.totalIn ?? 0)}`);
+  const bal = q('SELECT Balance v FROM payment_methods WHERE PaymentMethodID=1').v;
+  t('in - out reconciles with the wallet balance',
+    near((st.totalIn ?? 0) - (st.totalOut ?? 0), bal - opening),
+    `net ${r2((st.totalIn ?? 0) - (st.totalOut ?? 0))} vs change ${r2(bal - opening)}`);
+}
+
+// ---------------------------------------------------------------- 10
+console.log('\n[10] A shop-borne fee on a machine return is a real outflow');
+{
+  seed();
+  // Sale via machine: 500, fee 5 the SHOP absorbs. Wallet +495.
+  await call('sales:create', {
+    CustomerID: 1, items: [{ ItemID: 1, Quantity: 5, UnitPrice: 100 }],
+    Discount: 0, TaxRate: 0, TaxAmount: 0, PaidAmount: 500,
+    PaymentMethod: 'card', PaymentMethodID: 1, TransferCost: 5, TransferCostBearer: 'shop',
+    fiscalYearId: 1, userId: 1,
+  });
+  const sid = q('SELECT SaleID v FROM sales').v;
+  const det = currentDb().prepare('SELECT DetailID, ItemID, Quantity, UnitPrice FROM sale_details').all();
+  // Refund all five units back through the machine as a transfer.
+  await call('saleReturns:create', {
+    SaleID: sid, CustomerID: 1,
+    items: det.map(d => ({ DetailID: d.DetailID, ItemID: d.ItemID, Quantity: 5, UnitPrice: d.UnitPrice })),
+    Reason: 'cancel', AccountCredit: 0, CashRefund: 0, TransferRefund: 500,
+    PaymentMethodID: 1, TransferCost: 5, TransferCostBearer: 'shop', fiscalYearId: 1, userId: 1,
+  });
+  const st = await call('paymentMethod:statement', 1, {});
+  const saleRow = (st.operations || []).find(o => o.OpType === 'sale');
+  const retRow = (st.operations || []).find(o => o.OpType === 'return');
+  t('the sale credited net of the fee (495 in)',
+    saleRow && near(saleRow.InAmount, 495), `sale ${saleRow?.InAmount}`);
+  t('the refund shows the fee too (505 out: 500 + shop fee 5)',
+    retRow && near(retRow.OutAmount, 505), `return ${retRow?.OutAmount}`);
+  const bal = q('SELECT Balance v FROM payment_methods WHERE PaymentMethodID=1').v;
+  const opening = 50000;
+  t('the statement reconciles with the wallet balance',
+    near((st.totalIn ?? 0) - (st.totalOut ?? 0), bal - opening),
+    `net ${r2((st.totalIn ?? 0) - (st.totalOut ?? 0))} vs change ${r2(bal - opening)}`);
+  t('a date filter cannot change the statement totals when untouched',
+    (st.operations || []).length === 2, `${(st.operations || []).length} rows`);
 }
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

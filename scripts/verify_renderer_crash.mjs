@@ -277,6 +277,8 @@ console.log('\n[7] No unguarded field dereference is left on nullable state');
     'src/renderer/src/pages/reports/SupplierStatementPage.tsx',
     // `if (!statementData?.operations?.length || !statementAccount) return;`
     'src/renderer/src/pages/assets/AssetsPage.tsx',
+    // `if (!statementData?.operations?.length || !statementMethod) return;`
+    'src/renderer/src/pages/assets/PaymentMethodsPage.tsx',
     // `{stats?.monthlySales?.length > 0 ? …}` wraps the map
     'src/renderer/src/pages/dashboard/Dashboard.tsx',
   ]);

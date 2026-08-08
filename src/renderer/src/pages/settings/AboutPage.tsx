@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import {
   Info, Phone, Mail, User, Copyright, FileText, Hash, Globe, Send, MapPin,
   CreditCard, Clock, Cloud, CloudOff, ShieldCheck, RefreshCw, ChevronDown, Facebook,
+  Download, DownloadCloud,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { asRows } from '../../lib/ipc';
@@ -21,6 +22,8 @@ export function AboutPage() {
   const [privacy, setPrivacy] = useState<any>(null);
   const [showPrivacy, setShowPrivacy] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [updaterState, setUpdaterState] = useState<{ state: string; percent?: number; message?: string } | null>(null);
+  const [checking, setChecking] = useState(false);
 
   const load = async () => {
     const s = await window.api.invoke('settings:getAll');
@@ -64,7 +67,26 @@ export function AboutPage() {
         setPrivacy(await window.api.invoke('remote:privacyReport'));
       } catch { /* remote feature not configured */ }
     })();
+    // Sync the manual-update UI with what the background updater is doing.
+    void window.api.invoke('updater:getStatus').then((s: any) => {
+      if (s) setUpdaterState({ state: s.state === 'downloaded' ? 'downloaded' : s.state });
+    }).catch(() => { /* dev build: updater not registered */ });
+    const off = window.api.on('updater:status', (s: any) => {
+      if (s) setUpdaterState(s);
+    });
+    return () => { /* preload `on` keeps no unsubscribe handle; GC after unmount */ };
   }, []);
+
+  const checkForUpdates = async () => {
+    setChecking(true);
+    await window.api.invoke('updater:check').catch(() => {});
+    // Manual checks report back through 'updater:status' (downloading/downloaded/error).
+    setTimeout(() => setChecking(false), 1200);
+  };
+
+  const updateNow = async () => {
+    await window.api.invoke('updater:updateNow').catch(() => {});
+  };
 
   const syncNow = async () => {
     setSyncing(true);
@@ -112,13 +134,67 @@ export function AboutPage() {
         </div>
 
         {updateAvailable && (
-          <div className="mt-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
-            <div className="text-sm font-semibold text-blue-800 dark:text-blue-300">
-              يتوفر إصدار أحدث: {info.latest_version}
+          <div className="mt-4 space-y-3">
+            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                  يتوفر إصدار أحدث: {info.latest_version}
+                </div>
+                <Button size="sm" onClick={checkForUpdates} loading={checking}
+                  icon={<Download size={13} />}>
+                  {checking ? 'جارٍ الفحص…' : 'تنزيل التحديث'}
+                </Button>
+              </div>
+              {info.release_notes && (
+                <div className="mt-1 whitespace-pre-wrap text-xs text-amber-700 dark:text-amber-300 leading-relaxed">
+                  {info.release_notes}
+                </div>
+              )}
             </div>
-            {info.release_notes && (
-              <div className="mt-1 whitespace-pre-wrap text-xs text-blue-700 dark:text-blue-300 leading-relaxed">
-                {info.release_notes}
+
+            {updaterState && (
+              <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-3">
+                {updaterState.state === 'checking' && (
+                  <div className="flex items-center gap-2 text-sm text-blue-800 dark:text-blue-300">
+                    <RefreshCw size={14} className="animate-spin" /> جارٍ التحقق من التحديثات…
+                  </div>
+                )}
+                {updaterState.state === 'downloading' && (
+                  <div>
+                    <div className="flex items-center gap-2 text-sm text-blue-800 dark:text-blue-300 mb-1.5">
+                      <DownloadCloud size={14} /> جارٍ تنزيل التحديث في الخلفية…
+                    </div>
+                    <div className="bg-white/70 dark:bg-slate-900/40 rounded-full h-1.5 overflow-hidden">
+                      <div className="bg-blue-600 h-full rounded-full transition-all"
+                        style={{ width: `${updaterState.percent ?? 0}%` }} />
+                    </div>
+                    <div className="mt-1 text-xs text-blue-700/70 dark:text-blue-300/70 text-left">
+                      {updaterState.percent ?? 0}%
+                    </div>
+                  </div>
+                )}
+                {updaterState.state === 'downloaded' && (
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div className="flex items-center gap-2 text-sm text-green-700 dark:text-green-300">
+                      <ShieldCheck size={15} /> التحديث جاهز — أعد تشغيل البرنامج لتطبيقه الآن.
+                    </div>
+                    <Button size="sm" variant="secondary" onClick={updateNow}
+                      icon={<RefreshCw size={13} />}>
+                      إعادة التشغيل وتطبيق التحديث
+                    </Button>
+                  </div>
+                )}
+                {updaterState.state === 'uptodate' && (
+                  <div className="flex items-center gap-2 text-sm text-green-700 dark:text-green-300">
+                    <ShieldCheck size={14} /> النسخة المثبتة هي الأحدث.
+                  </div>
+                )}
+                {updaterState.state === 'error' && (
+                  <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-300">
+                    <CloudOff size={14} />
+                    <span>{updaterState.message || 'تعذر الاتصال بخادم التحديثات — سيتحقق البرنامج تلقائياً لاحقاً.'}</span>
+                  </div>
+                )}
               </div>
             )}
           </div>

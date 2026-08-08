@@ -26,7 +26,7 @@
  * produce an error dialog. A shop in a village must be able to trade all day
  * without seeing an update message.
  */
-import { app, dialog, BrowserWindow } from 'electron';
+import { app, dialog, BrowserWindow, ipcMain, webContents } from 'electron';
 import electronUpdater from 'electron-updater';
 import { getDeviceId } from './security/deviceId';
 
@@ -41,12 +41,64 @@ const FIRST_CHECK_DELAY_MS = 3 * 60 * 1000;
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 let notified = false;
+let downloaded = false;
+let downloadPercent = 0;
+
+/** Set by `startUpdater`; provides the instance drive by the UI helpers. */
+let updaterInstance: typeof electronUpdater.autoUpdater | null = null;
+
+/** Broadcasts an update-state change to every renderer window. */
+function broadcast(state: Record<string, unknown>): void {
+  for (const wc of webContents.getAllWebContents()) {
+    wc.send('updater:status', state);
+  }
+}
+
+/** Manually trigger a check from the About screen. */
+export function checkForUpdatesNow(): Promise<{ ok: boolean; message?: string }> {
+  if (!app.isPackaged || process.platform !== 'win32' || !updaterInstance) {
+    return Promise.resolve({ ok: false, message: 'التحديث التلقائي غير متاح في هذا الإصدار' });
+  }
+  try {
+    // A click is an explicit request: force a re-check even if one is running.
+    updaterInstance.checkForUpdates().catch((err: unknown) => {
+      broadcast({ state: 'error', message: (err as Error)?.message ?? 'فشل الاتصال بخادم التحديثات' });
+    });
+    broadcast({ state: 'checking' });
+    return Promise.resolve({ ok: true });
+  } catch (err) {
+    return Promise.resolve({ ok: false, message: (err as Error).message });
+  }
+}
+
+/** Restart and install the already-downloaded update (About-screen button). */
+export function quitAndInstallNow(): { ok: boolean } {
+  if (downloaded && updaterInstance) {
+    downloaded = false;
+    updaterInstance.quitAndInstall();
+    return { ok: true };
+  }
+  return { ok: false };
+}
+
+/** Registers the IPC channels the About screen uses to drive the updater. */
+export function registerUpdaterIpc(): void {
+  ipcMain.handle('updater:check', () => checkForUpdatesNow());
+  ipcMain.handle('updater:updateNow', () => quitAndInstallNow());
+  ipcMain.handle('updater:getStatus', () => ({
+    state: downloaded ? 'downloaded' : 'idle',
+    percent: downloadPercent,
+  }));
+}
 
 /**
  * Starts the update checker over the same Cloudflare Worker + R2 the licence
  * system already uses. The Worker serves a `latest.yml` that mirrors the
  * client key + device id gating used by the Squirrel endpoints (kept so older
  * installs can still be told "you need the newer installer").
+ *
+ * The check runs silently in the background (the shop is mid-sale), and the
+ * About screen can also trigger a manual check via `updater:check`.
  */
 export function startUpdater(): void {
   if (!app.isPackaged) {
@@ -66,6 +118,7 @@ export function startUpdater(): void {
   try { device = getDeviceId(); } catch { /* server allows unknown devices */ }
 
   const autoUpdater = electronUpdater.autoUpdater;
+  updaterInstance = autoUpdater;
   try {
     // feedURL needs to be a directory that electron-updater appends
     // "latest.yml" / "<file>.blockmap" to. Query string carries the device id.
@@ -83,18 +136,28 @@ export function startUpdater(): void {
   autoUpdater.on('error', (err) => {
     // Never a dialog. No internet is the normal state for many shops.
     console.log('[Updater] check failed (not an error for the user):', err?.message ?? err);
+    broadcast({ state: 'error', message: err?.message ?? 'تعذر الاتصال بخادم التحديثات' });
   });
 
   autoUpdater.on('update-not-available', () => {
     console.log('[Updater] already up to date');
+    broadcast({ state: 'uptodate' });
   });
 
   autoUpdater.on('update-available', () => {
     console.log('[Updater] a newer version is downloading in the background');
+    broadcast({ state: 'downloading', percent: 0 });
   });
 
-  autoUpdater.on('update-downloaded', (_info) => {
+  autoUpdater.on('download-progress', (progress) => {
+    downloadPercent = Math.round(progress.percent);
+    broadcast({ state: 'downloading', percent: downloadPercent });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    downloaded = true;
     console.log('[Updater] a newer version is ready and will install on restart');
+    broadcast({ state: 'downloaded', version: info?.version });
     if (notified) return;         // tell them once, not every six hours
     notified = true;
 
@@ -130,5 +193,6 @@ export function startUpdater(): void {
 
   setTimeout(check, FIRST_CHECK_DELAY_MS);
   setInterval(check, CHECK_INTERVAL_MS);
+  registerUpdaterIpc();
   console.log(`[Updater] scheduled (first check in ${FIRST_CHECK_DELAY_MS / 60000} minutes)`);
 }

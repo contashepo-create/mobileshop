@@ -131,6 +131,13 @@ const AUTHENTICATED_ONLY = new Set<string>([
   'print:invoice',
   // The About page shows the real installed build number.
   'app:getVersion',
+  // The About page lets the owner check for / install an update manually.
+  // Safe by construction: `updater:updateNow` only fires after electron-updater
+  // has already downloaded the new build, and quitAndInstall is read-only on
+  // the database.
+  'updater:check',
+  'updater:updateNow',
+  'updater:getStatus',
   // Remote management: read-only for the customer.
   'remote:messages',
   'remote:markRead',

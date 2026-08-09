@@ -340,10 +340,15 @@ try {
         // Objects that kill ALL child processes (including detached spawn,
         // cmd.exe /c start, etc.) when the parent exits. Task Scheduler creates
         // the process as a child of svchost.exe, completely outside our job.
+        //
+        // NOTE: Do NOT use `/rl highest` — it requires admin privileges. A
+        // per-user NSIS install runs without elevation, so `/rl highest`
+        // silently fails and the swap never runs. The swap script does not
+        // need admin; it only renames files in the user's own install dir.
         const taskName = 'MobileShopCodeSwap';
         const psCmd = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${helper}" "${exe}" "${resources}" ${currentPid}`;
 
-        execSync(`schtasks /create /tn "${taskName}" /tr "${psCmd}" /sc once /st 23:59 /f /rl highest`, {
+        execSync(`schtasks /create /tn "${taskName}" /tr "${psCmd}" /sc once /st 23:59 /f`, {
           windowsHide: true,
           timeout: 5000,
         });
@@ -354,7 +359,7 @@ try {
         console.log('[CodeUpdater] swap helper launched via Task Scheduler');
         return true;
       } catch (err) {
-        console.error('[CodeUpdater] could not start swap helper:', (err as Error).message);
+        console.error('[CodeUpdater] Task Scheduler failed, trying fallback:', (err as Error).message);
         // Fallback: try detached spawn (may not survive app.quit(), but better
         // than nothing if Task Scheduler is disabled/broken)
         try {

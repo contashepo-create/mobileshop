@@ -209,13 +209,18 @@ function putObject(key, file, contentType) {
 // The code floor. `publish-nsis.js` records the version of the last full shell;
 // an explicit floor (--min= / env) overrides it for the rare push whose code
 // genuinely can only run on a newer shell.
+//
+// Wrangler's `--file -` writes to a literal file named `-` (not stdout), so a
+// temp file is used and read back.
 let shellFloor = '';
 try {
-  const out = runWrangler(
-    ['r2', 'object', 'get', `${BUCKET}/code/${PLATFORM}/shell.version`, '--file', '-', '--remote'],
+  const tmpFloor = path.join(ROOT, '.shell-floor.tmp');
+  runWrangler(
+    ['r2', 'object', 'get', `${BUCKET}/code/${PLATFORM}/shell.version`, '--file', tmpFloor, '--remote'],
     path.join(ROOT, 'server'),
   );
-  shellFloor = String(out ?? '').trim();
+  shellFloor = fs.readFileSync(tmpFloor, 'utf-8').trim();
+  fs.unlinkSync(tmpFloor);
 } catch {
   shellFloor = '';
 }
@@ -223,11 +228,13 @@ const min = MIN_APP_VERSION || shellFloor || '0.0.1';
 
 let baseline = null;
 try {
-  const out = runWrangler(
-    ['r2', 'object', 'get', `${BUCKET}/${NATIVE_MARKER}`, '--file', '-', '--remote'],
+  const tmpBaseline = path.join(ROOT, '.natives-baseline.tmp');
+  runWrangler(
+    ['r2', 'object', 'get', `${BUCKET}/${NATIVE_MARKER}`, '--file', tmpBaseline, '--remote'],
     path.join(ROOT, 'server'),
   );
-  baseline = String(out ?? '').trim();
+  baseline = fs.readFileSync(tmpBaseline, 'utf-8').trim();
+  fs.unlinkSync(tmpBaseline);
 } catch {
   baseline = null;   // never published before — this push establishes the baseline
 }

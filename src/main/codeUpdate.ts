@@ -326,33 +326,37 @@ try {
     Move-Item -LiteralPath $bak $asar
     Log "Restored app.asar.bak -> app.asar after error"
   }
-  Start-Process -FilePath $Exe
-}
-exit 0
-`;
-
-  try {
-    fs.writeFileSync(helper, script, 'utf-8');
-    // Use env vars for paths with non-ASCII characters as a belt-and-suspenders
-    // measure. PowerShell -File arguments handle Unicode, but some edge cases
-    // on older Windows builds corrupt non-ASCII paths in CreateProcess.
-    const child = spawn('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-      '-File', helper, exe, resources, String(currentPid),
-    ], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      env: { ...process.env },
-    });
-    child.unref();
-    console.log(`[CodeUpdater] swap helper spawned (pid ${child.pid}) — ${helper}`);
-    return true;
-  } catch (err) {
-    console.error('[CodeUpdater] could not start swap helper:', (err as Error).message);
-    return false;
+      Start-Process -FilePath $Exe
   }
-}
+  exit 0
+  `;
+
+    try {
+      fs.writeFileSync(helper, script, 'utf-8');
+
+      // Launch via cmd.exe "start" — creates a truly independent process that
+      // survives the parent's exit. Plain `spawn(detached: true)` does NOT work
+      // here: Electron kills all child processes on app.quit(), including
+      // detached ones, because the Windows job object ties them together.
+      // `cmd /c start` breaks that link by going through the shell.
+      const launcher = path.join(resources, 'code-swap-launcher.bat');
+      const bat = `@echo off\r\nstart "" /b powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${helper}" "${exe}" "${resources}" ${currentPid}\r\n`;
+      fs.writeFileSync(launcher, bat, 'utf-8');
+
+      const child = spawn('cmd.exe', ['/c', launcher], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: { ...process.env },
+      });
+      child.unref();
+      console.log(`[CodeUpdater] swap helper spawned via cmd.exe start (pid ${child.pid})`);
+      return true;
+    } catch (err) {
+      console.error('[CodeUpdater] could not start swap helper:', (err as Error).message);
+      return false;
+    }
+  }
 
 /**
  * Replaces the running asar on quit, if a verified push is staged.

@@ -341,14 +341,22 @@ try {
         // cmd.exe /c start, etc.) when the parent exits. Task Scheduler creates
         // the process as a child of svchost.exe, completely outside our job.
         //
-        // NOTE: Do NOT use `/rl highest` — it requires admin privileges. A
-        // per-user NSIS install runs without elevation, so `/rl highest`
-        // silently fails and the swap never runs. The swap script does not
-        // need admin; it only renames files in the user's own install dir.
-        const taskName = 'MobileShopCodeSwap';
-        const psCmd = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${helper}" "${exe}" "${resources}" ${currentPid}`;
+        // CRITICAL: `schtasks /tr` CANNOT handle paths containing Arabic
+        // characters or even spaces reliably. The install path
+        // "D:\programing\intstalation\موبايل شوب\MobileShopERP\resources" has
+        // both. SOLUTION: write the launcher .bat to %TEMP% (always ASCII) and
+        // have it call the PowerShell script at its real path. The .bat file
+        // passes all paths as arguments to PowerShell, which handles Unicode
+        // natively.
+        const tempDir = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
+        const launcher = path.join(tempDir, 'mobileshop-code-swap.bat');
+        // The bat file calls PowerShell with the real (Unicode) paths as args.
+        // PowerShell handles Unicode in arguments natively.
+        const bat = `@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${helper}" "${exe}" "${resources}" ${currentPid}\r\n`;
+        fs.writeFileSync(launcher, bat, 'utf-8');
 
-        execSync(`schtasks /create /tn "${taskName}" /tr "${psCmd}" /sc once /st 23:59 /f`, {
+        const taskName = 'MobileShopCodeSwap';
+        execSync(`schtasks /create /tn "${taskName}" /tr "${launcher}" /sc once /st 23:59 /f`, {
           windowsHide: true,
           timeout: 5000,
         });
@@ -356,7 +364,7 @@ try {
           windowsHide: true,
           timeout: 5000,
         });
-        console.log('[CodeUpdater] swap helper launched via Task Scheduler');
+        console.log('[CodeUpdater] swap helper launched via Task Scheduler (temp bat)');
         return true;
       } catch (err) {
         console.error('[CodeUpdater] Task Scheduler failed, trying fallback:', (err as Error).message);

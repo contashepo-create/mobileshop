@@ -1084,12 +1084,16 @@ async function handleNsisManifest(request, env, url) {
   }
 
   const rel = await currentRelease(env, platform);
-  // Nothing published, or the shop already has it. Never drag a customer
-  // backwards.
-  if (!rel || compareVersions(rel.version, from) <= 0) {
+  if (!rel) {
     return noUpdate();
   }
 
+  // Always serve latest.yml with 200 when a release exists, even if the
+  // customer is already on this version. electron-updater does its own
+  // version comparison and concludes "no update needed" — but it CANNOT
+  // parse a 204 response (rawData: null → "Cannot parse update info").
+  // The old code returned 204 when the customer was current, which caused
+  // electron-updater to throw on every check.
   const obj = await env.UPDATES.get(`nsis/${platform}/latest.yml`);
   if (!obj) return new Response('not found', { status: 404 });
 

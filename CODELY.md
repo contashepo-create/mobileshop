@@ -18,18 +18,7 @@
 
 
 - [2026-07-26 16:15:01] Project: Mobile Shop ERP — Electron + React + TypeScript + SQLite + Tailwind (RTL). 110+ source files. Login: admin / admin123. Dev: zerocold / 014253. Developer: محاسب / محمد عبدة, phone 01207770329, email conta.shepo@gmail.com. 35+ DB tables auto-migrate (includes asset_transfers table). Full license system: AES-256-CBC encrypted (random IV per encryption), device ID, 7-day trial on first launch (trial.dat, cannot be repeated/extended/skipped), activation codes bound to customer device ID (dev must enter customer's device ID when generating code), no dev password needed for activation, anti-tamper hash, date rollback detection (lastaccess.dat + trial.dat cross-check), error state blocks app (no bypass). DevTools no longer auto-opens. Dev console (Ctrl+Shift+5) is a standalone route accessible even when license expired. User activates/renews license from Settings > License page (not dev console). Dev console password hint removed (no placeholder). All modules: sales/POS (service items + cost + transfer cost + overpayment + customer balance + profit per line + simplified payment + preview invoice button + cancel resets form + cash customer must pay full + negative stock prevention via settings), purchases (auto stock + IMEI + overpayment), services (transfer/bill/topup/electronic + custom types + profit calc + machine deduction), maintenance (receive/deliver/return with discount + final price + simplified payment like sales + overpayment handling + profit calc), vouchers, payroll (issue separate from pay + employee statement), rent, inventory (items/IMEI/categories with defaults + barcode scan + quick add + empty barcode→NULL fix + stock check before sale), HR (customers/suppliers auto-color), assets (separate cash + payment methods + transfers between accounts with transfer cost + negative balance prevention), settings (general with negative balance toggles for stock/customer/cash + appearance + print 58mm/80mm/A5/A4 + preview/print default + 5 templates + users+permissions + database management + backup), dashboard, 9 report types + financial position + accurate P&L (net sales-returns + maintenance + other income + rent income - COGS - parts - general expenses - salaries - advances - rent - deductions), fiscal year, settlement (applies to DB + history + details), backup/restore, opening balances (all + owner capital), customer/supplier/employee statements (4-card layout with paid-in-invoice as credit), database management (CSV export, auto-backup hourly, network sharing, cloud sync, custom DB path), print system (thermal + A5 + A4 + preview + quick override dropdown + 5 templates), dev console (Ctrl+Shift+5, 3 tabs: about/license/codes), about page. Main process has error logging + auto-backup + license checks. React Router future flags enabled.
-
-
-
-
-
-
-
-
-
-
-
-
+- [2026-08-09 15:34:50] PowerShell scripts spawned from Node.js: `param()` MUST be the first statement — any statement before it (including `$ErrorActionPreference`) breaks parameter binding silently. This was the root cause of the fast-lane code update swap failing in v1.0.7. Fixed in v1.0.8/1.0.9.
 
 ### Reference
 

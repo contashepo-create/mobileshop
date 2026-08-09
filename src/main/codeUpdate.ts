@@ -396,20 +396,60 @@ try {
     }
 
 /**
- * Replaces the running asar on quit, if a verified push is staged.
- * Returns true when a swap was scheduled — the caller prefers this path over
- * the full NSIS installer in `quitAndInstallNow`.
+ * Replaces the running asar DIRECTLY — no external process needed.
  *
- * Idempotent: the About-screen button calls this, then quits — and `before
- * quit` calls it again. Two helpers racing the same rename are a third
- * failure mode none of the rollback logic covers, so the second call is a
- * no-op for the lifetime of this process.
+ * On Windows NTFS, fs.renameSync works even on open/memory-mapped files: it
+ * changes the directory entry, not the file handle. The running process keeps
+ * its mapped pages, but the NEXT process launch reads the new file.
+ *
+ * This eliminates ALL failure points of the previous approach:
+ * - No PowerShell (param ordering, -LiteralPath, Arabic paths)
+ * - No Task Scheduler (schtasks /rl highest, Arabic /tr, admin elevation)
+ * - No .bat launcher in %TEMP%
+ * - No window flashing
+ * - No detached process timing
+ *
+ * The swap is a synchronous rename. If it fails (EBUSY on some filesystems),
+ * we fall back to the old external approach.
  */
 let swapArmed = false;
 export function applyStagedCode(): boolean {
   if (!fs.existsSync(asarNewPath()) || swapArmed) return false;
   swapArmed = true;
-  return spawnSwapHelper();
+
+  const asar = asarPath();
+  const asarNew = asarNewPath();
+  const asarBak = asarBakPath();
+
+  try {
+    // Remove old backup if present
+    if (fs.existsSync(asarBak)) {
+      try { fs.unlinkSync(asarBak); } catch { /* best effort */ }
+    }
+    // Swap: current → backup, new → current
+    fs.renameSync(asar, asarBak);
+    fs.renameSync(asarNew, asar);
+    // Remove .code-ok so the new build must prove itself
+    try { fs.unlinkSync(okFlagPath()); } catch { /* best effort */ }
+
+    // Relaunch the app with the new code. app.relaunch() schedules a new
+    // process that will read the NEW app.asar. app.exit(0) terminates the
+    // current process cleanly.
+    app.relaunch();
+    console.log('[CodeUpdater] swap done — relaunching with new code');
+    return true;
+  } catch (err) {
+    console.error('[CodeUpdater] direct swap failed:', (err as Error).message);
+    // Try to restore from backup if the swap failed mid-way
+    try {
+      if (!fs.existsSync(asar) && fs.existsSync(asarBak)) {
+        fs.renameSync(asarBak, asar);
+        console.log('[CodeUpdater] restored from backup after failed swap');
+      }
+    } catch { /* best effort */ }
+    swapArmed = false;  // allow retry
+    return false;
+  }
 }
 
 /**

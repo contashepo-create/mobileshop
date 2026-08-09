@@ -386,12 +386,12 @@ app.on('before-quit', () => {
   }
   closeDb();
 
-  // A staged fast-lane code push is swapped by a DETACHED helper that outlives
-  // this process, so it must be armed here, at the very end, where nothing can
-  // cancel it. The helper renames app.asar -> app.asar.bak, moves the staged
-  // copy in, relaunches, and restores the backup if the new build fails to
-  // boot — see codeUpdate.ts.
-  applyStagedCode();
+  // Swap app.asar directly (no external process). If successful, app.relaunch()
+  // was already called inside applyStagedCode — the next process will load
+  // the new code. app.exit(0) here ensures a clean shutdown.
+  if (applyStagedCode()) {
+    app.exit(0);
+  }
 });
 
 // Auto backup function - saves to userData/backups

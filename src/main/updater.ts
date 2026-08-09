@@ -83,10 +83,11 @@ export function checkForUpdatesNow(): Promise<{ ok: boolean; message?: string }>
  */
 function applyOwnerChoice(choice: { response: number }): void {
   if (choice.response === 0) {
-    // If a code push is staged, use the swap helper (with delay) instead of
-    // NSIS quitAndInstall.
+    // If a code push is staged, swap directly (no external process) and
+    // relaunch. app.exit(0) terminates this process; app.relaunch() (called
+    // inside applyStagedCode) starts a new one with the new code.
     if (applyStagedCode()) {
-      setTimeout(() => app.quit(), 1500);
+      app.exit(0);
       return;
     }
     if (downloaded && updaterInstance) updaterInstance.quitAndInstall();
@@ -95,14 +96,11 @@ function applyOwnerChoice(choice: { response: number }): void {
 
 /** Restart and install the already-downloaded update (About-screen button). */
 export function quitAndInstallNow(): { ok: boolean } {
-  // If a fast-lane code push is staged, an EXTERNAL helper performs the swap,
-  // so "restart now" must quit cleanly and let it run. Prefer it: it is the
-  // cheap fix that most closely matches what the shop asked for.
+  // If a fast-lane code push is staged, swap directly and relaunch.
+  // No external process, no PowerShell, no Task Scheduler — just rename
+  // and relaunch.
   if (applyStagedCode()) {
-    // Delay app.quit() briefly so the detached PowerShell helper has time to
-    // start. Without this, the parent process exits before CreateProcess
-    // completes and the detached child dies with it.
-    setTimeout(() => app.quit(), 1500);
+    app.exit(0);
     return { ok: true };
   }
   if (downloaded && updaterInstance) {

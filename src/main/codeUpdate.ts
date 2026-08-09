@@ -124,13 +124,24 @@ interface CodeManifest {
   notes?: string;
 }
 
+/** Reads the REAL code version from app.asar, not the NSIS exe version. */
+function realCodeVersion(): string {
+  try {
+    const pkgPath = path.join(app.getAppPath(), 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    return String(pkg.version || app.getVersion());
+  } catch {
+    return app.getVersion();
+  }
+}
+
 /** Has this machine already applied THIS exact code? */
 function alreadyApplied(version: string, sha256: string): boolean {
   try {
-    // app.getVersion() reads package.json INSIDE app.asar — i.e. the code that
-    // is actually running right now. A swap bumps that version, so a check
-    // whose version matches means the push is already live.
-    return app.getVersion() === version;
+    // Read package.json from app.asar — app.getVersion() returns the NSIS
+    // exe version which never changes after a code swap. This caused the
+    // updater to re-download the same code push on every launch.
+    return realCodeVersion() === version;
   } catch {
     return false;
   }
@@ -144,7 +155,7 @@ async function fetchManifest(): Promise<CodeManifest | null> {
   let device = '';
   try { device = getDeviceId(); } catch { /* server allows unknown devices */ }
   const q = device ? `?device=${encodeURIComponent(device)}` : '';
-  const url = `${API_BASE}/code-update/${PLATFORM}/${app.getVersion()}/manifest.json${q}`;
+  const url = `${API_BASE}/code-update/${PLATFORM}/${realCodeVersion()}/manifest.json${q}`;
 
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -228,9 +239,9 @@ async function stagePush(manifest: CodeManifest): Promise<void> {
   // min_app_version floor: an old shell must not run code built for a newer
   // better-sqlite3. Compare against the version of the code we are RUNNING:
   // a machine already on this shell satisfies it, an older one does not.
-  if (!semverGte(app.getVersion(), manifest.min_app_version)) {
+  if (!semverGte(realCodeVersion(), manifest.min_app_version)) {
     console.log(`[CodeUpdater] push ${manifest.version} needs shell >= ${manifest.min_app_version}`
-      + ` — this machine is on ${app.getVersion()}; ignored`);
+      + ` — this machine is on ${realCodeVersion()}; ignored`);
     return;
   }
 

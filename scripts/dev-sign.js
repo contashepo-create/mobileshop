@@ -53,9 +53,9 @@ let privateKeyB64 = process.env.MOBILESHOP_LICENSE_PRIVATE_KEY || '';
 if (!privateKeyB64) {
   try {
     // Same file the licence keygen uses, so there is one private key to guard
-    // rather than two.
-    const raw = JSON.parse(fs.readFileSync(KEY_FILE, 'utf-8'));
-    privateKeyB64 = raw.privateKey || '';
+    // rather than two. The file holds plain base64 text (written by
+    // license-keygen.js), not JSON.
+    privateKeyB64 = fs.readFileSync(KEY_FILE, 'utf-8').trim();
   } catch { /* reported below */ }
 }
 if (!privateKeyB64) {

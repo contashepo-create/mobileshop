@@ -304,13 +304,13 @@ app.whenReady().then(() => {
     registerStatementHandlers();
     registerCustomerStatementHandlers();
     registerDatabaseHandlers();
-  registerSettlementHandlers();
-  registerPrintHandlers();
-  registerServicesHandlers();
-  registerLicenseHandlers();
-  registerSmartNotificationsHandlers();
-  registerTransfersHandlers();
-  registerDeleteHandlers();
+    registerSettlementHandlers();
+    registerPrintHandlers();
+    registerServicesHandlers();
+    registerLicenseHandlers();
+    registerSmartNotificationsHandlers();
+    registerTransfersHandlers();
+    registerDeleteHandlers();
 
     // Remote management: presentation values, developer messages, sync status.
     ensureRemoteTables();

@@ -264,10 +264,33 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       ${d.notes || d.Notes ? `<div class="invoice-notes">ملاحظات: ${esc(d.notes || d.Notes)}</div>` : ''}
     `;
 
+  /**
+   * The money block for a CREDIT NOTE (returned goods).
+   *
+   * A return is not an invoice: there is no "paid" and "remaining" — the shop
+   * is GIVING money back, split however the cashier chose between the
+   * customer's account, cash and a transfer. Printing that breakdown is the
+   * difference between evidence and an empty promise, so each part is its own
+   * line, shown only when it is nonzero.
+   */
+  const returnTotalsBlock = (d: any): string => `
+      <div class="totals">
+        <div class="total-row grand"><span>قيمة المرتجع:</span><span>${num(d.returnValue ?? d.totalAmount)} ${esc(companyInfo.currency || 'ج.م')}</span></div>
+        ${(Number(d.debtRelief) || 0) > 0
+          ? `<div class="total-row"><span>خُصم من دَين العميل:</span><span>${num(d.debtRelief)}</span></div>` : ''}
+        ${(Number(d.cashRefund) || 0) > 0
+          ? `<div class="total-row"><span>رُدّ نقداً:</span><span>${num(d.cashRefund)}</span></div>` : ''}
+        ${(Number(d.transferRefund) || 0) > 0
+          ? `<div class="total-row"><span>رُدّ تحويلاً/محفظة:</span><span>${num(d.transferRefund)}</span></div>` : ''}
+      </div>
+      ${d.reason ? `<div class="invoice-notes">سبب الإرجاع: ${esc(d.reason)}</div>` : ''}
+    `;
+
   const titles: any = {
     sale: 'فاتورة مبيعات', purchase: 'فاتورة مشتريات',
     maintenance: 'فاتورة صيانة', voucher_receipt: 'سند قبض',
     voucher_payment: 'سند صرف', statement: 'كشف حساب',
+    sale_return: 'مرتجع مبيعات',
   };
 
   const showCustomer = companyInfo.invoice_show_customer !== '0';
@@ -313,6 +336,12 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
     ` : '';
     itemsHTML = deviceSection + itemsTable(invoiceData.items);
     totalsHTML = totalsBlock(invoiceData);
+  } else if (type === 'sale_return' && invoiceData) {
+    // A credit note lists the RETURNED lines and the refund breakdown, not the
+    // original amounts. The item table is the same shape as a sale's, so it is
+    // reused; the money block is the return-specific one.
+    itemsHTML = itemsTable(invoiceData.items);
+    totalsHTML = returnTotalsBlock(invoiceData);
   } else if (type === 'statement' && invoiceData) {
     // A statement is a running ledger, not an invoice: it has no subtotal or
     // amount paid, and its closing balance is the only figure that matters.
@@ -420,7 +449,7 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       */ ''}
       ${profile.headerText ? `<div class="doc-header-text">${esc(profile.headerText)}</div>` : ''}
       <div class="invoice-meta">
-        <span>رقم: ${esc(invoiceData?.saleNumber || invoiceData?.purchaseNumber || invoiceData?.ticketNumber || invoiceData?.voucherNumber || '—')}</span>
+        <span>رقم: ${esc(invoiceData?.saleNumber || invoiceData?.purchaseNumber || invoiceData?.ticketNumber || invoiceData?.voucherNumber || invoiceData?.returnNumber || '—')}</span>
         <span>التاريخ: ${esc(invoiceData?.date || invoiceData?.Date || businessToday())}</span>
       </div>
       ${partyInfo}

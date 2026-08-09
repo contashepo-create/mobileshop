@@ -40,16 +40,26 @@ function installRoot(): string {
 }
 
 /**
- * The user-scoped data folder: `%APPDATA%\MobileShopERP` (Roaming).
+ * The user-scoped data folder: `app.getPath('userData')` (Roaming).
  *
  * This is the ONE folder the app can always write to, whatever the install
  * mode: per-user NSIS installs are user-writable, per-machine installs point
  * at Program Files, which a normal login cannot write to. The database and the
  * settings file live here so a store on a shared PC keeps its own data and a
  * per-machine update cannot be blocked by a read-only install directory.
+ *
+ * NOTE ON THE DOUBLE-NESTED LAYOUT HELD HERE FROM 1.0.6 (REVERTED):
+ * This used to be `path.join(app.getPath('userData'), 'mobile-shop-erp')` —
+ * Electron's `userData` for this app is ALREADY `%APPDATA%\mobile-shop-erp`,
+ * so the app silently added one segment and the packaged build opened
+ * `%APPDATA%\mobile-shop-erp\mobile-shop-erp\mobile_shop.db`, a FRESH and
+ * EMPTY database, while every real sale sat in the flat
+ * `%APPDATA%\mobile-shop-erp\mobile_shop.db`. Upgrading a shop to 1.0.6 made
+ * its invoices vanish. The fold-down below (and the legacy rescue in
+ * `defaultDbPath`) restore the flat file as the single source of truth.
  */
 function userDataRoot(): string {
-  return path.join(app.getPath('userData'), 'mobile-shop-erp');
+  return app.getPath('userData');
 }
 
 /**
@@ -66,6 +76,11 @@ function settingsFile(): string {
   if (app.isPackaged) {
     const installed = path.join(installRoot(), 'db_settings.json');
     const user = path.join(userDataRoot(), 'db_settings.json');
+    // A 1.0.6 install wrote its settings into the double-nested folder (see
+    // userDataRoot note). Honour that copy one last time so a shop that set a
+    // custom database path does not silently lose it after upgrading.
+    const legacyNested = path.join(userDataRoot(), 'mobile-shop-erp', 'db_settings.json');
+    if (!fs.existsSync(user) && fs.existsSync(legacyNested)) return legacyNested;
     // Prefer the installer's choice while it is the only one; once the app has
     // written a user-scoped copy, that copy is authoritative.
     return fs.existsSync(user) ? user : installed;
@@ -78,7 +93,21 @@ function defaultDbPath(): string {
   if (app.isPackaged) {
     // NSIS per-machine installs land under Program Files, which is read-only
     // for a normal user — never store data there. Roaming is always writable.
-    return path.join(userDataRoot(), 'mobile_shop.db');
+    const roaming = path.join(userDataRoot(), 'mobile_shop.db');
+    if (fs.existsSync(roaming)) return roaming;
+
+    // A legacy Squirrel install kept the database in the Squirrel ROOT
+    // (note: installRoot() answers that root for an `app-x.y.z` layout, and
+    // the NSIS install directory otherwise). If a store upgraded from
+    // Squirrel — or kept data in the flat Roaming file from the dev/unpacked
+    // layout — the default above is a NEW and EMPTY database. Prefer the file
+    // that actually has the shop's data over silently starting fresh.
+    const legacy = path.join(installRoot(), 'mobile_shop.db');
+    if (legacy !== roaming && fs.existsSync(legacy)) {
+      console.log('[DB] Adopting legacy database location:', legacy);
+      return legacy;
+    }
+    return roaming;
   }
   return path.join(app.getPath('userData'), 'mobile_shop.db');
 }

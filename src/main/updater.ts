@@ -109,7 +109,7 @@ export function registerUpdaterIpc(): void {
   ipcMain.handle('updater:check', () => checkForUpdatesNow());
   ipcMain.handle('updater:updateNow', () => quitAndInstallNow());
   ipcMain.handle('updater:getStatus', () => ({
-    state: downloaded ? 'downloaded' : 'idle',
+    state: downloaded ? 'downloaded' : (downloadPercent > 0 && downloadPercent < 100 ? 'downloading' : 'idle'),
     percent: downloadPercent,
   }));
 }

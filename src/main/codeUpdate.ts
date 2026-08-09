@@ -187,26 +187,32 @@ async function downloadAsar(manifest: CodeManifest, dest: string): Promise<strin
     // Stream manually so we can (a) hash bytes and (b) report progress. The
     // asar is ~2.5 MB so this is quick, but the progress bar keeps the About
     // screen honest instead of frozen.
-    const reader = res.body.getReader();
-    const pump = async () => {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) { out.write(Buffer.from(value)); hash.update(Buffer.from(value)); }
-        received += value?.length || 0;
-        if (total) {
-          const pct = Math.min(100, Math.round((received / total) * 100));
-          broadcast({ state: 'downloading', percent: pct });
+    try {
+      const reader = res.body.getReader();
+      const pump = async () => {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) { out.write(Buffer.from(value)); hash.update(Buffer.from(value)); }
+          received += value?.length || 0;
+          if (total) {
+            const pct = Math.min(100, Math.round((received / total) * 100));
+            broadcast({ state: 'downloading', percent: pct });
+          }
         }
-      }
-    };
-    await pump();
-    await new Promise<void>((resolve, reject) => {
-      out.end((err?: Error | null) => (err ? reject(err) : resolve()));
-    });
-    if (received !== manifest.size) throw new Error(`size mismatch: got ${received}, want ${manifest.size}`);
-    fs.renameSync(tmp, dest);
-    return hash.digest('hex');
+      };
+      await pump();
+      await new Promise<void>((resolve, reject) => {
+        out.end((err?: Error | null) => (err ? reject(err) : resolve()));
+      });
+      if (received !== manifest.size) throw new Error(`size mismatch: got ${received}, want ${manifest.size}`);
+      fs.renameSync(tmp, dest);
+      return hash.digest('hex');
+    } catch (err) {
+      out.destroy();
+      try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+      throw err;
+    }
   } finally {
     clearTimeout(t);
   }
@@ -254,12 +260,12 @@ function spawnSwapHelper(): boolean {
   const helper = path.join(resources, 'code-swap.ps1');
 
   const script = `
-$ErrorActionPreference = 'Stop'
 param(
   [string] $Exe,
   [string] $Resources,
   [int]    $OldPid
 )
+$ErrorActionPreference = 'Stop'
 $asar = Join-Path $Resources 'app.asar'
 $new  = Join-Path $Resources 'app.asar.new'
 $bak  = Join-Path $Resources 'app.asar.bak'

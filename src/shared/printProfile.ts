@@ -47,6 +47,7 @@
 /** The document kinds that can be printed. */
 export const DOCUMENT_TYPES = [
   'sale', 'purchase', 'maintenance', 'voucher_receipt', 'voucher_payment', 'statement',
+  'sale_return',
 ] as const;
 
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
@@ -59,6 +60,7 @@ export const DOCUMENT_LABELS: Record<DocumentType, string> = {
   voucher_receipt: 'سند قبض',
   voucher_payment: 'سند صرف',
   statement: 'كشف حساب',
+  sale_return: 'مرتجع مبيعات',
 };
 
 /** The item-table columns a shop can show or hide, IN PRINT ORDER. */
@@ -191,6 +193,19 @@ export const DOCUMENT_DEFAULTS: Record<DocumentType, DocumentDefaults> = {
     showSignature: true,
     copies: 1,
     footerText: 'هذا الكشف معتمد ومعتبر لدى الطرفين.',
+  },
+  // A credit note given to the customer at the counter when goods come back.
+  // Same shape as a sale — one list of returned lines and a money block — but
+  // there is nothing left to thank the customer for, and this is evidence of
+  // what was taken back, so the unless-configured defaults mirror a sale.
+  sale_return: {
+    paper: '80mm',
+    order: ['index', 'name', 'qty', 'price', 'total', 'imei'],
+    hiddenColumns: [],
+    showThanks: false,
+    showSignature: false,
+    copies: 1,
+    footerText: '',
   },
 };
 

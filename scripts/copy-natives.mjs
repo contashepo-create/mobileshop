@@ -6,6 +6,12 @@
  * asar — externalized modules are missing entirely. This script runs
  * AFTER `electron-forge package` and copies the pre-built native module
  * to where Electron expects it: resources/app.asar.unpacked/node_modules/.
+ *
+ * SAFETY NET: forge.config.ts already has a custom `ignore` filter that
+ * keeps better-sqlite3 in the packaged app, plus `asar.unpackDir` and
+ * `AutoUnpackNativesPlugin`. This script is a belt-and-suspenders
+ * fallback — if the forge filter stops working, this fixes it silently.
+ * Keep it, but do not treat it as the primary packaging mechanism.
  */
 import fs from 'node:fs';
 import path from 'node:path';

@@ -62,6 +62,26 @@ if (embeddedVersion !== version) {
   console.log(`[installer] asar version ${version} — reuse package`);
 }
 
+// Step 1.5: Inject app-update.yml.
+//
+// electron-updater reads `process.resourcesPath/app-update.yml` on the DOWNLOAD
+// step (`getOrCreateDownloadHelper` → `loadUpdateConfig` → readFile), and
+// `electron-builder --prepackaged` NEVER generates it: that file is normally
+// written only when electron-builder builds the app from source, which our
+// flow (forge package → electron-builder --prepackaged) skips. An installer
+// without it fails with "ENOENT ... resources/app-update.yml" the moment a
+// shop clicks update, so every build ships it explicitly. The content must
+// match `electron-builder.yml`'s `publish` (electron-updater uses its url for
+// latest.yml) and the updaterCacheDirName that `appInfo.updaterCacheDirName`
+// computes (`<sanitized-name>-updater`).
+const resourcesDir = path.join(pkgDir, 'resources');
+fs.mkdirSync(resourcesDir, { recursive: true });
+const updaterYaml = `provider: generic\n`
+  + `updaterCacheDirName: mobile-shop-erp-updater\n`
+  + `url: https://mobileshop-licensing.mobileshop2026.workers.dev/update-nsis/win32-x64\n`;
+fs.writeFileSync(path.join(resourcesDir, 'app-update.yml'), updaterYaml, 'utf-8');
+console.log('[installer] injected resources/app-update.yml into the packaged app');
+
 // Step 2: Build NSIS installer from the prepackaged app.
 // The artifact name is pinned so the publish script can find it without
 // globbing and so latest.yml's `path` field matches the served filename.

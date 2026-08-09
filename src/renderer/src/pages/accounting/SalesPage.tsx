@@ -506,6 +506,35 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
     else showToast('error', res?.message || 'فشل الإلغاء');
   };
 
+  /** Prints a CREDIT NOTE for a return — never the original sale invoice. */
+  const printReturn = async (ret: any, overridePaperSize?: string) => {
+    const settings = await window.api.invoke('settings:getAll');
+    const template = settings.default_invoice_template || '1';
+    const paperSize = overridePaperSize || settings.paper_size || '80mm';
+    const defaultAction = settings.print_default_action || 'preview';
+
+    const { header, details } = await window.api.invoke('saleReturns:get', ret.ReturnID);
+    if (!header) { showToast('error', 'تعذّر تحميل المرتجع'); return; }
+
+    const invoiceData: any = {
+      items: details || [],
+      returnNumber: header.ReturnNumber,
+      date: header.Date,
+      customerName: header.CustomerName,
+      customerPhone: header.CustomerPhone,
+      subtotal: header.TotalAmount,
+      totalAmount: header.TotalAmount,
+      returnValue: header.TotalAmount,
+      debtRelief: header.DebtRelief || 0,
+      cashRefund: header.CashRefund || 0,
+      transferRefund: header.TransferRefund || 0,
+      reason: header.Reason,
+    };
+
+    const printData = { type: 'sale_return', paperSize, template, companyInfo: settings, invoiceData };
+    await window.api.invoke(defaultAction === 'print' ? 'print:invoice' : 'print:preview', printData);
+  };
+
   // Quick print with specific paper size
   const [showPrintMenu, setShowPrintMenu] = useState<number | null>(null);
 
@@ -548,6 +577,24 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
             { key: 'DebtRelief', title: 'خُصم من الدين', render: (r) => <span className="text-blue-600">{(r.DebtRelief || 0).toFixed(2)}</span> },
             { key: 'CashRefund', title: 'رُدّ نقداً', render: (r) => <span className="text-red-600">{(r.CashRefund || 0).toFixed(2)}</span> },
             { key: 'Reason', title: 'السبب', render: (r) => r.Reason || '—' },
+            { key: 'print', title: 'طباعة', render: (r) => (
+              <div className="flex items-center gap-1 relative">
+                <button onClick={() => printReturn(r)} className="p-1.5 rounded text-slate-500 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20" title="طباعة مرتجع (بالإعداد الافتراضي)"><Printer size={14} /></button>
+                <button onClick={() => setShowPrintMenu(showPrintMenu === r.ReturnID ? null : r.ReturnID)} className="p-1 rounded text-slate-500 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-200" title="خيارات الطباعة">
+                  <ChevronDown size={12} />
+                </button>
+                {showPrintMenu === r.ReturnID && (
+                  <div className="absolute top-full right-0 mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-lg z-20 w-40">
+                    <button onClick={() => { printReturn(r); setShowPrintMenu(null); }} className="w-full text-right px-3 py-2 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">الإعداد الافتراضي</button>
+                    <div className="border-t border-slate-100 dark:border-slate-700"></div>
+                    <button onClick={() => { printReturn(r, '80mm'); setShowPrintMenu(null); }} className="w-full text-right px-3 py-2 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">حراري 80mm</button>
+                    <button onClick={() => { printReturn(r, '58mm'); setShowPrintMenu(null); }} className="w-full text-right px-3 py-2 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">حراري 58mm</button>
+                    <button onClick={() => { printReturn(r, 'A5'); setShowPrintMenu(null); }} className="w-full text-right px-3 py-2 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">A5</button>
+                    <button onClick={() => { printReturn(r, 'A4'); setShowPrintMenu(null); }} className="w-full text-right px-3 py-2 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">A4</button>
+                  </div>
+                )}
+              </div>
+            )},
             { key: 'undo', title: '', render: (r) => (
               <button onClick={() => undoReturn(r.ReturnID, r.ReturnNumber)}
                 className="p-1.5 rounded text-slate-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"

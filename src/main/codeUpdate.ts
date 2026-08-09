@@ -352,7 +352,7 @@ try {
         const launcher = path.join(tempDir, 'mobileshop-code-swap.bat');
         // The bat file calls PowerShell with the real (Unicode) paths as args.
         // PowerShell handles Unicode in arguments natively.
-        const bat = `@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${helper}" "${exe}" "${resources}" ${currentPid}\r\n`;
+        const bat = `@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${helper}" "${exe}" "${resources}" ${currentPid}\r\n`;
         fs.writeFileSync(launcher, bat, 'utf-8');
 
         const taskName = 'MobileShopCodeSwap';

@@ -231,7 +231,44 @@ export function getDb(): Database.Database {
         console.log('[DB] First run with configured database path:', dbPath);
       }
     } else if (configured) {
-      console.log('[DB] Using custom database path:', dbPath);
+      // The configured file EXISTS — but is it the RIGHT database? A code
+      // update or an installer can create an EMPTY database at the configured
+      // path while the shop's real data sits at the default Roaming location.
+      // If the configured DB has NO user tables (fresh/empty) AND the default
+      // path has a database WITH data, prefer the one with data. This is the
+      // exact scenario that caused data loss: db_settings.json pointed at
+      // C:\ProgramData\...\mobile_shop.db which was empty, while the real
+      // data lived in %APPDATA%\mobile-shop-erp\mobile_shop.db.
+      const defaultPath = defaultDbPath();
+      if (configured !== defaultPath && fs.existsSync(defaultPath)) {
+        try {
+          const probe = new Database(configured, { readonly: true, fileMustExist: true });
+          const tableCount = probe.prepare(
+            "SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+          ).get() as { n: number };
+          probe.close();
+          if (tableCount.n === 0) {
+            // The configured DB is empty — check if the default has data.
+            const probeDefault = new Database(defaultPath, { readonly: true, fileMustExist: true });
+            const defaultCount = probeDefault.prepare(
+              "SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            ).get() as { n: number };
+            probeDefault.close();
+            if (defaultCount.n > 0) {
+              console.error(
+                `[DB] Configured database "${configured}" is EMPTY (0 tables), ` +
+                `but the default "${defaultPath}" has ${defaultCount.n} tables.\n` +
+                '[DB] Using the default to prevent data loss. Delete db_settings.json ' +
+                'if this was intentional (e.g. a fresh install).',
+              );
+              dbPath = defaultPath;
+            }
+          }
+        } catch {
+          // Cannot read the configured DB — let the normal open path handle it.
+        }
+      }
+      console.log('[DB] Using database path:', dbPath);
     }
 
     // Ensure directory exists

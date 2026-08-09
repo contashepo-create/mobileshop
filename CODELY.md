@@ -9,6 +9,7 @@
 - [2026-07-26 15:33:09] End users should never be asked for developer credentials. Activation codes alone are sufficient proof of authorization — requiring a dev password at activation is a design flaw.
 - [2026-07-26 16:15:28] License activation flow: users activate from Settings > License page, NOT from dev console. Dev console is for code generation only. Code generation must require customer device ID — never generate unbound codes. Dev password fields must never show the actual password as a placeholder hint.
 - [2026-08-09 14:53:24] dev-sign.js had a bug: JSON.parse on .license-key file which is plain base64 text (not JSON). Fixed to read as plain text. license-keygen.js writes base64, check-keypair.js reads as text, but dev-sign.js was the odd one out trying JSON.parse.
+- [2026-08-09 16:06:32] wrangler r2 object get --file - writes to a literal file named '-', NOT stdout. Always use a temp file path for reading R2 objects in publish scripts. The --file '-' bug caused shell.version to always return empty, so min_app_version defaulted to 0.0.1 instead of the real shell floor.
 
 ### Project
 - [2026-07-26 00:51:18] User environment has NODE_ENV=production set globally, which causes npm to skip devDependencies (electron, electron-forge, etc.). Must prefix npm commands with `$env:NODE_ENV="development"` in PowerShell.

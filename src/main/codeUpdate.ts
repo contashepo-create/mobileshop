@@ -258,6 +258,7 @@ function spawnSwapHelper(): boolean {
   const resources = resourcesDir();
   const currentPid = process.pid;
   const helper = path.join(resources, 'code-swap.ps1');
+  const logFile = path.join(resources, 'code-swap.log');
 
   const script = `
 param(
@@ -270,45 +271,82 @@ $asar = Join-Path $Resources 'app.asar'
 $new  = Join-Path $Resources 'app.asar.new'
 $bak  = Join-Path $Resources 'app.asar.bak'
 $ok   = Join-Path $Resources '.code-ok'
+$log  = Join-Path $Resources 'code-swap.log'
+
+function Log($msg) {
+  $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+  "$ts $msg" | Out-File -FilePath $log -Append -Encoding utf8
+}
+
+Log "SWAP START pid=$OldPid exe=$Exe resources=$Resources"
 
 # 1. Wait for the app that just quit to actually release its files.
-for ($i = 0; $i -lt 30; $i++) {
+#    Allow up to 30 seconds — WAL checkpoint + DB close can take time.
+for ($i = 0; $i -lt 60; $i++) {
   if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) { break }
   Start-Sleep -Milliseconds 500
 }
+Log "Process $OldPid exited (waited $i * 500ms)"
 
-if (-not (Test-Path $new)) { exit 0 }   # nothing staged; plain restart
-
-# 2. Swap, keeping the old code as the rollback copy.
-if (Test-Path $bak) { Remove-Item $bak -Force }
-Move-Item $asar $bak
-Move-Item $new $asar
-Remove-Item $ok -Force -ErrorAction SilentlyContinue
-
-# 3. Relaunch the app, then wait for the new build to prove itself.
-Start-Process $Exe
-$booted = $false
-for ($i = 0; $i -lt 60; $i++) {
-  Start-Sleep -Seconds 1
-  if (Test-Path $ok) { $booted = $true; break }
+if (-not (Test-Path -LiteralPath $new)) {
+  Log "No app.asar.new — nothing to swap, exiting."
+  exit 0
 }
 
-# 4. Boot failed: put the old code back and start the shop on THAT.
-if (-not $booted) {
-  Remove-Item $asar -Force -ErrorAction SilentlyContinue
-  Move-Item $bak $asar
-  Start-Process $Exe
+try {
+  # 2. Swap, keeping the old code as the rollback copy.
+  if (Test-Path -LiteralPath $bak) { Remove-Item -LiteralPath $bak -Force }
+  Move-Item -LiteralPath $asar $bak
+  Log "Renamed app.asar -> app.asar.bak"
+  Move-Item -LiteralPath $new $asar
+  Log "Renamed app.asar.new -> app.asar"
+  Remove-Item -LiteralPath $ok -Force -ErrorAction SilentlyContinue
+
+  # 3. Relaunch the app, then wait for the new build to prove itself.
+  Log "Launching: $Exe"
+  Start-Process -FilePath $Exe
+  $booted = $false
+  for ($i = 0; $i -lt 60; $i++) {
+    Start-Sleep -Seconds 1
+    if (Test-Path -LiteralPath $ok) { $booted = $true; break }
+  }
+
+  if ($booted) {
+    Log "SWAP SUCCESS — new build booted OK"
+  } else {
+    Log "SWAP FAILED — boot timed out, rolling back"
+    Remove-Item -LiteralPath $asar -Force -ErrorAction SilentlyContinue
+    Move-Item -LiteralPath $bak $asar
+    Start-Process -FilePath $Exe
+  }
+} catch {
+  Log "SWAP ERROR: $($_.Exception.Message)"
+  # Try to restore from backup if the swap failed mid-way
+  if (-not (Test-Path -LiteralPath $asar) -and (Test-Path -LiteralPath $bak)) {
+    Move-Item -LiteralPath $bak $asar
+    Log "Restored app.asar.bak -> app.asar after error"
+  }
+  Start-Process -FilePath $Exe
 }
 exit 0
 `;
 
   try {
     fs.writeFileSync(helper, script, 'utf-8');
+    // Use env vars for paths with non-ASCII characters as a belt-and-suspenders
+    // measure. PowerShell -File arguments handle Unicode, but some edge cases
+    // on older Windows builds corrupt non-ASCII paths in CreateProcess.
     const child = spawn('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', helper, exe, resources, String(currentPid),
-    ], { detached: true, stdio: 'ignore', windowsHide: true });
+    ], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...process.env },
+    });
     child.unref();
+    console.log(`[CodeUpdater] swap helper spawned (pid ${child.pid}) — ${helper}`);
     return true;
   } catch (err) {
     console.error('[CodeUpdater] could not start swap helper:', (err as Error).message);

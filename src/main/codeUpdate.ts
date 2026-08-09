@@ -431,3 +431,8 @@ export function stopCodeUpdater(): void {
   checkTimer = null;
   intervalTimer = null;
 }
+
+/** True when a code push has been downloaded and is waiting to be swapped. */
+export function isCodeUpdateStaged(): boolean {
+  return fs.existsSync(asarNewPath());
+}

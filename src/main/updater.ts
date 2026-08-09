@@ -29,7 +29,7 @@
 import { app, dialog, BrowserWindow, ipcMain, webContents } from 'electron';
 import electronUpdater from 'electron-updater';
 import { getDeviceId } from './security/deviceId';
-import { checkForCodeUpdatesNow, applyStagedCode } from './codeUpdate';
+import { checkForCodeUpdatesNow, applyStagedCode, isCodeUpdateStaged } from './codeUpdate';
 
 /** Base URL of the developer's Cloudflare Worker (licensed updates). */
 const API_BASE = (process.env.MOBILESHOP_API_BASE || '').replace(/\/$/, '');
@@ -161,7 +161,15 @@ export function startUpdater(): void {
     // The renderer gets a fixed sentence — a raw err.message carries paths
     // and server internals that belong in the developer's log, not the UI.
     console.log('[Updater] check failed (not an error for the user):', err?.message ?? err);
-    broadcast({ state: 'error', message: 'تعذر الاتصال بخادم التحديثات' });
+    // Do NOT override a successful code-update staging with an NSIS error.
+    // The NSIS feed returns 204 when the app is newer than the last full
+    // release (e.g. after a code push), which electron-updater may treat as
+    // an error. If a code update is already staged, that is the real state.
+    if (isCodeUpdateStaged()) {
+      broadcast({ state: 'downloaded' });
+    } else {
+      broadcast({ state: 'error', message: 'تعذر الاتصال بخادم التحديثات' });
+    }
   });
 
   autoUpdater.on('update-not-available', () => {

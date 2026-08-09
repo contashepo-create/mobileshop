@@ -126,6 +126,10 @@ FunctionEnd
     FileWriteUTF16LE $0 '{"dbPath":"$2\\mobile_shop.db"}'
     FileClose $0
   ${EndIf}
+
+  ; Force-create desktop shortcut (electron-builder sometimes skips it
+  ; on per-user installs without elevation)
+  CreateShortCut "$DESKTOP\MobileShopERP.lnk" "$INSTDIR\MobileShopERP.exe" "" "" 0
 !macroend
 
 !endif ; !ifndef BUILD_UNINSTALLER

@@ -182,8 +182,17 @@ export function startUpdater(): void {
   });
 
   autoUpdater.on('update-not-available', () => {
-    console.log('[Updater] already up to date');
-    broadcast({ state: 'uptodate' });
+    console.log('[Updater] NSIS: already up to date');
+    // Do NOT override a staged code update. When the app version is higher
+    // than the NSIS release (e.g. v1.0.25 code on v1.0.10 shell), the NSIS
+    // feed correctly says "no NSIS update" — but the code updater may have
+    // already staged a fast-lane push. Saying "up to date" here would
+    // override the "downloaded" state and confuse the user.
+    if (isCodeUpdateStaged()) {
+      broadcast({ state: 'downloaded' });
+    } else {
+      broadcast({ state: 'uptodate' });
+    }
   });
 
   autoUpdater.on('update-available', () => {

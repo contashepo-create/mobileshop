@@ -136,20 +136,32 @@ function configuredDbPath(): string | null {
   if (!fs.existsSync(file)) return null;
   try {
     const raw = fs.readFileSync(file);
-    // The NSIS installer writes db_settings.json as UTF-16LE (FileWriteUTF16LE
-    // in a Unicode NSIS build) so Arabic paths survive; the app's own
-    // `setDbPath` writes plain UTF-8. Read whichever encoding the file uses.
     const text = decodeSettings(raw);
-    const settings = JSON.parse(text);
+    // The NSIS installer (installer.nsh) writes db_settings.json with
+    // FileWriteUTF16LE and literal Windows backslashes — e.g.
+    //   {"dbPath":"C:\ProgramData\MobileShopERP\mobile_shop.db"}
+    // Those backslashes are not valid JSON escapes, so JSON.parse throws
+    // "Bad escaped character" and the shop silently falls back to the
+    // default path. Fix by escaping lone backslashes before parsing.
+    const fixed = escapeLoneBackslashes(text);
+    const settings = JSON.parse(fixed);
     const p = settings?.dbPath;
     return typeof p === 'string' && p.trim() ? p : null;
   } catch (err) {
-    // A corrupt settings file is not a normal condition: it means the shop is
-    // about to be pointed at the wrong database. Silence here made that
-    // indistinguishable from "no custom path configured".
     console.error('[DB] db_settings.json is unreadable, using the default path:', err);
     return null;
   }
+}
+
+/**
+ * Escapes lone backslashes in a JSON string so Windows paths like
+ * `C:\ProgramData\...` become valid JSON `C:\\ProgramData\\...`.
+ *
+ * Only touches backslashes that are NOT already part of a valid JSON escape
+ * sequence (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`).
+ */
+function escapeLoneBackslashes(text: string): string {
+  return text.replace(/\\(?!["\\\/bfnrtu])/g, '\\\\');
 }
 
 /**

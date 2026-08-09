@@ -94,13 +94,36 @@ FunctionEnd
 ; connection.ts reads this exact file from <INSTDIR>\db_settings.json and
 ; decodes it as UTF-16LE (FileWriteUTF16LE) — the installer is a Unicode NSIS
 ; build, and the app's reader is BOM-aware to accept either encoding.
+;
+; BACKSLASH ESCAPING: JSON requires backslashes in string values to be
+; doubled (\\). The NSIS FileWriteUTF16LE writes the string literally, so
+; we must replace every \ with \\ before embedding the path in the JSON.
+; Without this, the app sees "Bad escaped character" and silently ignores
+; the configured path.
 ; ---------------------------------------------------------------------------
 !macro customInstall
   ${If} $DbDataDir != ""
     CreateDirectory "$DbDataDir"
+    ; Escape backslashes for valid JSON
+    StrCpy $1 "$DbDataDir"
+    StrCpy $2 ""
+    StrCpy $3 0
+    loop_start:
+      StrCpy $4 $1 1 $3
+      ${If} $4 == ""
+        Goto loop_end
+      ${EndIf}
+      ${If} $4 == "\"
+        StrCpy $2 "$2\\"
+      ${Else}
+        StrCpy $2 "$2$4"
+      ${EndIf}
+      IntOp $3 $3 + 1
+      Goto loop_start
+    loop_end:
     ClearErrors
     FileOpen $0 "$INSTDIR\db_settings.json" w
-    FileWriteUTF16LE $0 '{"dbPath":"$DbDataDir\mobile_shop.db"}'
+    FileWriteUTF16LE $0 '{"dbPath":"$2\\mobile_shop.db"}'
     FileClose $0
   ${EndIf}
 !macroend

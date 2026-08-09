@@ -20,10 +20,22 @@ import { stripControlChars, LIMITS } from '../../shared/validate';
 
 export function registerSettingsHandlers() {
   // The real installed version. The About page used to read the `app_version`
-  // setting, which defaults to a hard-coded '1.0.0' in migrations and so never
-  // advanced as new releases shipped. This reports the version the packaging
-  // tool stamped into the exe (app.getVersion), which IS the running build.
-  ipcMain.handle('app:getVersion', async () => app.getVersion());
+  // Reports the REAL running code version. `app.getVersion()` reads the
+  // version stamped into the exe by the NSIS installer, which does NOT
+  // change when a code push swaps app.asar. After a fast-lane update the
+  // exe still says 1.0.11 but app.asar says 1.0.26 — the About page showed
+  // the wrong version to customers. Fix: read package.json from app.asar
+  // directly, falling back to app.getVersion() if the read fails.
+  ipcMain.handle('app:getVersion', async () => {
+    try {
+      // app.getAppPath() points to app.asar in a packaged build.
+      const pkgPath = path.join(app.getAppPath(), 'package.json');
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      return String(pkg.version || app.getVersion());
+    } catch {
+      return app.getVersion();
+    }
+  });
 
   // ===== DEVELOPER AUTHENTICATION =====
   // Verifying developer credentials in the MAIN process (bcrypt + lockout) and

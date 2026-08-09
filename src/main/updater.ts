@@ -83,6 +83,12 @@ export function checkForUpdatesNow(): Promise<{ ok: boolean; message?: string }>
  */
 function applyOwnerChoice(choice: { response: number }): void {
   if (choice.response === 0) {
+    // If a code push is staged, use the swap helper (with delay) instead of
+    // NSIS quitAndInstall.
+    if (applyStagedCode()) {
+      setTimeout(() => app.quit(), 1500);
+      return;
+    }
     if (downloaded && updaterInstance) updaterInstance.quitAndInstall();
   }
 }
@@ -93,7 +99,10 @@ export function quitAndInstallNow(): { ok: boolean } {
   // so "restart now" must quit cleanly and let it run. Prefer it: it is the
   // cheap fix that most closely matches what the shop asked for.
   if (applyStagedCode()) {
-    app.quit();
+    // Delay app.quit() briefly so the detached PowerShell helper has time to
+    // start. Without this, the parent process exits before CreateProcess
+    // completes and the detached child dies with it.
+    setTimeout(() => app.quit(), 1500);
     return { ok: true };
   }
   if (downloaded && updaterInstance) {

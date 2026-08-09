@@ -2062,4 +2062,13 @@ function seedData(db: Database.Database) {
   for (const perm of allPerms) {
     insertRolePerm.run(perm.PermissionID);
   }
+
+  // Replace the old developer-only warning with a customer-appropriate message.
+  // The old text "هذه النسخه خاصه بالمطور فقط اي استخدام لها يعرضك للمسائله القانونيه"
+  // was set before the product was distributed to customers. Use UPDATE (not
+  // INSERT OR IGNORE) so existing values are overwritten.
+  try {
+    db.prepare(`UPDATE settings SET Value = ? WHERE Key = 'custom_content'`)
+      .run('هذا البرنامج مرخّص للاستخدام التجاري. للحصول على الدعم الفني أو تجديد الاشتراك، يرجى التواصل مع المطور.');
+  } catch { /* non-fatal */ }
 }

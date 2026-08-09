@@ -18,6 +18,8 @@ import { PaymentMethodsPage } from './pages/assets/PaymentMethodsPage';
 import { TransfersPage } from './pages/assets/TransfersPage';
 import { SalesPage } from './pages/accounting/SalesPage';
 import { PurchasesPage } from './pages/accounting/PurchasesPage';
+import { SalesReturnsPage } from './pages/accounting/SalesReturnsPage';
+import { PurchasesReturnsPage } from './pages/accounting/PurchasesReturnsPage';
 import { MaintenancePage } from './pages/accounting/MaintenancePage';
 import { VouchersPage } from './pages/accounting/VouchersPage';
 import { PayrollPage } from './pages/accounting/PayrollPage';
@@ -125,8 +127,8 @@ export default function App() {
               <Route path="accounting/maintenance" element={<MaintenancePage />} />
               <Route path="accounting/vouchers" element={<VouchersPage />} />
               <Route path="accounting/payroll" element={<PayrollPage />} />
-              <Route path="accounting/sale-returns" element={<SalesPage mode="returns" />} />
-              <Route path="accounting/purchase-returns" element={<PurchasesPage mode="returns" />} />
+              <Route path="accounting/sale-returns" element={<SalesReturnsPage />} />
+              <Route path="accounting/purchase-returns" element={<PurchasesReturnsPage />} />
               <Route path="accounting/vouchers-receipt" element={<VouchersPage mode="receipt" />} />
               <Route path="accounting/vouchers-payment" element={<VouchersPage mode="payment" />} />
               <Route path="accounting/rents" element={<RentPage />} />

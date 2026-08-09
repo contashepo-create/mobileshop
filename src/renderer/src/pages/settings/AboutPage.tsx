@@ -342,7 +342,7 @@ export function AboutPage() {
 
       <div className="text-center text-xs text-slate-500 dark:text-slate-400">
         <p>{info.app_name}{info.company_name ? ` — ${info.company_name}` : ''}</p>
-        <p className="mt-1">{info.about_footer || `تطوير: ${info.dev_name}`}</p>
+        <p className="mt-1">{info.about_footer || `تطوير: ${info.dev_name} — اختبار التحديث التلقائي v1.0.29`}</p>
       </div>
     </div>
   );

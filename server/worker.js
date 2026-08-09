@@ -1515,6 +1515,9 @@ const CONFIG_KEYS = [
   ['app_name', 'اسم البرنامج'],
   ['custom_content', 'معلومات إضافية'],
   ['about_footer', 'نص أسفل صفحة حول البرنامج'],
+  ['copyright', 'حقوق النشر'],
+  ['distribution_rights', 'حقوق التوزيع'],
+  ['terms_note', 'شروط الاستخدام'],
 ];
 
 function configKeyboard(target) {

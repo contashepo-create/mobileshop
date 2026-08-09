@@ -11,6 +11,7 @@
 - [2026-08-09 14:53:24] dev-sign.js had a bug: JSON.parse on .license-key file which is plain base64 text (not JSON). Fixed to read as plain text. license-keygen.js writes base64, check-keypair.js reads as text, but dev-sign.js was the odd one out trying JSON.parse.
 - [2026-08-09 16:06:32] wrangler r2 object get --file - writes to a literal file named '-', NOT stdout. Always use a temp file path for reading R2 objects in publish scripts. The --file '-' bug caused shell.version to always return empty, so min_app_version defaulted to 0.0.1 instead of the real shell floor.
 - [2026-08-09 17:32:44] CRITICAL: spawn('powershell.exe', ..., { detached: true }) on Windows requires a delay before app.quit() — without ~1.5s delay, Windows kills the spawn pipe before CreateProcess completes and the detached child never runs. This was the root cause of code-update swap failures in v1.0.11–v1.0.13. Fixed in v1.0.14.
+- [2026-08-09 19:40:19] CRITICAL: Electron on Windows kills ALL child processes on app.quit(), including spawn(detached:true) + unref(). The Windows job object ties them together. SOLUTION: use `cmd.exe /c start "" /b powershell.exe ...` via a .bat launcher file — cmd /c start breaks the job object link. This was the THIRD attempt at fixing the code-update swap (after param() ordering and -LiteralPath).
 
 ### Project
 - [2026-07-26 00:51:18] User environment has NODE_ENV=production set globally, which causes npm to skip devDependencies (electron, electron-forge, etc.). Must prefix npm commands with `$env:NODE_ENV="development"` in PowerShell.

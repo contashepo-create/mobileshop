@@ -42,7 +42,7 @@
  * it may produce an error dialog in front of a shop mid-sale.
  */
 import { app, webContents } from 'electron';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -317,46 +317,59 @@ try {
     Log "SWAP FAILED — boot timed out, rolling back"
     Remove-Item -LiteralPath $asar -Force -ErrorAction SilentlyContinue
     Move-Item -LiteralPath $bak $asar
-    Start-Process -FilePath $Exe
-  }
-} catch {
-  Log "SWAP ERROR: $($_.Exception.Message)"
-  # Try to restore from backup if the swap failed mid-way
-  if (-not (Test-Path -LiteralPath $asar) -and (Test-Path -LiteralPath $bak)) {
-    Move-Item -LiteralPath $bak $asar
-    Log "Restored app.asar.bak -> app.asar after error"
-  }
+        Start-Process -FilePath $Exe
+      }
+    } catch {
+      Log "SWAP ERROR: $($_.Exception.Message)"
+      if (-not (Test-Path -LiteralPath $asar) -and (Test-Path -LiteralPath $bak)) {
+        Move-Item -LiteralPath $bak $asar
+        Log "Restored app.asar.bak -> app.asar after error"
+      }
       Start-Process -FilePath $Exe
-  }
-  exit 0
-  `;
-
-    try {
-      fs.writeFileSync(helper, script, 'utf-8');
-
-      // Launch via cmd.exe "start" — creates a truly independent process that
-      // survives the parent's exit. Plain `spawn(detached: true)` does NOT work
-      // here: Electron kills all child processes on app.quit(), including
-      // detached ones, because the Windows job object ties them together.
-      // `cmd /c start` breaks that link by going through the shell.
-      const launcher = path.join(resources, 'code-swap-launcher.bat');
-      const bat = `@echo off\r\nstart "" /b powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${helper}" "${exe}" "${resources}" ${currentPid}\r\n`;
-      fs.writeFileSync(launcher, bat, 'utf-8');
-
-      const child = spawn('cmd.exe', ['/c', launcher], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-        env: { ...process.env },
-      });
-      child.unref();
-      console.log(`[CodeUpdater] swap helper spawned via cmd.exe start (pid ${child.pid})`);
-      return true;
-    } catch (err) {
-      console.error('[CodeUpdater] could not start swap helper:', (err as Error).message);
-      return false;
     }
-  }
+    # Clean up the scheduled task that launched us
+    schtasks /delete /tn "MobileShopCodeSwap" /f 2>$null
+    exit 0
+    `;
+
+      try {
+        fs.writeFileSync(helper, script, 'utf-8');
+
+        // Launch via Windows Task Scheduler — the ONLY reliable way to create a
+        // process that survives Electron's app.quit(). Electron uses Windows Job
+        // Objects that kill ALL child processes (including detached spawn,
+        // cmd.exe /c start, etc.) when the parent exits. Task Scheduler creates
+        // the process as a child of svchost.exe, completely outside our job.
+        const taskName = 'MobileShopCodeSwap';
+        const psCmd = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${helper}" "${exe}" "${resources}" ${currentPid}`;
+
+        execSync(`schtasks /create /tn "${taskName}" /tr "${psCmd}" /sc once /st 23:59 /f /rl highest`, {
+          windowsHide: true,
+          timeout: 5000,
+        });
+        execSync(`schtasks /run /tn "${taskName}"`, {
+          windowsHide: true,
+          timeout: 5000,
+        });
+        console.log('[CodeUpdater] swap helper launched via Task Scheduler');
+        return true;
+      } catch (err) {
+        console.error('[CodeUpdater] could not start swap helper:', (err as Error).message);
+        // Fallback: try detached spawn (may not survive app.quit(), but better
+        // than nothing if Task Scheduler is disabled/broken)
+        try {
+          const child = spawn('powershell.exe', [
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', helper, exe, resources, String(currentPid),
+          ], { detached: true, stdio: 'ignore', windowsHide: true });
+          child.unref();
+          console.log('[CodeUpdater] fallback: swap helper spawned directly (pid ' + child.pid + ')');
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    }
 
 /**
  * Replaces the running asar on quit, if a verified push is staged.

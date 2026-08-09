@@ -56,6 +56,7 @@ export function AboutPage() {
       custom_content: s.custom_content || '',
       custom_block_title: s.custom_block_title || '',
       custom_block_body: s.custom_block_body || '',
+      about_footer: s.about_footer || '',
     });
   };
 
@@ -341,7 +342,7 @@ export function AboutPage() {
 
       <div className="text-center text-xs text-slate-500 dark:text-slate-400">
         <p>{info.app_name}{info.company_name ? ` — ${info.company_name}` : ''}</p>
-        <p className="mt-1">تطوير: {info.dev_name}</p>
+        <p className="mt-1">{info.about_footer || `تطوير: ${info.dev_name}`}</p>
       </div>
     </div>
   );

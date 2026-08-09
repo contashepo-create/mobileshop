@@ -1503,6 +1503,8 @@ async function issueAndShow(env, messageId, deviceId, days) {
 
 /** Common presentation keys, so the admin rarely has to remember key names. */
 const CONFIG_KEYS = [
+  ['dev_name', 'اسم المطور'],
+  ['dev_title', 'صفة المطور'],
   ['dev_phone', 'رقم الهاتف'],
   ['dev_whatsapp', 'واتساب'],
   ['dev_telegram', 'تليجرام'],
@@ -1512,6 +1514,7 @@ const CONFIG_KEYS = [
   ['support_hours', 'مواعيد الدعم'],
   ['app_name', 'اسم البرنامج'],
   ['custom_content', 'معلومات إضافية'],
+  ['about_footer', 'نص أسفل صفحة حول البرنامج'],
 ];
 
 function configKeyboard(target) {

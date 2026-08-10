@@ -1807,6 +1807,13 @@ async function handleTelegram(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // Read-only routes answer HEAD like GET (same status + headers, no body),
+    // so probes and tooling that only need "is it there / how big" work
+    // without downloading 115 MB. POST routes below are unaffected.
+    const isRead = request.method === 'GET' || request.method === 'HEAD';
+    const out = (r) => request.method === 'HEAD'
+      ? new Response(null, { status: r.status, headers: r.headers })
+      : r;
     try {
       await ensureSchema(env);
       if (request.method === 'POST') {
@@ -1822,51 +1829,51 @@ export default {
           case '/release-code':   return await handleReleaseCode(request, env);
         }
       }
-      if (request.method === 'GET' && url.pathname === '/devices') {
-        return await handleDevices(request, env);
+      if (isRead && url.pathname === '/devices') {
+        return out(await handleDevices(request, env));
       }
       // Squirrel.Windows appends "/RELEASES" to the feed URL and then fetches
       // the .nupkg named inside it, relative to the same directory. Both are
       // plain GETs, so they are matched by shape rather than exact path.
-      if (request.method === 'GET' && url.pathname.startsWith('/update/')) {
+      if (isRead && url.pathname.startsWith('/update/')) {
         if (url.pathname.endsWith('/RELEASES')) {
-          return await handleUpdateReleases(request, env, url);
+          return out(await handleUpdateReleases(request, env, url));
         }
         if (url.pathname.endsWith('.nupkg')) {
-          return await handleUpdatePackage(request, env, url);
+          return out(await handleUpdatePackage(request, env, url));
         }
       }
       // NSIS (electron-updater) — `latest.yml` + the Setup exe + its blockmap.
       // electron-updater appends "/latest.yml" to the feed URL, then fetches
       // the files named inside it, relative to the same directory. Served
       // from R2 bucket `UPDATES` (key prefix `nsis/<platform>/`).
-      if (request.method === 'GET' && url.pathname.startsWith('/update-nsis/')) {
+      if (isRead && url.pathname.startsWith('/update-nsis/')) {
         if (url.pathname.endsWith('/latest.yml')) {
-          return await handleNsisManifest(request, env, url);
+          return out(await handleNsisManifest(request, env, url));
         }
         if (url.pathname.endsWith('.exe') || url.pathname.endsWith('.blockmap')) {
-          return await handleNsisFile(request, env, url);
+          return out(await handleNsisFile(request, env, url));
         }
       }
       // Public installer distribution: a plain browser link with no client key.
       // Share this URL with a new customer so they can download the Setup exe.
-      if (request.method === 'GET' && url.pathname.startsWith('/download-nsis/')) {
+      if (isRead && url.pathname.startsWith('/download-nsis/')) {
         if (url.pathname.endsWith('.exe') || url.pathname.endsWith('.blockmap')) {
-          return await handleDownloadNsis(request, env, url);
+          return out(await handleDownloadNsis(request, env, url));
         }
       }
       // Code push (fast lane): manifest + the swapped `app.asar`, R2-backed.
-      if (request.method === 'GET' && url.pathname.startsWith('/code-update/')) {
+      if (isRead && url.pathname.startsWith('/code-update/')) {
         if (url.pathname.endsWith('/manifest.json')) {
-          return await handleCodeManifest(request, env, url);
+          return out(await handleCodeManifest(request, env, url));
         }
       }
-      if (request.method === 'GET' && url.pathname.startsWith('/code/')) {
+      if (isRead && url.pathname.startsWith('/code/')) {
         if (url.pathname.endsWith('.asar')) {
-          return await handleCodeFile(request, env, url);
+          return out(await handleCodeFile(request, env, url));
         }
       }
-      if (url.pathname === '/health') return json({ ok: true });
+      if (isRead && url.pathname === '/health') return out(json({ ok: true }));
       return json({ ok: false, error: 'not found' }, 404);
     } catch (err) {
       // The catch-all must not describe the fault to whoever triggered it.

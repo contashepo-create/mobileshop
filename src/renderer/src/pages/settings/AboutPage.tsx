@@ -7,6 +7,20 @@ import {
 import { Button } from '../../components/ui/Button';
 import { asRows } from '../../lib/ipc';
 
+/**
+ * True when `b` is a STRICTLY NEWER version than `a`. Numeric compare, not a
+ * string compare: "1.0.34" must never be reported as newer than "1.0.44".
+ */
+function isNewerVersion(a: string, b: string): boolean {
+  const pa = String(a || '0.0.0').split('.').map(Number);
+  const pb = String(b || '0.0.0').split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x !== y) return y > x;
+  }
+  return false;
+}
+
 /** Egyptian local number (01x…) -> international digits, for wa.me / t.me. */
 function toInternational(local: string): string {
   const d = (local || '').replace(/\D/g, '');
@@ -98,7 +112,7 @@ export function AboutPage() {
   };
 
   const updateAvailable =
-    info.latest_version && info.latest_version !== info.app_version;
+    isNewerVersion(info.app_version, info.latest_version);
 
   const wa = toInternational(info.dev_whatsapp);
   const tg = (info.dev_telegram || '').replace(/^@/, '');
@@ -125,6 +139,15 @@ export function AboutPage() {
               <span className="inline-flex items-center gap-1 text-sm text-slate-500 dark:text-slate-400">
                 <Hash size={13} /> الإصدار {info.app_version}
               </span>
+              <button
+                onClick={checkForUpdates}
+                disabled={checking}
+                title="التحقق يدوياً من وجود إصدار جديد"
+                className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-primary-600 dark:text-primary-400 hover:bg-primary-50 dark:hover:bg-primary-900/30 transition-colors disabled:opacity-60"
+              >
+                <RefreshCw size={11} className={checking ? 'animate-spin' : ''} />
+                {checking ? 'جارٍ الفحص…' : 'فحص التحديث'}
+              </button>
               {info.app_edition && (
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300">
                   {info.app_edition}

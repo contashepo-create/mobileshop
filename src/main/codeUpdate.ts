@@ -260,141 +260,6 @@ async function stagePush(manifest: CodeManifest): Promise<void> {
 }
 
 /**
- * Spawns the detached swap helper. It outlives this process, so the swap and
- * the boot-verification keep running even though we are about to exit.
- */
-function spawnSwapHelper(): boolean {
-  const exe = app.getPath('exe');
-  const resources = resourcesDir();
-  const currentPid = process.pid;
-  const helper = path.join(resources, 'code-swap.ps1');
-  const logFile = path.join(resources, 'code-swap.log');
-
-  const script = `
-param(
-  [string] $Exe,
-  [string] $Resources,
-  [int]    $OldPid
-)
-$ErrorActionPreference = 'Stop'
-$asar = Join-Path $Resources 'app.asar'
-$new  = Join-Path $Resources 'app.asar.new'
-$bak  = Join-Path $Resources 'app.asar.bak'
-$ok   = Join-Path $Resources '.code-ok'
-$log  = Join-Path $Resources 'code-swap.log'
-
-function Log($msg) {
-  $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-  "$ts $msg" | Out-File -FilePath $log -Append -Encoding utf8
-}
-
-Log "SWAP START pid=$OldPid exe=$Exe resources=$Resources"
-
-# 1. Wait for the app that just quit to actually release its files.
-#    Allow up to 30 seconds — WAL checkpoint + DB close can take time.
-for ($i = 0; $i -lt 60; $i++) {
-  if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) { break }
-  Start-Sleep -Milliseconds 500
-}
-Log "Process $OldPid exited (waited $i * 500ms)"
-
-if (-not (Test-Path -LiteralPath $new)) {
-  Log "No app.asar.new — nothing to swap, exiting."
-  exit 0
-}
-
-try {
-  # 2. Swap, keeping the old code as the rollback copy.
-  if (Test-Path -LiteralPath $bak) { Remove-Item -LiteralPath $bak -Force }
-  Move-Item -LiteralPath $asar $bak
-  Log "Renamed app.asar -> app.asar.bak"
-  Move-Item -LiteralPath $new $asar
-  Log "Renamed app.asar.new -> app.asar"
-  Remove-Item -LiteralPath $ok -Force -ErrorAction SilentlyContinue
-
-  # 3. Relaunch the app, then wait for the new build to prove itself.
-  Log "Launching: $Exe"
-  Start-Process -FilePath $Exe
-  $booted = $false
-  for ($i = 0; $i -lt 60; $i++) {
-    Start-Sleep -Seconds 1
-    if (Test-Path -LiteralPath $ok) { $booted = $true; break }
-  }
-
-  if ($booted) {
-    Log "SWAP SUCCESS — new build booted OK"
-  } else {
-    Log "SWAP FAILED — boot timed out, rolling back"
-    Remove-Item -LiteralPath $asar -Force -ErrorAction SilentlyContinue
-    Move-Item -LiteralPath $bak $asar
-        Start-Process -FilePath $Exe
-      }
-    } catch {
-      Log "SWAP ERROR: $($_.Exception.Message)"
-      if (-not (Test-Path -LiteralPath $asar) -and (Test-Path -LiteralPath $bak)) {
-        Move-Item -LiteralPath $bak $asar
-        Log "Restored app.asar.bak -> app.asar after error"
-      }
-      Start-Process -FilePath $Exe
-    }
-    # Clean up the scheduled task that launched us
-    schtasks /delete /tn "MobileShopCodeSwap" /f 2>$null
-    exit 0
-    `;
-
-      try {
-        fs.writeFileSync(helper, script, 'utf-8');
-
-        // Launch via Windows Task Scheduler — the ONLY reliable way to create a
-        // process that survives Electron's app.quit(). Electron uses Windows Job
-        // Objects that kill ALL child processes (including detached spawn,
-        // cmd.exe /c start, etc.) when the parent exits. Task Scheduler creates
-        // the process as a child of svchost.exe, completely outside our job.
-        //
-        // CRITICAL: `schtasks /tr` CANNOT handle paths containing Arabic
-        // characters or even spaces reliably. The install path
-        // "D:\programing\intstalation\موبايل شوب\MobileShopERP\resources" has
-        // both. SOLUTION: write the launcher .bat to %TEMP% (always ASCII) and
-        // have it call the PowerShell script at its real path. The .bat file
-        // passes all paths as arguments to PowerShell, which handles Unicode
-        // natively.
-        const tempDir = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
-        const launcher = path.join(tempDir, 'mobileshop-code-swap.bat');
-        // The bat file calls PowerShell with the real (Unicode) paths as args.
-        // PowerShell handles Unicode in arguments natively.
-        const bat = `@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${helper}" "${exe}" "${resources}" ${currentPid}\r\n`;
-        fs.writeFileSync(launcher, bat, 'utf-8');
-
-        const taskName = 'MobileShopCodeSwap';
-        execSync(`schtasks /create /tn "${taskName}" /tr "${launcher}" /sc once /st 23:59 /f`, {
-          windowsHide: true,
-          timeout: 5000,
-        });
-        execSync(`schtasks /run /tn "${taskName}"`, {
-          windowsHide: true,
-          timeout: 5000,
-        });
-        console.log('[CodeUpdater] swap helper launched via Task Scheduler (temp bat)');
-        return true;
-      } catch (err) {
-        console.error('[CodeUpdater] Task Scheduler failed, trying fallback:', (err as Error).message);
-        // Fallback: try detached spawn (may not survive app.quit(), but better
-        // than nothing if Task Scheduler is disabled/broken)
-        try {
-          const child = spawn('powershell.exe', [
-            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-            '-File', helper, exe, resources, String(currentPid),
-          ], { detached: true, stdio: 'ignore', windowsHide: true });
-          child.unref();
-          console.log('[CodeUpdater] fallback: swap helper spawned directly (pid ' + child.pid + ')');
-          return true;
-        } catch {
-          return false;
-        }
-      }
-    }
-
-/**
  * Replaces the running asar using Windows Task Scheduler.
  *
  * Electron memory-maps app.asar, so fs.renameSync fails with EBUSY from
@@ -538,7 +403,11 @@ export function markCodeBootOk(): void {
 export async function checkForCodeUpdatesNow(): Promise<{ ok: boolean; message?: string }> {
   if (!started) return { ok: false, message: 'التحديث السريع غير مفعّل' };
   const m = await fetchManifest();
-  if (!m) { broadcast({ state: 'uptodate' }); return { ok: true }; }
+  // No manifest is a NON-EVENT here. Broadcasting `uptodate` from the fast
+  // lane would claim "الأحدث" while a full-NSIS release the code lane cannot
+  // see is still pending — the contradiction the About screen used to show.
+  // The NSIS lane owns the up-to-date verdict; it broadcasts it itself.
+  if (!m) return { ok: true };
   await stagePush(m);
   return { ok: true };
 }

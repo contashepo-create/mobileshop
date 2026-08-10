@@ -61,13 +61,19 @@ export function registerOpeningBalanceHandlers() {
   // Update cash account opening balance
   ipcMain.handle('openingBalances:updateCash', async (_event, id: number, balance: number) => {
     const db = getDb();
-    // A cash box cannot open holding less than nothing. Unlike a customer,
-    // whose negative balance legitimately means the shop owes them, physical
-    // money has no credit side — and this figure is the starting point every
-    // later balance is built on, so an error here is permanent.
     const res = checkAmount(balance, 'الرصيد الافتتاحي للخزينة');
     if (!res.ok) return { success: false, message: res.message };
+    // Get the old balance to compute the difference for capital adjustment
+    const old = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(id) as any;
+    const oldBalance = Number(old?.Balance) || 0;
+    const diff = balance - oldBalance;
     db.prepare('UPDATE cash_accounts SET Balance = ? WHERE CashAccountID = ?').run(balance, id);
+    // Adjust owner capital so the financial position stays balanced
+    if (Math.abs(diff) > 0.001) {
+      const cap = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      const newCap = (Number(cap?.Value) || 0) + diff;
+      db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)").run(String(newCap));
+    }
     return { success: true };
   });
 
@@ -76,7 +82,17 @@ export function registerOpeningBalanceHandlers() {
     const db = getDb();
     const res = checkAmount(balance, 'الرصيد الافتتاحي لطريقة الدفع');
     if (!res.ok) return { success: false, message: res.message };
+    // Get the old balance to compute the difference for capital adjustment
+    const old = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(id) as any;
+    const oldBalance = Number(old?.Balance) || 0;
+    const diff = balance - oldBalance;
     db.prepare('UPDATE payment_methods SET Balance = ? WHERE PaymentMethodID = ?').run(balance, id);
+    // Adjust owner capital so the financial position stays balanced
+    if (Math.abs(diff) > 0.001) {
+      const cap = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      const newCap = (Number(cap?.Value) || 0) + diff;
+      db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)").run(String(newCap));
+    }
     return { success: true };
   });
 

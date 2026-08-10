@@ -15,7 +15,7 @@ export function PaymentMethodsPage() {
   const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<any>(null);
-  const [form, setForm] = useState({ MethodName: '', MethodType: 'pos_machine', Provider: '', PhoneNumber: '', IsActive: 1 });
+  const [form, setForm] = useState({ MethodName: '', MethodType: 'pos_machine', Provider: '', PhoneNumber: '', OpeningBalance: '', IsActive: 1 });
 
   const [statementMethod, setStatementMethod] = useState<any>(null);
   const [statementData, setStatementData] = useState<any>(null);
@@ -32,13 +32,13 @@ export function PaymentMethodsPage() {
 
   const openCreate = () => {
     setEditing(null);
-    setForm({ MethodName: '', MethodType: 'pos_machine', Provider: '', PhoneNumber: '', IsActive: 1 });
+    setForm({ MethodName: '', MethodType: 'pos_machine', Provider: '', PhoneNumber: '', OpeningBalance: '', IsActive: 1 });
     setShowModal(true);
   };
 
   const openEdit = (pm: any) => {
     setEditing(pm);
-    setForm({ MethodName: pm.MethodName, MethodType: pm.MethodType, Provider: pm.Provider || '', PhoneNumber: pm.PhoneNumber || '', IsActive: pm.IsActive });
+    setForm({ MethodName: pm.MethodName, MethodType: pm.MethodType, Provider: pm.Provider || '', PhoneNumber: pm.PhoneNumber || '', OpeningBalance: '', IsActive: pm.IsActive });
     setShowModal(true);
   };
 
@@ -49,7 +49,7 @@ export function PaymentMethodsPage() {
       if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم التحديث');
     } else {
-      const reply = await window.api.invoke('paymentMethods:create', form);
+      const reply = await window.api.invoke('paymentMethods:create', { ...form, OpeningBalance: parseFloat(form.OpeningBalance) || 0 });
       if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
       showToast('success', 'تم الإضافة');
     }
@@ -177,6 +177,7 @@ export function PaymentMethodsPage() {
           </Select>
           <Input label="المزوّد" value={form.Provider} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, Provider: e.target.value })} hint="فودافون، أورانج، اتصالات، إنستا باي..." />
           <Input label="رقم المحفظة" value={form.PhoneNumber} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, PhoneNumber: e.target.value })} />
+          {!editing && <Input label="الرصيد الافتتاحي" type="number" value={form.OpeningBalance} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, OpeningBalance: e.target.value })} hint="يُضاف لرأس المال تلقائياً" />}
         </div>
       </Modal>
 

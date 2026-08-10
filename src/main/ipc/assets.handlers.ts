@@ -146,13 +146,22 @@ export function registerAssetsHandlers() {
     if (!provider.ok) return { success: false, message: provider.message };
     const phone = optionalText(data?.PhoneNumber, 'رقم الهاتف', LIMITS.PHONE);
     if (!phone.ok) return { success: false, message: phone.message };
+    const openingBalance = Math.max(0, Number(data?.OpeningBalance) || 0);
     const result = db.prepare(`
       INSERT INTO payment_methods (MethodName, MethodType, Provider, PhoneNumber, Balance, IsActive)
-      VALUES (@MethodName, @MethodType, @Provider, @PhoneNumber, 0, 1)
+      VALUES (@MethodName, @MethodType, @Provider, @PhoneNumber, @Balance, 1)
     `).run({
       MethodName: name.value, MethodType: type.value,
       Provider: provider.value, PhoneNumber: phone.value,
+      Balance: openingBalance,
     });
+    // If an opening balance was set, add it to owner capital so the financial
+    // position balances (Assets = Liabilities + Equity).
+    if (openingBalance > 0) {
+      const currentCapital = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      const newCapital = (Number(currentCapital?.Value) || 0) + openingBalance;
+      db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)").run(String(newCapital));
+    }
     return { success: true, id: result.lastInsertRowid };
   });
 

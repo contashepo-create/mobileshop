@@ -360,9 +360,11 @@ export function SupplierStatementPage() {
                 <div className="text-slate-700 dark:text-slate-200">{supplier.Address || '—'}</div>
               </div>
               <div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mb-0.5">الرصيد المستحق له</div>
-                <div className={`font-bold ${supplier.Balance > 0 ? 'text-orange-600' : 'text-green-600'}`}>
-                  {supplier.Balance?.toFixed(2)}
+                <div className="text-xs text-slate-500 dark:text-slate-400 mb-0.5">
+                  {(supplier.Balance ?? 0) > 0 ? 'الرصيد المستحق له' : (supplier.Balance ?? 0) < 0 ? 'الرصيد المستحق لنا' : 'الرصيد'}
+                </div>
+                <div className={`font-bold ${(supplier.Balance ?? 0) > 0 ? 'text-orange-600' : (supplier.Balance ?? 0) < 0 ? 'text-green-600' : 'text-slate-500'}`}>
+                  {Math.abs(supplier.Balance ?? 0).toFixed(2)}
                 </div>
               </div>
             </div>
@@ -385,7 +387,7 @@ export function SupplierStatementPage() {
               <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3 flex items-center gap-3">
                 <Scale size={20} className="text-blue-500" />
                 <div>
-                  <div className="text-xs text-slate-500 dark:text-slate-500 dark:text-slate-400">صافي الرصيد المستحق</div>
+                  <div className="text-xs text-slate-500 dark:text-slate-400">{data.totals.netBalance >= 0 ? 'صافي المستحق له' : 'صافي المستحق لنا'}</div>
                   <div className={`text-lg font-bold ${data.totals.netBalance >= 0 ? 'text-orange-600' : 'text-green-600'}`}>
                     {Math.abs(data.totals.netBalance).toFixed(2)}
                   </div>

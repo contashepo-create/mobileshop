@@ -387,22 +387,27 @@ export function MaintenancePage() {
    };
 
    // === Warranty — open new warranty ticket linked to original ===
-    const openWarrantyTicket = (originalTicket: any) => {
+    const openWarrantyTicket = async (originalTicket: any) => {
+      // Fetch fresh ticket data to ensure CustomerID is present
+      const fresh = await window.api.invoke('maintenance:get', originalTicket.TicketID);
+      const t = fresh?.ticket || originalTicket;
       setRecvForm({
-       CustomerID: originalTicket.CustomerID?.toString() || '',
-       CustomerName: originalTicket.CustomerName || '',
-       CustomerPhone: originalTicket.CustomerPhone || '',
-       DeviceModel: originalTicket.DeviceModel || '',
-       DeviceIMEI: originalTicket.DeviceIMEI || '',
+       CustomerID: t.CustomerID?.toString() || '',
+       CustomerName: t.CustomerName || '',
+       CustomerPhone: t.CustomerPhone || '',
+       DeviceModel: t.DeviceModel || '',
+       DeviceIMEI: t.DeviceIMEI || '',
        ProblemDesc: '',
        Accessories: '',
-       DevicePassword: originalTicket.DevicePassword || '',
+       DevicePassword: t.DevicePassword || '',
        AgreedDeliveryDate: '',
        AgreedCost: '0',
-       TechnicianID: originalTicket.TechnicianID?.toString() || '',
+       TechnicianID: t.TechnicianID?.toString() || '',
        MaintenanceType: 'warranty',
-       ReferenceTicketID: String(originalTicket.TicketID),
+       ReferenceTicketID: String(t.TicketID),
      });
+     // Close the current workbench and open the receive form
+     setWorkbenchTicketId(null);
      setShowReceive(true);
    };
 

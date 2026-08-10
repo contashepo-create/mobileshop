@@ -102,7 +102,7 @@ export function registerReportsHandlers() {
     };
   });
 
-  // Sales report - includes all receipt vouchers from the customer (not just linked ones)
+  // Sales report - later payments are ONLY vouchers explicitly linked to THIS sale
   ipcMain.handle('reports:sales', async (_event, filters: { fromDate?: string; toDate?: string }) => {
     const db = getDb();
     let query = `
@@ -113,20 +113,16 @@ export function registerReportsHandlers() {
                SELECT COALESCE(SUM(v.Amount),0)
                FROM vouchers v
                WHERE v.VoucherType = 'receipt'
-                 AND (
-                   (v.ReferenceType = 'sale' AND v.ReferenceID = s.SaleID)
-                   OR (v.PartyType = 'customer' AND v.PartyID = s.CustomerID)
-                 )
+                 AND v.ReferenceType = 'sale'
+                 AND v.ReferenceID = s.SaleID
                  AND v.Date >= s.Date
              ), 0) as LaterPayments,
              (s.RemainingAmount - COALESCE((
                SELECT COALESCE(SUM(v.Amount),0)
                FROM vouchers v
                WHERE v.VoucherType = 'receipt'
-                 AND (
-                   (v.ReferenceType = 'sale' AND v.ReferenceID = s.SaleID)
-                   OR (v.PartyType = 'customer' AND v.PartyID = s.CustomerID)
-                 )
+                 AND v.ReferenceType = 'sale'
+                 AND v.ReferenceID = s.SaleID
                  AND v.Date >= s.Date
              ), 0)) as ActualRemaining,
              s.Status, s.PaymentMethod, u.Username

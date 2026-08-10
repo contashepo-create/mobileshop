@@ -274,9 +274,17 @@ export function MaintenancePage() {
   // === Deliver ===
   const openDeliverModal = () => {
     const t = wbData?.ticket;
+    // Calculate the FULL total: parts + services + usage + labor
+    // (not just service costs — the old code used finSummary.totalPriceToClient
+    // which excluded parts and labor, so the "paid" field showed a partial amount)
+    const _partsSale = wbData?.parts?.reduce((s: number, p: any) => s + ((p.SalePrice || p.UnitCost) * p.Quantity), 0) || 0;
+    const _svcPrice = wbData?.serviceCosts?.reduce((s: number, c: any) => s + (c.PriceToClient || 0), 0) || 0;
+    const _usagePrice = wbData?.serviceUsage?.reduce((s: number, u: any) => s + ((u.PriceToClient || 0) * (u.Quantity || 1)), 0) || 0;
+    const _labor = t?.AgreedCost || 0;
+    const _total = _partsSale + _svcPrice + _usagePrice + _labor;
     setDeliverForm({
       LaborCost: t?.AgreedCost?.toString() || '',
-      PaidAmount: finSummary?.totalPriceToClient?.toFixed(2) || '',
+      PaidAmount: _total.toFixed(2),
       CashAccountID: '', PaymentMethodID: '', Discount: '', FinalPrice: '',
       FinalNotes: '',
     });
@@ -801,7 +809,9 @@ export function MaintenancePage() {
 
             <Textarea label="ملاحظات الفاتورة (تظهر للعميل)" value={deliverForm.FinalNotes} onChange={(e: any) => setDeliverForm({...deliverForm, FinalNotes: e.target.value})} rows={2} placeholder="ملاحظات إضافية على الفاتورة..." />
 
-            <Input label="المبلغ المحصّل من العميل" type="number" value={deliverForm.PaidAmount} onChange={(e: any) => setDeliverForm({...deliverForm, PaidAmount: e.target.value})} />
+            <Input label="المبلغ المحصّل من العميل" type="number" value={deliverForm.PaidAmount} onChange={(e: any) => setDeliverForm({...deliverForm, PaidAmount: e.target.value})}
+              hint={`الإجمالي المستحق: ${deliveryFinalPrice.toFixed(2)}`}
+            />
             {parseFloat(deliverForm.PaidAmount || '0') > 0 && (
               <div className="grid grid-cols-2 gap-3">
                 {/* One destination only — selecting a machine clears the safe,

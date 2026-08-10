@@ -676,9 +676,18 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
               <Input label="الهاتف" value={selectedCustomerObj.Phone || ''} disabled />
               <div>
                 <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">الرصيد السابق</label>
-                <div className={`px-3 py-2 rounded-lg text-sm font-bold ${selectedCustomerObj.Balance > 0 ? 'text-red-600 bg-red-50 dark:bg-red-900/20' : 'text-green-600 bg-green-50 dark:bg-green-900/20'}`}>
-                  {selectedCustomerObj.Balance?.toFixed(2)} مدين
+                <div className={`px-3 py-2 rounded-lg text-sm font-bold ${selectedCustomerObj.Balance > 0 ? 'text-red-600 bg-red-50 dark:bg-red-900/20' : selectedCustomerObj.Balance < 0 ? 'text-green-600 bg-green-50 dark:bg-green-900/20' : 'text-slate-500 bg-slate-50 dark:bg-slate-700/30'}`}>
+                  {selectedCustomerObj.Balance > 0
+                    ? `${selectedCustomerObj.Balance?.toFixed(2)} مدين`
+                    : selectedCustomerObj.Balance < 0
+                      ? `${Math.abs(selectedCustomerObj.Balance || 0).toFixed(2)} دائن (مستحق له)`
+                      : '0.00'}
                 </div>
+                {selectedCustomerObj.Balance < 0 && (
+                  <div className="mt-1 text-xs text-green-600 bg-green-50 dark:bg-green-900/20 rounded p-1.5">
+                    💡 هذا العميل لديه رصيد دائن بقيمة {Math.abs(selectedCustomerObj.Balance).toFixed(2)} — يمكنك خصم الفاتورة من رصيده
+                  </div>
+                )}
               </div>
             </>}
           </div>

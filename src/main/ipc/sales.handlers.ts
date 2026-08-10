@@ -243,6 +243,24 @@ export function registerSalesHandlers() {
       // invoice and is charged in the profit & loss report instead.
       const totalAmount = money(subtotal - data.Discount + data.TaxAmount + customerBorneFee);
       const paidAmount = money(data.PaidAmount || 0);
+
+      // If the customer has a CREDIT balance (negative = we owe them), apply
+      // it automatically to reduce the invoice amount. This is standard
+      // accounting: a customer who overpaid on a previous invoice gets the
+      // credit applied to their next purchase.
+      let creditApplied = 0;
+      if (data.CustomerID) {
+        const cust = db.prepare('SELECT Balance FROM customers WHERE CustomerID = ?').get(data.CustomerID) as any;
+        const custBalance = Number(cust?.Balance) || 0;
+        if (custBalance < 0) {
+          // Customer has a credit — apply it to this invoice
+          creditApplied = Math.min(Math.abs(custBalance), totalAmount);
+          // Reduce the customer's credit by the applied amount
+          db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(creditApplied, data.CustomerID);
+        }
+      }
+
+      const effectiveTotal = money(totalAmount - creditApplied);
       // Rounded, and a residue under one piastre is treated as settled.
       //
       // Money is kept to two decimals, so a balance of 0.00999999... is not a
@@ -251,7 +269,7 @@ export function registerSalesHandlers() {
       // hundredth of a piastre that could never be cleared. It arises whenever
       // a total divides unevenly, which a discount spread across lines does
       // routinely.
-      const rawRemaining = money(totalAmount - paidAmount);
+      const rawRemaining = money(effectiveTotal - paidAmount);
       const remaining = Math.abs(rawRemaining) < 0.01 ? 0 : rawRemaining;
 
       const dateStr = businessToday();

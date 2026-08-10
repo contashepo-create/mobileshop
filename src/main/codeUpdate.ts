@@ -440,17 +440,19 @@ export function applyStagedCode(): boolean {
     return true;
   } catch (err) {
     console.error('[CodeUpdater] direct swap failed:', (err as Error).message);
-    // Try to restore from backup if the swap failed mid-way
-    try {
-      if (!fs.existsSync(asar) && fs.existsSync(asarBak)) {
-        fs.renameSync(asarBak, asar);
-        console.log('[CodeUpdater] restored from backup after failed swap');
-      }
-    } catch { /* best effort */ }
-    swapArmed = false;  // allow retry
-    return false;
+    // On Windows, fs.renameSync can fail with EBUSY/EPERM because Electron
+    // memory-maps app.asar. The fix: schedule the swap for the before-quit
+    // event (when the file handle is released) and force exit.
+    console.log('[CodeUpdater] scheduling swap for before-quit');
+    pendingSwap = true;
+    // Force quit — before-quit will fire and try the swap again
+    app.exit(0);
+    return true;  // return true so the caller doesn't try NSIS
   }
 }
+
+/** Set when a direct swap fails — before-quit will retry. */
+let pendingSwap = false;
 
 /**
  * Marks this boot as healthy so a pending swap helper does not roll it back.

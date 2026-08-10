@@ -386,11 +386,23 @@ app.on('before-quit', () => {
   }
   closeDb();
 
-  // Swap app.asar directly (no external process). If successful, app.relaunch()
-  // was already called inside applyStagedCode — the next process will load
-  // the new code. app.exit(0) here ensures a clean shutdown.
-  if (applyStagedCode()) {
-    app.exit(0);
+  // Retry the swap on before-quit — app.asar file handles are released now.
+  // The first attempt (from the "restart" button) may fail with EBUSY because
+  // Electron memory-maps the file. By the time before-quit fires, the renderer
+  // is gone and the file can be renamed.
+  try {
+    const asar = path.join(path.dirname(app.getPath('exe')), 'resources', 'app.asar');
+    const asarNew = asar + '.new';
+    const asarBak = asar + '.bak';
+    if (fs.existsSync(asarNew)) {
+      if (fs.existsSync(asarBak)) fs.unlinkSync(asarBak);
+      fs.renameSync(asar, asarBak);
+      fs.renameSync(asarNew, asar);
+      // app.relaunch() was already called — just ensure exit
+      console.log('[Main] swap completed on before-quit');
+    }
+  } catch (err) {
+    console.error('[Main] before-quit swap failed:', (err as Error).message);
   }
 });
 

@@ -386,24 +386,11 @@ app.on('before-quit', () => {
   }
   closeDb();
 
-  // Retry the swap on before-quit — app.asar file handles are released now.
-  // The first attempt (from the "restart" button) may fail with EBUSY because
-  // Electron memory-maps the file. By the time before-quit fires, the renderer
-  // is gone and the file can be renamed.
-  try {
-    const asar = path.join(path.dirname(app.getPath('exe')), 'resources', 'app.asar');
-    const asarNew = asar + '.new';
-    const asarBak = asar + '.bak';
-    if (fs.existsSync(asarNew)) {
-      if (fs.existsSync(asarBak)) fs.unlinkSync(asarBak);
-      fs.renameSync(asar, asarBak);
-      fs.renameSync(asarNew, asar);
-      // app.relaunch() was already called — just ensure exit
-      console.log('[Main] swap completed on before-quit');
-    }
-  } catch (err) {
-    console.error('[Main] before-quit swap failed:', (err as Error).message);
-  }
+  // The external swap helper (launched via Task Scheduler) handles the swap
+  // AFTER this process exits. It waits for the PID to die, then renames
+  // app.asar.new -> app.asar and relaunches. We do NOT touch app.asar here
+  // because fs.renameSync fails with EBUSY (Electron memory-maps the file).
+  // Just ensure app.quit() completes so the helper can proceed.
 });
 
 // Auto backup function - saves to userData/backups

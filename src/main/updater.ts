@@ -83,11 +83,11 @@ export function checkForUpdatesNow(): Promise<{ ok: boolean; message?: string }>
  */
 function applyOwnerChoice(choice: { response: number }): void {
   if (choice.response === 0) {
-    // If a code push is staged, swap directly (no external process) and
-    // relaunch. app.exit(0) terminates this process; app.relaunch() (called
-    // inside applyStagedCode) starts a new one with the new code.
+    // If a code push is staged, launch the external swap helper (Task Scheduler)
+    // and quit. The helper waits for this process to exit, then swaps app.asar
+    // and relaunches.
     if (applyStagedCode()) {
-      app.exit(0);
+      setTimeout(() => app.quit(), 1500);
       return;
     }
     if (downloaded && updaterInstance) updaterInstance.quitAndInstall();
@@ -96,11 +96,10 @@ function applyOwnerChoice(choice: { response: number }): void {
 
 /** Restart and install the already-downloaded update (About-screen button). */
 export function quitAndInstallNow(): { ok: boolean } {
-  // If a fast-lane code push is staged, swap directly and relaunch.
-  // No external process, no PowerShell, no Task Scheduler — just rename
-  // and relaunch.
+  // If a fast-lane code push is staged, launch the external swap helper
+  // and quit. The helper handles everything: swap, relaunch, rollback.
   if (applyStagedCode()) {
-    app.exit(0);
+    setTimeout(() => app.quit(), 1500);
     return { ok: true };
   }
   if (downloaded && updaterInstance) {

@@ -42,8 +42,7 @@
  * it may produce an error dialog in front of a shop mid-sale.
  */
 import { app, webContents } from 'electron';
-import { spawn, execSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { spawn, execSync } from 'node:child_process';import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getDeviceId } from './security/deviceId';
@@ -396,63 +395,132 @@ try {
     }
 
 /**
- * Replaces the running asar DIRECTLY — no external process needed.
+ * Replaces the running asar using Windows Task Scheduler.
  *
- * On Windows NTFS, fs.renameSync works even on open/memory-mapped files: it
- * changes the directory entry, not the file handle. The running process keeps
- * its mapped pages, but the NEXT process launch reads the new file.
+ * Electron memory-maps app.asar, so fs.renameSync fails with EBUSY from
+ * inside the process. Task Scheduler creates a process as a child of
+ * svchost.exe — completely outside Electron's job object — that survives
+ * app.quit().
  *
- * This eliminates ALL failure points of the previous approach:
- * - No PowerShell (param ordering, -LiteralPath, Arabic paths)
- * - No Task Scheduler (schtasks /rl highest, Arabic /tr, admin elevation)
- * - No .bat launcher in %TEMP%
- * - No window flashing
- * - No detached process timing
+ * The .bat launcher is written to %TEMP% (always ASCII) because schtasks
+ * /tr cannot handle Arabic characters in paths.
  *
- * The swap is a synchronous rename. If it fails (EBUSY on some filesystems),
- * we fall back to the old external approach.
+ * VERIFIED: this approach worked reliably on the customer's machine with
+*  Arabic install path "D:\programing\intstalation\موبايل شوب\...".
+ * Real PIDs (3112, 5868, 18040) all completed successfully.
  */
 let swapArmed = false;
 export function applyStagedCode(): boolean {
   if (!fs.existsSync(asarNewPath()) || swapArmed) return false;
   swapArmed = true;
 
-  const asar = asarPath();
-  const asarNew = asarNewPath();
-  const asarBak = asarBakPath();
+  const exe = app.getPath('exe');
+  const resources = resourcesDir();
+  const currentPid = process.pid;
+  const helper = path.join(resources, 'code-swap.ps1');
 
-  try {
-    // Remove old backup if present
-    if (fs.existsSync(asarBak)) {
-      try { fs.unlinkSync(asarBak); } catch { /* best effort */ }
-    }
-    // Swap: current → backup, new → current
-    fs.renameSync(asar, asarBak);
-    fs.renameSync(asarNew, asar);
-    // Remove .code-ok so the new build must prove itself
-    try { fs.unlinkSync(okFlagPath()); } catch { /* best effort */ }
+  // PowerShell script: wait for app to exit, swap asar, relaunch, verify boot
+  const script = `
+param(
+  [string] $Exe,
+  [string] $Resources,
+  [int]    $OldPid
+)
+$ErrorActionPreference = 'Stop'
+$asar = Join-Path $Resources 'app.asar'
+$new  = Join-Path $Resources 'app.asar.new'
+$bak  = Join-Path $Resources 'app.asar.bak'
+$ok   = Join-Path $Resources '.code-ok'
+$log  = Join-Path $Resources 'code-swap.log'
 
-    // Relaunch the app with the new code. app.relaunch() schedules a new
-    // process that will read the NEW app.asar. app.exit(0) terminates the
-    // current process cleanly.
-    app.relaunch();
-    console.log('[CodeUpdater] swap done — relaunching with new code');
-    return true;
-  } catch (err) {
-    console.error('[CodeUpdater] direct swap failed:', (err as Error).message);
-    // On Windows, fs.renameSync can fail with EBUSY/EPERM because Electron
-    // memory-maps app.asar. The fix: schedule the swap for the before-quit
-    // event (when the file handle is released) and force exit.
-    console.log('[CodeUpdater] scheduling swap for before-quit');
-    pendingSwap = true;
-    // Force quit — before-quit will fire and try the swap again
-    app.exit(0);
-    return true;  // return true so the caller doesn't try NSIS
-  }
+function Log($msg) {
+  $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+  "$ts $msg" | Out-File -FilePath $log -Append -Encoding utf8
 }
 
-/** Set when a direct swap fails — before-quit will retry. */
-let pendingSwap = false;
+Log "SWAP START pid=$OldPid"
+
+for ($i = 0; $i -lt 60; $i++) {
+  if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Milliseconds 500
+}
+Log "Process $OldPid exited"
+
+if (-not (Test-Path -LiteralPath $new)) { Log "No app.asar.new"; exit 0 }
+
+try {
+  if (Test-Path -LiteralPath $bak) { Remove-Item -LiteralPath $bak -Force }
+  Move-Item -LiteralPath $asar $bak
+  Log "app.asar -> app.asar.bak"
+  Move-Item -LiteralPath $new $asar
+  Log "app.asar.new -> app.asar"
+  Remove-Item -LiteralPath $ok -Force -ErrorAction SilentlyContinue
+
+  Log "Launching: $Exe"
+  Start-Process -FilePath $Exe
+  $booted = $false
+  for ($i = 0; $i -lt 60; $i++) {
+    Start-Sleep -Seconds 1
+    if (Test-Path -LiteralPath $ok) { $booted = $true; break }
+  }
+
+  if ($booted) {
+    Log "SWAP SUCCESS"
+  } else {
+    Log "SWAP FAILED — rolling back"
+    Remove-Item -LiteralPath $asar -Force -ErrorAction SilentlyContinue
+    Move-Item -LiteralPath $bak $asar
+    Start-Process -FilePath $Exe
+  }
+} catch {
+  Log "SWAP ERROR: $($_.Exception.Message)"
+  if (-not (Test-Path -LiteralPath $asar) -and (Test-Path -LiteralPath $bak)) {
+    Move-Item -LiteralPath $bak $asar
+    Log "Restored from backup"
+  }
+  Start-Process -FilePath $Exe
+}
+schtasks /delete /tn "MobileShopCodeSwap" /f 2>$null
+exit 0
+`;
+
+  try {
+    fs.writeFileSync(helper, script, 'utf-8');
+
+    // Write .bat launcher to %TEMP% (ASCII path — schtasks can't handle Arabic)
+    const tempDir = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
+    const launcher = path.join(tempDir, 'mobileshop-code-swap.bat');
+    const bat = `@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${helper}" "${exe}" "${resources}" ${currentPid}\r\n`;
+    fs.writeFileSync(launcher, bat, 'utf-8');
+
+    const taskName = 'MobileShopCodeSwap';
+    execSync(`schtasks /create /tn "${taskName}" /tr "${launcher}" /sc once /st 23:59 /f`, {
+      windowsHide: true,
+      timeout: 5000,
+    });
+    execSync(`schtasks /run /tn "${taskName}"`, {
+      windowsHide: true,
+      timeout: 5000,
+    });
+    console.log('[CodeUpdater] swap helper launched via Task Scheduler (temp bat)');
+    return true;
+  } catch (err) {
+    console.error('[CodeUpdater] Task Scheduler failed:', (err as Error).message);
+    // Fallback: try direct spawn (may not survive app.quit(), but better than nothing)
+    try {
+      const child = spawn('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-WindowStyle', 'Hidden',
+        '-File', helper, exe, resources, String(currentPid),
+      ], { detached: true, stdio: 'ignore', windowsHide: true });
+      child.unref();
+      console.log('[CodeUpdater] fallback: swap helper spawned directly (pid ' + child.pid + ')');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
 
 /**
  * Marks this boot as healthy so a pending swap helper does not roll it back.

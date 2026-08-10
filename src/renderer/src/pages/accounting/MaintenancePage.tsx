@@ -986,10 +986,21 @@ export function MaintenancePage() {
               </div>
             )}
 
+            {previewTicket.serviceUsage?.length > 0 && (
+              <div><h4 className="text-xs font-semibold text-slate-500 mb-1">خدمات مستخدمة</h4>
+                {asRows<any>(previewTicket.serviceUsage).map((u: any, idx: number) => (
+                  <div key={idx} className="flex justify-between text-xs py-1 border-b border-slate-100 dark:border-slate-700/50">
+                    <span className="text-slate-700 dark:text-slate-200">{u.Description || u.ItemName} × {u.Quantity}</span>
+                    <span className="font-bold text-green-600">{(u.PriceToClient * (u.Quantity || 1))?.toFixed(2)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="grid grid-cols-3 gap-3">
-              <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-2 text-center"><div className="text-xs text-slate-500 dark:text-slate-400">قطع الغيار</div><div className="font-bold text-orange-600">{previewTicket.PartsCost?.toFixed(2) || '0'}</div></div>
-              <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-2 text-center"><div className="text-xs text-slate-500 dark:text-slate-400">المصنعية</div><div className="font-bold text-green-600">{previewTicket.LaborCost?.toFixed(2) || '0'}</div></div>
-              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-2 text-center"><div className="text-xs text-slate-500 dark:text-slate-400">الإجمالي</div><div className="font-bold text-blue-600">{previewTicket.TotalCost?.toFixed(2) || '0'}</div></div>
+              <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-2 text-center"><div className="text-xs text-slate-500 dark:text-slate-400">قطع الغيار</div><div className="font-bold text-orange-600">{(previewTicket.parts?.reduce((s: number, p: any) => s + (p.TotalCost || 0), 0) || 0).toFixed(2)}</div></div>
+              <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-2 text-center"><div className="text-xs text-slate-500 dark:text-slate-400">الخدمات والمصنعية</div><div className="font-bold text-green-600">{((previewTicket.serviceCosts?.reduce((s: number, c: any) => s + (c.PriceToClient || 0), 0) || 0) + (previewTicket.serviceUsage?.reduce((s: number, u: any) => s + ((u.PriceToClient || 0) * (u.Quantity || 1)), 0) || 0) + (previewTicket.LaborCost || 0)).toFixed(2)}</div></div>
+              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-2 text-center"><div className="text-xs text-slate-500 dark:text-slate-400">الإجمالي</div><div className="font-bold text-blue-600">{(previewTicket.TotalCost?.toFixed(2) || '0')}</div></div>
             </div>
 
             {previewTicket.log?.length > 0 && (

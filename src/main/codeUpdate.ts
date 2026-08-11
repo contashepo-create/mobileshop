@@ -267,12 +267,18 @@ async function stagePush(manifest: CodeManifest): Promise<void> {
  * svchost.exe — completely outside Electron's job object — that survives
  * app.quit().
  *
- * The .bat launcher is written to %TEMP% (always ASCII) because schtasks
- * /tr cannot handle Arabic characters in paths.
+ * THE ENCODING RULE (why -EncodedCommand and not a -File script):
+ * The whole helper — paths included — travels as base64 of UTF-16LE in a
+ * pure-ASCII .bat under %TEMP%. A .ps1 written into `resources` and invoked
+ * via -File "<path>" DIES on any non-ASCII install path: cmd.exe re-reads
+ * the .bat bytes through the OEM codepage, the Arabic path comes out
+ * mojibake'd, PowerShell exits before its first line runs, and the app is
+ * left closed with the swap never done and no relaunch — measured three
+ * times on the customer's machine ("موبايل شوب" install folder).
  *
- * VERIFIED: this approach worked reliably on the customer's machine with
-*  Arabic install path "D:\programing\intstalation\موبايل شوب\...".
- * Real PIDs (3112, 5868, 18040) all completed successfully.
+ * The .bat carries a second, tiny -EncodedCommand: if the main helper
+ * fails to even start, that one relaunches the app anyway, so a broken
+ * swap can never leave the shop closed.
  */
 let swapArmed = false;
 export function applyStagedCode(): boolean {
@@ -282,16 +288,15 @@ export function applyStagedCode(): boolean {
   const exe = app.getPath('exe');
   const resources = resourcesDir();
   const currentPid = process.pid;
-  const helper = path.join(resources, 'code-swap.ps1');
 
-  // PowerShell script: wait for app to exit, swap asar, relaunch, verify boot
+  // Single-quoted PS literal; a ' inside a path becomes '' (PS escaping).
+  const psQuote = (s: string) => `'${String(s).replace(/'/g, "''")}'`;
+
   const script = `
-param(
-  [string] $Exe,
-  [string] $Resources,
-  [int]    $OldPid
-)
 $ErrorActionPreference = 'Stop'
+$Exe = ${psQuote(exe)}
+$Resources = ${psQuote(resources)}
+$OldPid = ${currentPid}
 $asar = Join-Path $Resources 'app.asar'
 $new  = Join-Path $Resources 'app.asar.new'
 $bak  = Join-Path $Resources 'app.asar.bak'
@@ -305,13 +310,17 @@ function Log($msg) {
 
 Log "SWAP START pid=$OldPid"
 
-for ($i = 0; $i -lt 60; $i++) {
+for ($i = 0; $i -lt 120; $i++) {
   if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) { break }
   Start-Sleep -Milliseconds 500
 }
 Log "Process $OldPid exited"
 
-if (-not (Test-Path -LiteralPath $new)) { Log "No app.asar.new"; exit 0 }
+if (-not (Test-Path -LiteralPath $new)) {
+  Log 'No app.asar.new — nothing to swap, relaunching'
+  Start-Process -FilePath $Exe
+  exit 0
+}
 
 try {
   if (Test-Path -LiteralPath $bak) { Remove-Item -LiteralPath $bak -Force }
@@ -324,7 +333,7 @@ try {
   Log "Launching: $Exe"
   Start-Process -FilePath $Exe
   $booted = $false
-  for ($i = 0; $i -lt 60; $i++) {
+  for ($i = 0; $i -lt 120; $i++) {
     Start-Sleep -Seconds 1
     if (Test-Path -LiteralPath $ok) { $booted = $true; break }
   }
@@ -332,9 +341,10 @@ try {
   if ($booted) {
     Log "SWAP SUCCESS"
   } else {
-    Log "SWAP FAILED — rolling back"
+    Log "SWAP FAILED - rolling back"
     Remove-Item -LiteralPath $asar -Force -ErrorAction SilentlyContinue
     Move-Item -LiteralPath $bak $asar
+    Log "Restored from backup"
     Start-Process -FilePath $Exe
   }
 } catch {
@@ -348,14 +358,22 @@ try {
 schtasks /delete /tn "MobileShopCodeSwap" /f 2>$null
 exit 0
 `;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+
+  // Relaunch-only fallback, also fully encoded: the app comes back even when
+  // the main helper cannot start at all.
+  const relaunch = `Start-Process -FilePath ${psQuote(exe)}; exit 0`;
+  const relaunchEncoded = Buffer.from(relaunch, 'utf16le').toString('base64');
 
   try {
-    fs.writeFileSync(helper, script, 'utf-8');
-
-    // Write .bat launcher to %TEMP% (ASCII path — schtasks can't handle Arabic)
+    // Write .bat launcher to %TEMP% (pure ASCII — the encoded commands carry
+    // the Arabic paths; cmd's codepage never sees them).
     const tempDir = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
     const launcher = path.join(tempDir, 'mobileshop-code-swap.bat');
-    const bat = `@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${helper}" "${exe}" "${resources}" ${currentPid}\r\n`;
+    const bat =
+      `@echo off\r\n`
+      + `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ${encoded}\r\n`
+      + `if errorlevel 1 powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ${relaunchEncoded}\r\n`;
     fs.writeFileSync(launcher, bat, 'utf-8');
 
     const taskName = 'MobileShopCodeSwap';
@@ -367,7 +385,7 @@ exit 0
       windowsHide: true,
       timeout: 5000,
     });
-    console.log('[CodeUpdater] swap helper launched via Task Scheduler (temp bat)');
+    console.log('[CodeUpdater] swap helper launched via Task Scheduler (encoded command)');
     return true;
   } catch (err) {
     console.error('[CodeUpdater] Task Scheduler failed:', (err as Error).message);
@@ -376,7 +394,7 @@ exit 0
       const child = spawn('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
         '-WindowStyle', 'Hidden',
-        '-File', helper, exe, resources, String(currentPid),
+        '-EncodedCommand', encoded,
       ], { detached: true, stdio: 'ignore', windowsHide: true });
       child.unref();
       console.log('[CodeUpdater] fallback: swap helper spawned directly (pid ' + child.pid + ')');
@@ -397,6 +415,10 @@ export function markCodeBootOk(): void {
   try {
     fs.writeFileSync(okFlagPath(), String(Date.now()));
   } catch { /* per-machine installs cannot write here; swap is disabled there */ }
+  // A previous swap may have left app.asar.bak behind (helper killed mid-run
+  // or a stale rollback copy). This boot has proven itself — the backup is
+  // dead weight and only confuses the next swap, so drop it.
+  try { fs.unlinkSync(asarBakPath()); } catch { /* nothing to clean */ }
 }
 
 /** Manual check from the About screen. */

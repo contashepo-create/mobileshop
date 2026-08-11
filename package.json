@@ -1,6 +1,6 @@
 {
   "name": "mobile-shop-erp",
-  "version": "1.0.48",
+  "version": "1.0.50",
   "description": "نظام إدارة محلات الموبايلات والصيانة",
   "main": ".vite/build/index.js",
   "author": "Acc. Mohamed Abdou",

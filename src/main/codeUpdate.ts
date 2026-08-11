@@ -114,6 +114,17 @@ function semverGte(a: string, b: string): boolean {
   return true;
 }
 
+/** Strictly-greater variant of `semverGte` — swap requires a newer code. */
+function semverGt(a: string, b: string): boolean {
+  const pa = String(a || '0.0.0').split('.').map(Number);
+  const pb = String(b || '0.0.0').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] ?? 0, y = pb[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
 interface CodeManifest {
   version: string;
   asar: string;           // relative path, e.g. /code/win32-x64/1.0.5.asar
@@ -285,6 +296,25 @@ export function applyStagedCode(): boolean {
   if (!fs.existsSync(asarNewPath()) || swapArmed) return false;
   swapArmed = true;
 
+  // Guard: never swap in a push that is not newer than the running code.
+  // This is what stops a stale staging file (e.g. a 1.0.47 new-asar left by
+  // a failed swap) from silently downgrading a machine that a full installer
+  // brought up to 1.0.48. The swap only happens with a strictly newer code.
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(asarNewPath(), 'package.json'), 'utf-8'));
+    const stagedVersion = String(pkg.version || '');
+    const current = realCodeVersion();
+    if (!stagedVersion || !semverGt(stagedVersion, current)) {
+      console.log(`[CodeUpdater] staged asar (${stagedVersion || 'unreadable'}) is not newer than ${current} — swap refused`);
+      try { fs.unlinkSync(asarNewPath()); } catch { /* best effort */ }
+      return false;
+    }
+  } catch {
+    // Unreadable staged asar: refuse to touch it; report no swap.
+    try { fs.unlinkSync(asarNewPath()); } catch { /* best effort */ }
+    return false;
+  }
+
   const exe = app.getPath('exe');
   const resources = resourcesDir();
   const currentPid = process.pid;
@@ -406,6 +436,34 @@ exit 0
 }
 
 /**
+ * Removes a stale staged asar. A staged `app.asar.new` survives a failed or
+ * interrupted swap, and would otherwise outlive a full-installer update: the
+ * next restart would then swap an OLD code push in over a NEW full release —
+ * a silent downgrade. Also, a machine whose running code is older than the
+ * staged file (a stale 1.0.47 new-file sitting next to a broken 1.0.46 shell)
+ * must not be left pointing at it forever. Reading `package.json` from inside
+ * the staged archive works because Electron's fs is asar-aware.
+ */
+function purgeStaleStaging(): void {
+  const newPath = asarNewPath();
+  if (!fs.existsSync(newPath)) return;
+  let stagedVersion = '';
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(newPath, 'package.json'), 'utf-8'));
+    stagedVersion = String(pkg.version || '');
+  } catch { /* unreadable asar — never swap an unverifiable file */ }
+  const current = realCodeVersion();
+  // A staged push at the SAME or older version than the running code is dead
+  // weight (or a downgrade trap). Drop it. Unknown/unreadable: drop it too.
+  if (!stagedVersion || semverGte(current, stagedVersion)) {
+    try {
+      fs.unlinkSync(newPath);
+      console.log(`[CodeUpdater] purged stale staged asar (${stagedVersion || 'unreadable'}) — running ${current}`);
+    } catch { /* best effort */ }
+  }
+}
+
+/**
  * Marks this boot as healthy so a pending swap helper does not roll it back.
  * Called from the main process AFTER the database migration succeeded — the
  * last thing that can reasonably crash a new build. Deliberately synchronous
@@ -419,6 +477,8 @@ export function markCodeBootOk(): void {
   // or a stale rollback copy). This boot has proven itself — the backup is
   // dead weight and only confuses the next swap, so drop it.
   try { fs.unlinkSync(asarBakPath()); } catch { /* nothing to clean */ }
+  // Same for a staged-asar that is not newer than what just booted.
+  purgeStaleStaging();
 }
 
 /** Manual check from the About screen. */

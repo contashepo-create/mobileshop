@@ -23,6 +23,14 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
   const { showToast } = useToastStore();
   const [vouchers, setVouchers] = useState<any[]>([]);
   const [typeFilter, setTypeFilter] = useState(mode ?? 'all');
+  // React reuses this component when navigating between the two voucher
+  // routes (same component, same position), so `mode` can change while the
+  // old state survives. Reset the filter AND the form whenever it does —
+  // otherwise سندات القبض keeps showing the payment list it last displayed.
+  useEffect(() => {
+    setTypeFilter(mode ?? 'all');
+    setForm((f) => ({ ...f, VoucherType: mode ?? 'receipt' }));
+  }, [mode]);
   const [showModal, setShowModal] = useState(false);
   const [cashAccounts, setCashAccounts] = useState<any[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
@@ -124,7 +132,7 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
         partyName: voucher.PartyName || '—',
       },
     };
-    const action = direct ? 'print' : (defaultAction === 'print' ? 'print:invoice' : 'print:preview');
+    const action = direct ? 'print:invoice' : (defaultAction === 'print' ? 'print:invoice' : 'print:preview');
     await window.api.invoke(action, printData);
   };
 

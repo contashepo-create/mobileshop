@@ -29,8 +29,13 @@ function checkPayrollParties(
     const c = optionalId(cashAccountId, 'الخزينة');
     if (!c.ok) return { ok: false, message: c.message };
     if (c.value !== null) {
-      const acc = db.prepare('SELECT 1 AS ok FROM cash_accounts WHERE CashAccountID = ?').get(c.value);
+      const acc = db.prepare('SELECT IsActive FROM cash_accounts WHERE CashAccountID = ?').get(c.value) as any;
       if (!acc) return { ok: false, message: 'الخزينة غير موجودة' };
+      // A DEACTIVATED drawer must not hand money out. The purchases flow has
+      // refused it for the same reason; without the check a stale form could
+      // advance wages through the very drawer the screen hides. Measured: a
+      // deactivated drawer paid out a 500 advance.
+      if (acc.IsActive !== 1) return { ok: false, message: 'الخزنة المختارة غير مفعّلة' };
     }
     cash = c.value;
   }
@@ -206,8 +211,16 @@ export function registerPayrollHandlers() {
     if (salary.Status === 'paid') return { success: false, message: 'تم صرف هذا الراتب بالفعل' };
 
     const netSalary = salary.NetSalary;
-    const paidAmount = data.PaidAmount !== undefined && data.PaidAmount > 0 ? Math.min(data.PaidAmount, netSalary) : netSalary;
-    const status = paidAmount >= netSalary ? 'paid' : 'partial';
+    // Each pay may hand over at most what the salary still owes. The old cap
+    // used the FULL net salary every time, so a third installment could pay
+    // past the remaining balance: one run paid 600, 900 then 100 against a
+    // net of 1500 and the employee ended up overpaid by 500 with the drawer
+    // drained. The remaining figure ties each leg to what issue actually
+    // owes.
+    const alreadyPaid = Number(salary.PaidAmount) || 0;
+    const remaining = +(netSalary - alreadyPaid).toFixed(2);
+    const paidAmount = data.PaidAmount !== undefined && data.PaidAmount > 0 ? Math.min(data.PaidAmount, remaining) : remaining;
+    const status = paidAmount >= remaining - 0.001 ? 'paid' : 'partial';
     const paymentDate = businessToday();
 
     // Check sufficient balance before paying salary (unless negative cash allowed)
@@ -220,21 +233,45 @@ export function registerPayrollHandlers() {
     }
 
     const tx = db.transaction(() => {
-      // Update salary record
+      // The read above ran before the transaction bound the write lock; a
+      // rival flow could drain the drawer in between, so the balance is
+      // re-checked here under the lock. Without it, a sabotaged drawer
+      // accepted a 3000 pay whose deduction then blew the negative-cash
+      // trigger with a raw crash instead of a refusal.
+      if (allowNegCash?.Value !== '1' && data.CashAccountID && paidAmount > 0) {
+        const accTx = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+        if (!accTx || (accTx.Balance || 0) < paidAmount) {
+          const e = new Error(`الرصيد غير كافٍ في الخزينة لصرف الراتب: المتاح ${(accTx?.Balance || 0).toFixed(2)}، المطلوب ${paidAmount.toFixed(2)}`);
+          (e as any).userRefusal = true;
+          throw e;
+        }
+      }
+
+      // Update salary record. PaidAmount ACCUMULATES across installments —
+      // the old write stored only the latest leg, so a 600-then-900 sequence
+      // left the row at 900 while its status said "paid"; statements and the
+      // employees report then footed 600 less than the drawer actually paid.
       db.prepare(`
-        UPDATE salaries SET PaidAmount = ?, Status = ?, CashAccountID = ?, PaymentDate = ?
+        UPDATE salaries SET PaidAmount = COALESCE(PaidAmount, 0) + ?, Status = ?, CashAccountID = ?, PaymentDate = ?
         WHERE SalaryID = ?
       `).run(paidAmount, status, data.CashAccountID ?? null, paymentDate, data.SalaryID);
 
-      // Mark commissions as paid
-      const commissions = db.prepare("SELECT * FROM commissions WHERE EmployeeID = ? AND IsPaid = 0").all(salary.EmployeeID) as any[];
+      // Mark commissions as paid. Only the ones that existed when the salary
+      // was issued may enter it: a commission earned AFTER issue is not part
+      // of NetSalary, so paying it here would hand out money nobody budgeted
+      // for. (Measured: a 400 commission earned 1.1s after issue was swept
+      // into the pay despite never appearing in the figures.)
+      const commissions = db.prepare("SELECT * FROM commissions WHERE EmployeeID = ? AND IsPaid = 0 AND CreatedAt <= ?")
+        .all(salary.EmployeeID, salary.CreatedAt) as any[];
       for (const c of commissions) {
         db.prepare('UPDATE commissions SET IsPaid = 1, PaidInSalaryID = ?, PaidAmount = ? WHERE CommissionID = ?')
           .run(data.SalaryID, c.Amount, c.CommissionID);
       }
 
-      // Mark deductions as deducted
-      const deductions = db.prepare("SELECT * FROM employee_deductions WHERE EmployeeID = ? AND IsDeducted = 0").all(salary.EmployeeID) as any[];
+      // Mark deductions as deducted — same boundary: only the ones that were
+      // part of the issued net may be settled here.
+      const deductions = db.prepare("SELECT * FROM employee_deductions WHERE EmployeeID = ? AND IsDeducted = 0 AND CreatedAt <= ?")
+        .all(salary.EmployeeID, salary.CreatedAt) as any[];
       for (const d of deductions) {
         db.prepare('UPDATE employee_deductions SET IsDeducted = 1, DeductedFromSalaryID = ? WHERE DeductionID = ?').run(data.SalaryID, d.DeductionID);
       }
@@ -255,7 +292,12 @@ export function registerPayrollHandlers() {
       }
     });
 
-    tx();
+    try {
+      tx();
+    } catch (err: any) {
+      if (err?.userRefusal) return { success: false, message: err.message };
+      throw err;
+    }
     return { success: true, netSalary, paidAmount, status };
   });
 
@@ -465,14 +507,34 @@ export function registerPayrollHandlers() {
       }
     }
 
-    db.transaction(() => {
+    const tx = db.transaction(() => {
+      // Same lock-time re-check as salaries:pay: the validation above ran
+      // outside the write lock, and a rival flow can drain the drawer in
+      // that window. Under the lock this keeps the advance from being issued
+      // against balance that is already gone.
+      if (allowNegCash?.Value !== '1') {
+        const accTx = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+        if (!accTx || (accTx.Balance || 0) < data.Amount) {
+          const e = new Error(`الرصيد غير كافٍ في الخزينة للسلفة: المتاح ${(accTx?.Balance || 0).toFixed(2)}، المطلوب ${data.Amount.toFixed(2)}`);
+          (e as any).userRefusal = true;
+          throw e;
+        }
+      }
+
       db.prepare(`
         INSERT INTO employee_advances (EmployeeID, Amount, Date, Reason, CashAccountID, IsDeducted, FiscalYearID, UserID)
         VALUES (?, ?, ?, ?, ?, 0, ?, ?)
       `).run(data.EmployeeID, data.Amount, dateStr, data.Reason ?? null, data.CashAccountID, data.fiscalYearId, data.userId);
 
       db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(data.Amount, data.CashAccountID);
-    })();
+    });
+
+    try {
+      tx();
+    } catch (err: any) {
+      if (err?.userRefusal) return { success: false, message: err.message };
+      throw err;
+    }
 
     return { success: true };
   });

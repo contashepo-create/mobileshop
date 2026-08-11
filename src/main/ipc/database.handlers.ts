@@ -1,6 +1,6 @@
 import { ipcMain, dialog, app } from 'electron';
 import { getDb, getDbPath, setDbPath } from '../database/connection';
-import { safeFailure } from '../security/errorResponse';
+import { safeFailure, userRefusal } from '../security/errorResponse';
 import path from 'node:path';
 import fs from 'node:fs';
 import { businessToday } from '../../shared/businessDate';
@@ -30,13 +30,13 @@ const EXPORT_BLOCKLIST = new Set(['users', 'user_overrides', 'settings']);
  */
 function assertExportableTable(db: ReturnType<typeof getDb>, tableName: unknown): string {
   if (typeof tableName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(tableName)) {
-    throw new Error('اسم الجدول غير صالح');
+    throw userRefusal('اسم الجدول غير صالح');
   }
   const known = db.prepare(
     "SELECT name FROM sqlite_master WHERE type='table' AND name = ? AND name NOT LIKE 'sqlite_%'"
   ).get(tableName) as any;
-  if (!known) throw new Error('الجدول غير موجود');
-  if (EXPORT_BLOCKLIST.has(tableName)) throw new Error('لا يمكن تصدير هذا الجدول لأسباب أمنية');
+  if (!known) throw userRefusal('الجدول غير موجود');
+  if (EXPORT_BLOCKLIST.has(tableName)) throw userRefusal('لا يمكن تصدير هذا الجدول لأسباب أمنية');
   return known.name as string;
 }
 

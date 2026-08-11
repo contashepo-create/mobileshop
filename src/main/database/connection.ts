@@ -154,14 +154,32 @@ function configuredDbPath(): string | null {
 }
 
 /**
- * Escapes lone backslashes in a JSON string so Windows paths like
- * `C:\ProgramData\...` become valid JSON `C:\\ProgramData\\...`.
+ * Makes an installer-written db_settings.json parseable when it is not already
+ * valid JSON, without corrupting a file that is.
  *
- * Only touches backslashes that are NOT already part of a valid JSON escape
- * sequence (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`).
+ * The NSIS installer writes the raw path with LITERAL Windows backslashes —
+ * `{"dbPath":"C:\ProgramData\MobileShopERP\mobile_shop.db"}` — which are not
+ * valid JSON. A per-backslash lookahead cannot repair that safely: a backslash
+ * followed by one of the JSON escape letters (`\t` in `C:\temp`, `\f` in
+ * `C:\folder`, `\u` in `C:\Users\...`) is indistinguishable from a genuine
+ * `\t`/`\n`/... escape inside a plain-text scan, and the wrong guess silently
+ * rewrites the shop's database path.
+ *
+ * Windows forbids control characters (0x00–0x1F) in file names, so a parse
+ * that SUCCEEDS but yields a path containing one is proof the file used
+ * literal separators: double every backslash and parse again. A file written
+ * by setDbPath (JSON.stringify, proper `\\` escapes) parses clean on the
+ * first attempt and is returned untouched.
  */
 function escapeLoneBackslashes(text: string): string {
-  return text.replace(/\\(?!["\\\/bfnrtu])/g, '\\\\');
+  try {
+    const settings = JSON.parse(text);
+    const p = (settings as { dbPath?: unknown } | null)?.dbPath;
+    if (typeof p !== 'string' || !/[\u0000-\u001f]/.test(p)) return text;
+  } catch {
+    // Not valid JSON — treat every backslash as a literal separator below.
+  }
+  return text.replace(/\\/g, '\\\\');
 }
 
 /**

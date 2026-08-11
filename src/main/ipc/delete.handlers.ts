@@ -676,11 +676,22 @@ export function registerDeleteHandlers() {
           db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(delivery.PaidAmount, delivery.CashAccountID);
         }
 
+        // Reverse the machine leg too. `maintenance:deliver` stores the
+        // machine's id on the delivery (CashAccountID is NULL for machine
+        // payments), so without this branch a deleted machine-paid delivery
+        // left its payment in the machine forever.
+        if (delivery.PaymentMethodID && delivery.PaidAmount > 0) {
+          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(delivery.PaidAmount, delivery.PaymentMethodID);
+        }
+
         // Reverse ticket status back
         db.prepare("UPDATE maintenance_tickets SET Status = 'ready', TotalCost = 0 WHERE TicketID = ?").run(delivery.TicketID);
 
-        // Reverse commission
-        db.prepare("UPDATE commissions SET IsPaid = 0, PaidInSalaryID = NULL, PaidAmount = 0 WHERE ReferenceType = 'maintenance_delivery' AND ReferenceID = ?").run(deliveryId);
+        // A deleted delivery is a job that never happened. Resetting the
+        // commission to unpaid left its Amount on the technician's account —
+        // the employees report still showed 300 owed for work the shop had
+        // erased.
+        db.prepare("DELETE FROM commissions WHERE ReferenceType = 'maintenance_delivery' AND ReferenceID = ?").run(deliveryId);
 
         // Delete associated sale (reverse all effects)
         if (delivery.SaleID) {

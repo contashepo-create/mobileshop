@@ -410,12 +410,19 @@ export function registerReportsHandlers() {
     `).get(...params) as any;
 
     // 3. Maintenance Parts Cost (cost of parts from revenue-bearing tickets only — exclude warranty)
+    //
+    // Parts placed on a ticket that was cancelled or returned were RESTORED to
+    // stock (the inventory is still on the shelf). Charging their cost anyway
+    // while the asset side still counts them made the balance sheet's own
+    // identity fail — the maintenance equivalent of `cogsReturns` above. Only
+    // parts still consumed by a live ticket are a real cost.
     const partsCost = db.prepare(`
       SELECT COALESCE(SUM(mp.TotalCost),0) as total
       FROM maintenance_parts mp
       JOIN maintenance_tickets t ON mp.TicketID = t.TicketID
       WHERE 1=1 ${joinFilterTicket}
       AND t.MaintenanceType NOT IN ('warranty', 'rework')
+      AND t.Status NOT IN ('cancelled', 'returned')
     `).get(...params) as any;
 
     // 4. Warranty Parts Consumed (cost of parts used on warranty/rework tickets — absorbed expense)
@@ -425,6 +432,7 @@ export function registerReportsHandlers() {
       JOIN maintenance_tickets t ON mp.TicketID = t.TicketID
       WHERE 1=1 ${joinFilterTicket}
       AND t.MaintenanceType IN ('warranty', 'rework')
+      AND t.Status NOT IN ('cancelled', 'returned')
     `).get(...params) as any;
 
     // 4. Service Sales Cost — excludes `Amount` (the pass-through principal),
@@ -697,12 +705,14 @@ export function registerReportsHandlers() {
       FROM maintenance_parts mp
       JOIN maintenance_tickets t ON mp.TicketID = t.TicketID
       WHERE t.MaintenanceType NOT IN ('warranty', 'rework')
+      AND t.Status NOT IN ('cancelled', 'returned')
     `).get() as any;
     const warrantyPartsCost = db.prepare(`
       SELECT COALESCE(SUM(mp.TotalCost),0) as total
       FROM maintenance_parts mp
       JOIN maintenance_tickets t ON mp.TicketID = t.TicketID
       WHERE t.MaintenanceType IN ('warranty', 'rework')
+      AND t.Status NOT IN ('cancelled', 'returned')
     `).get() as any;
     // `Amount` excluded — it is the pass-through principal, already netted out
     // of serviceRevenue above (agent vs principal).

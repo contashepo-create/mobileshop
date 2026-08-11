@@ -2,12 +2,13 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { getCallerUserId } from '../security/ipcGuard';
 import { nextDocNumber } from '../database/docNumber';
-import { deductStock, restoreStock } from '../database/stock';
+import { deductStock, restoreStock, restoreStockAtCost } from '../database/stock';
 import { businessToday } from '../../shared/businessDate';
 import {
   oneOf, requireText, optionalText, optionalNote, optionalDate, optionalId, requireId,
   LIMITS, MAINTENANCE_WORKFLOW_STATUSES,
 } from '../../shared/validate';
+import { checkAmount, checkAmounts } from '../../shared/money';
 
 const statusLabels: Record<string, string> = {
   received: 'مستلم', inspecting: 'فحص', in_progress: 'قيد العمل',
@@ -101,7 +102,7 @@ export function registerMaintenanceHandlers() {
     CustomerID?: number; CustomerName: string; CustomerPhone: string;
     DeviceModel: string; DeviceIMEI?: string; ProblemDesc: string;
     Accessories?: string; DevicePassword?: string;
-    AgreedDeliveryDate?: string; AgreedCost?: number;
+    AgreedDeliveryDate?: string; AgreedCost?: number | string;
     TechnicianID?: number; userId: number; fiscalYearId: number;
     MaintenanceType?: string; ReferenceTicketID?: number;
   }) => {
@@ -143,6 +144,21 @@ export function registerMaintenanceHandlers() {
     const rcvDeliveryDate = optionalDate(data?.AgreedDeliveryDate, 'تاريخ التسليم المتفق عليه');
     if (!rcvDeliveryDate.ok) return { success: false, message: rcvDeliveryDate.message };
 
+    // The agreed cost is bound straight into SQL below, so it is checked here
+    // like every other amount in the program. Before this, a minus sign
+    // (AgreedCost = -500) or a paste of garbage (NaN) travelled all the way
+    // into the ticket: the negative price was stored and the NaN bound as NULL
+    // via better-sqlite3's own coercion — both recorded as valid repairs.
+    // An empty string from the form means "no agreement" and is treated as
+    // absent, the same way every other optional field is handled here.
+    let rcvAgreedCost: number | null = null;
+    if (data?.AgreedCost !== undefined && data?.AgreedCost !== null
+      && !(typeof data.AgreedCost === 'string' && data.AgreedCost.trim() === '')) {
+      const chkCost = checkAmount(data.AgreedCost, 'التكلفة المتفق عليها');
+      if (!chkCost.ok) return { success: false, message: chkCost.message };
+      rcvAgreedCost = chkCost.value;
+    }
+
     data = {
       ...data,
       CustomerID: rcvCustomerId.value ?? undefined,
@@ -156,6 +172,7 @@ export function registerMaintenanceHandlers() {
       Accessories: rcvAccessories.value ?? undefined,
       DevicePassword: rcvPassword.value ?? undefined,
       AgreedDeliveryDate: rcvDeliveryDate.value ?? undefined,
+      AgreedCost: rcvAgreedCost ?? undefined,
     };
 
     const dateStr = businessToday();
@@ -293,6 +310,39 @@ export function registerMaintenanceHandlers() {
       const chk = requireId(val, label);
       if (!chk.ok) return { success: false, message: chk.message };
     }
+    // Existence checks, before anything is read from stock. Before these,
+    // a part issued against a non-existent TICKET blew up on the foreign key
+    // (the raw "FOREIGN KEY constraint failed" escaped to the caller), and a
+    // non-existent item or warehouse was refused with a misleading stock
+    // message — "الكمية غير متوفرة في المخزن: المطلوب 1، المتاح 0" — even
+    // though no such shelf exists to be short.
+    if (!db.prepare('SELECT 1 AS ok FROM maintenance_tickets WHERE TicketID = ?').get(data.TicketID)) {
+      return { success: false, message: 'التذكرة غير موجودة' };
+    }
+    if (!db.prepare('SELECT 1 AS ok FROM items WHERE ItemID = ?').get(data.ItemID)) {
+      return { success: false, message: 'الصنف غير موجود' };
+    }
+    if (!db.prepare('SELECT WarehouseID FROM warehouses WHERE WarehouseID = ?').get(data.WarehouseID)) {
+      return { success: false, message: 'المخزن المختار غير موجود' };
+    }
+    // The quantity is bound straight into SQL and fed to deductStock, so it is
+    // checked like every quantity in the program. Before this, Quantity = 0
+    // booked a zero-cost part row onto the ticket, and a negative Quantity
+    // wrote a part the shop would be billed for backwards — while NaN, which
+    // better-sqlite3 coerces to NULL, crashed on the column's NOT NULL.
+    const badQty = checkAmounts([[data?.Quantity, 'الكمية', { allowZero: false }]]);
+    if (badQty) return { success: false, message: badQty };
+    const issueTicket = db.prepare('SELECT Status FROM maintenance_tickets WHERE TicketID = ?').get(data.TicketID) as any;
+    if (!issueTicket) {
+      return { success: false, message: 'التذكرة غير موجودة' };
+    }
+    // A terminal ticket can never be billed again: a part issued after
+    // delivery leaves the shelf with no invoice to charge it on. Before this,
+    // `maintenance:deliver` then `maintenance:issuePart` booked the part, and
+    // the stock was gone with the only record of it sitting on a closed file.
+    if (issueTicket.Status === 'delivered' || issueTicket.Status === 'cancelled' || issueTicket.Status === 'returned') {
+      return { success: false, message: 'التذكرة منتهية - لا يمكن إضافة قطع' };
+    }
     // COST INTEGRITY: the cost booked against the ticket MUST equal the value
     // actually leaving inventory, otherwise the balance sheet silently drifts
     // by the difference on every repair (assets drop by CostPrice while P&L is
@@ -339,25 +389,39 @@ export function registerMaintenanceHandlers() {
 
     // Check sufficient stock (unless negative stock allowed)
     const allowNegStock = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_stock'").get() as any;
-    if (allowNegStock?.Value !== '1') {
-      const stockQty = db.prepare('SELECT COALESCE(SUM(Quantity),0) as qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(data.ItemID, data.WarehouseID) as any;
-      if ((stockQty?.qty || 0) < data.Quantity) {
-        return { success: false, message: `الكمية غير متوفرة في المخزن: المطلوب ${data.Quantity}، المتاح ${stockQty?.qty || 0}` };
-      }
+
+    // The availability check must run UNDER the write lock. The old check
+    // read the shelf BEFORE the transaction bound the lock, so a rival flow
+    // emptying the warehouse in between was never seen — the part was issued
+    // anyway and the pool went negative even with negative stock switched off.
+    // MEASURED with the race probe: shelf 100, rival empties it after the
+    // check, issue of 2 succeeds and lands at -2.
+    try {
+      db.transaction(() => {
+        if (allowNegStock?.Value !== '1') {
+          const stockQty = db.prepare('SELECT COALESCE(SUM(Quantity),0) as qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(data.ItemID, data.WarehouseID) as any;
+          if ((stockQty?.qty || 0) < data.Quantity) {
+            const e = new Error(`الكمية غير متوفرة في المخزن: المطلوب ${data.Quantity}، المتاح ${stockQty?.qty || 0}`);
+            (e as any).userRefusal = true;
+            throw e;
+          }
+        }
+
+        db.prepare(`
+          INSERT INTO maintenance_parts (TicketID, ItemID, Quantity, UnitCost, TotalCost, SalePrice, WarehouseID, IssuedByUserID)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(data.TicketID, data.ItemID, data.Quantity, unitCost, totalCost, salePrice, data.WarehouseID, data.userId);
+
+        // Deduct from the exact warehouse the cost was read from.
+        deductStock(db, data.ItemID, data.WarehouseID, data.Quantity);
+
+        db.prepare('UPDATE maintenance_tickets SET PartsCost = PartsCost + ?, TotalCost = TotalCost + ? WHERE TicketID = ?')
+          .run(totalCost, totalSale || totalCost, data.TicketID);
+      })();
+    } catch (err: any) {
+      if (err?.userRefusal) return { success: false, message: err.message };
+      throw err;
     }
-
-    db.transaction(() => {
-      db.prepare(`
-        INSERT INTO maintenance_parts (TicketID, ItemID, Quantity, UnitCost, TotalCost, SalePrice, WarehouseID, IssuedByUserID)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(data.TicketID, data.ItemID, data.Quantity, unitCost, totalCost, salePrice, data.WarehouseID, data.userId);
-
-      // Deduct from the exact warehouse the cost was read from.
-      deductStock(db, data.ItemID, data.WarehouseID, data.Quantity);
-
-      db.prepare('UPDATE maintenance_tickets SET PartsCost = PartsCost + ?, TotalCost = TotalCost + ? WHERE TicketID = ?')
-        .run(totalCost, totalSale || totalCost, data.TicketID);
-    })();
 
     return { success: true, unitCost, totalCost };
   });
@@ -372,7 +436,12 @@ export function registerMaintenanceHandlers() {
     db.transaction(() => {
       db.prepare('DELETE FROM maintenance_parts WHERE PartID = ?').run(partId);
 
-      restoreStock(db, part.ItemID, part.WarehouseID, part.Quantity, part.UnitCost || 0);
+      // The units go back into the exact cost layers they were drawn from.
+      // The old `restoreStock` only refilled the pool; the layers kept the
+      // deduction, so every removed part left the books short by its own
+      // cost — the inventory report said 100 units but the layers claimed
+      // 98 still issued, and the missing value sat in no account anywhere.
+      restoreStockAtCost(db, part.ItemID, part.WarehouseID, part.Quantity, part.UnitCost || 0);
 
       // `TotalCost` is what the CUSTOMER is charged, `PartsCost` is what the
       // part cost the shop. Issuing a part adds the SALE value to TotalCost and
@@ -399,8 +468,23 @@ export function registerMaintenanceHandlers() {
     if (!svcDesc.ok) return { success: false, message: 'وصف الخدمة مطلوب' };
     const svcTicket = requireId(data?.TicketID, 'التذكرة');
     if (!svcTicket.ok) return { success: false, message: svcTicket.message };
+    // Both prices are bound straight into SQL and feed the profit summary, so
+    // they are checked like every other amount. Before this, a negative
+    // PriceToClient reduced the customer's bill while recording the service,
+    // a negative CostOnUs inflated the profit, and NaN quietly bound as 0 —
+    // all three accepted as successful rows.
+    const badSvc = checkAmounts([
+      [data?.CostOnUs, 'تكلفة الخدمة علينا'],
+      [data?.PriceToClient, 'سعر الخدمة للعميل'],
+    ]);
+    if (badSvc) return { success: false, message: badSvc };
     data = { ...data, Description: svcDesc.value, TicketID: svcTicket.value };
     const db = getDb();
+    // The TicketID is bound into an FK column below; a non-existent ticket
+    // crashed with the raw "FOREIGN KEY constraint failed" instead of a reply.
+    if (!db.prepare('SELECT 1 AS ok FROM maintenance_tickets WHERE TicketID = ?').get(data.TicketID)) {
+      return { success: false, message: 'التذكرة غير موجودة' };
+    }
     const result = db.prepare(`
       INSERT INTO maintenance_service_costs (TicketID, Description, CostOnUs, PriceToClient, UserID)
       VALUES (?, ?, ?, ?, ?)
@@ -434,8 +518,17 @@ export function registerMaintenanceHandlers() {
     if (!useDesc.ok) return { success: false, message: 'وصف الخدمة مطلوب' };
     const useTicket = requireId(data?.TicketID, 'التذكرة');
     if (!useTicket.ok) return { success: false, message: useTicket.message };
+    const badUse = checkAmounts([
+      [data?.CostOnUs, 'تكلفة الخدمة علينا'],
+      [data?.PriceToClient, 'سعر الخدمة للعميل'],
+      [data?.Quantity ?? 1, 'الكمية', { allowZero: false }],
+    ]);
+    if (badUse) return { success: false, message: badUse };
     data = { ...data, Description: useDesc.value, TicketID: useTicket.value };
     const db = getDb();
+    if (!db.prepare('SELECT 1 AS ok FROM maintenance_tickets WHERE TicketID = ?').get(data.TicketID)) {
+      return { success: false, message: 'التذكرة غير موجودة' };
+    }
     const result = db.prepare(`
       INSERT INTO maintenance_service_usage (TicketID, ItemID, Description, CostOnUs, PriceToClient, Quantity, UserID)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -602,10 +695,46 @@ export function registerMaintenanceHandlers() {
 
     const grossTotal = isWarranty ? 0 : (partsSalePrice + serviceCostTotal + data.LaborCost);
     const discount = isWarranty ? 0 : (data.Discount || 0);
-    const totalCost = isWarranty ? 0 : (data.FinalPrice || (grossTotal - discount));
+    // A discount larger than the goods turns the invoice negative, which the
+    // sale trigger rejects with a raw "sale total must not be negative" crash.
+    // Same rule as the sales/purchases handlers: the customer may be
+    // discounted down to zero, never into the shop's pocket.
+    if (!isWarranty && discount > grossTotal) {
+      return {
+        success: false,
+        message: `الخصم (${discount.toFixed(2)}) أكبر من إجمالي الأصناف (${grossTotal.toFixed(2)})`,
+      };
+    }
+    // `data.FinalPrice || (grossTotal - discount)` swallowed an explicit ZERO:
+    // a free override ("استلم الجهاز بلا مقابل") fell through to the gross
+    // total and the customer was billed the full repair. The explicit value
+    // must win, whatever it is.
+    const totalCost = isWarranty ? 0 : (data.FinalPrice != null ? data.FinalPrice : (grossTotal - discount));
     const paidAmount = isWarranty ? 0 : data.PaidAmount;
     const remaining = isWarranty ? 0 : (totalCost - paidAmount);
     const totalProfit = isWarranty ? (0 - totalCostOnUs) : (totalCost - totalCostOnUs);
+
+    // The payment must land somewhere that exists and is active.
+    //
+    // Before this, `UPDATE ... WHERE CashAccountID = ?` against a missing or
+    // inactive account affected zero rows and raised nothing: the customer
+    // paid, the invoice said paid, and the money was nowhere. Crediting an
+    // inactive account is just as bad — every report filters on IsActive = 1,
+    // so the cash becomes invisible.
+    if (!isWarranty && paidAmount > 0) {
+      if (!data.PaymentMethodID && !data.CashAccountID) {
+        return { success: false, message: 'اختر مصدر استلام المبلغ (خزنة أو ماكينة)' };
+      }
+      if (data.PaymentMethodID) {
+        const pm = db.prepare('SELECT IsActive FROM payment_methods WHERE PaymentMethodID = ?').get(data.PaymentMethodID) as any;
+        if (!pm) return { success: false, message: 'ماكينة الدفع المختارة غير موجودة' };
+        if (!pm.IsActive) return { success: false, message: 'ماكينة الدفع المختارة غير مفعّلة' };
+      } else if (data.CashAccountID) {
+        const acc = db.prepare('SELECT IsActive FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+        if (!acc) return { success: false, message: 'الخزنة المختارة غير موجودة' };
+        if (!acc.IsActive) return { success: false, message: 'الخزنة المختارة غير مفعّلة' };
+      }
+    }
 
     const dateStr = businessToday();
     const deliveryNumber = nextDocNumber(db, 'maintenance_deliveries', 'DeliveryNumber', 'DLV', dateStr);
@@ -781,12 +910,20 @@ export function registerMaintenanceHandlers() {
     const ticket = db.prepare('SELECT * FROM maintenance_tickets WHERE TicketID = ?').get(data.TicketID) as any;
     if (!ticket) return { success: false, message: 'التذكرة غير موجودة' };
     if (ticket.Status === 'delivered') return { success: false, message: 'لا يمكن إلغاء تذكرة تم تسليمها - استخدم المرتجع' };
+    // A returned ticket has already had its parts restored and its money
+    // reversed — cancelling it too restored the SAME parts again and put the
+    // books back on the wrong side. Measured: the double-restore put 98 units
+    // back on a shelf that held 96.
+    if (ticket.Status === 'returned') return { success: false, message: 'التذكرة مرتجعة - لا يمكن إلغاؤها' };
+    if (ticket.Status === 'cancelled') return { success: false, message: 'التذكرة ملغاة بالفعل' };
 
     db.transaction(() => {
       // Restore parts to stock
       const parts = db.prepare('SELECT * FROM maintenance_parts WHERE TicketID = ?').all(data.TicketID) as any[];
       for (const p of parts) {
-        restoreStock(db, p.ItemID, p.WarehouseID, p.Quantity, p.UnitCost || 0);
+        // Into the exact cost layers they came out of — `restoreStock` only
+        // refilled the pool and left the layers deducted (see removePart).
+        restoreStockAtCost(db, p.ItemID, p.WarehouseID, p.Quantity, p.UnitCost || 0);
       }
 
       db.prepare("UPDATE maintenance_tickets SET Status = 'cancelled' WHERE TicketID = ?").run(data.TicketID);
@@ -836,81 +973,130 @@ export function registerMaintenanceHandlers() {
     const dateStr = businessToday();
     const returnNumber = nextDocNumber(db, 'maintenance_returns', 'ReturnNumber', 'MRT', dateStr);
 
+    // The return is a reversal of ONE specific delivery.
+    const delivery = db.prepare('SELECT * FROM maintenance_deliveries WHERE DeliveryID = ?').get(data.DeliveryID) as any;
+    if (!delivery) return { success: false, message: 'التسليم غير موجود' };
+    if (delivery.TicketID !== data.TicketID) {
+      return { success: false, message: 'هذا التسليم لا يتبع هذه التذكرة' };
+    }
+    // A delivery can only be returned once. Before this, calling the channel
+    // again wrote a SECOND maintenance_returns row — the drawer refunded the
+    // same job twice, and both rows summed into every returns report.
+    const alreadyReturned = db.prepare('SELECT 1 AS ok FROM maintenance_returns WHERE DeliveryID = ?').get(data.DeliveryID);
+    if (alreadyReturned) {
+      return { success: false, message: 'هذا التسليم مرتجع بالفعل' };
+    }
+    // Refund money is checked like every other amount, and capped at what the
+    // drawer actually received. Before this, a refund of 999,999 on a 255
+    // delivery drained the till to cover money it never saw, and a negative
+    // refund REVERSED into the till while recording a return.
+    const refundMoney = checkAmount(data?.TotalRefund, 'قيمة المرتجع');
+    if (!refundMoney.ok) return { success: false, message: refundMoney.message };
+    const totalRefund = refundMoney.value;
+    if (totalRefund > (delivery.PaidAmount || 0) + 0.001) {
+      return { success: false, message: `قيمة المرتجع أكبر من المدفوع (${(delivery.PaidAmount || 0).toFixed(2)})` };
+    }
+    // A cash refund must name the drawer it leaves from; the machine leg is
+    // served by the delivery's own payment method. Before this, a refund with
+    // no destination recorded the return while the money stayed put.
+    if (totalRefund > 0 && !delivery.PaymentMethodID) {
+      if (!data.CashAccountID) {
+        return { success: false, message: 'اختر الخزينة التي تخرج منها قيمة المرتجع' };
+      }
+      const acc = db.prepare('SELECT IsActive FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+      if (!acc) return { success: false, message: 'الخزنة المختارة غير موجودة' };
+      if (!acc.IsActive) return { success: false, message: 'الخزنة المختارة غير مفعّلة' };
+    }
+    data.TotalRefund = totalRefund;
+
     // Check sufficient cash for refund (unless negative cash allowed)
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
-    if (allowNegCash?.Value !== '1' && data.CashAccountID && data.TotalRefund > 0) {
-      const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
-      if (!acc || (acc.Balance || 0) < data.TotalRefund) {
-        return { success: false, message: `الرصيد غير كافٍ في الخزينة لرد المبلغ: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${data.TotalRefund.toFixed(2)}` };
-      }
+
+    try {
+      const tx = db.transaction(() => {
+        // The balance read above ran before the transaction bound the write
+        // lock; a rival flow could drain the drawer in between, so the cash is
+        // re-checked here under the lock (same defence as salaries:pay).
+        if (allowNegCash?.Value !== '1' && data.CashAccountID && data.TotalRefund > 0) {
+          const accTx = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+          if (!accTx || (accTx.Balance || 0) < data.TotalRefund) {
+            const e = new Error(`الرصيد غير كافٍ في الخزينة لرد المبلغ: المتاح ${(accTx?.Balance || 0).toFixed(2)}، المطلوب ${data.TotalRefund.toFixed(2)}`);
+            (e as any).userRefusal = true;
+            throw e;
+          }
+        }
+
+        const result = db.prepare(`
+          INSERT INTO maintenance_returns (ReturnNumber, DeliveryID, TicketID, Date, Reason, TotalRefund, CashAccountID, PartsRestored, UserID)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(returnNumber, data.DeliveryID, data.TicketID, dateStr, data.Reason, data.TotalRefund, data.CashAccountID ?? null, data.PartsRestored, data.userId);
+
+        if (data.PartsRestored === 1) {
+          const parts = db.prepare('SELECT * FROM maintenance_parts WHERE TicketID = ?').all(data.TicketID) as any[];
+          for (const part of parts) {
+            restoreStockAtCost(db, part.ItemID, part.WarehouseID, part.Quantity, part.UnitCost || 0);
+          }
+        }
+
+        db.prepare("UPDATE maintenance_tickets SET Status = 'returned' WHERE TicketID = ?").run(data.TicketID);
+        db.prepare(`
+          INSERT INTO maintenance_status_log (TicketID, Status, Notes, UserID)
+          VALUES (?, 'returned', ?, ?)
+        `).run(data.TicketID, data.Reason, data.userId);
+
+        // Reverse cash account
+        if (data.CashAccountID && data.TotalRefund > 0) {
+          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(data.TotalRefund, data.CashAccountID);
+        }
+
+        // Reverse payment method
+        if (delivery?.PaymentMethodID && data.TotalRefund > 0) {
+          db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(data.TotalRefund, delivery.PaymentMethodID);
+        }
+
+        // Reverse the customer balance by what the DELIVERY put there, not by the
+        // refund.
+        //
+        // The delivery adds only the UNPAID part of the bill to the customer's
+        // account; the paid part went into the drawer. Subtracting the whole
+        // refund here therefore removed money the customer never owed: a repair
+        // charged 350 and paid in full left the balance at -350, so the shop
+        // appeared to owe the customer 350 while also handing back the cash. The
+        // full round trip cost the shop 350 out of nowhere.
+        //
+        // The two legs are now reversed independently: the drawer gives back what
+        // it received (capped at the refund), and the account gives back only
+        // what it was charged.
+        // The debt the delivery created is cancelled IN FULL, independently of
+        // the cash refund. They are two different legs of the same reversal:
+        //
+        //   the drawer  gives back what the customer actually paid   (TotalRefund)
+        //   the account gives back what the customer was charged     (Remaining)
+        //
+        // Tying the account leg to the refund broke the commonest case of all —
+        // a repair collected later. Nothing was paid, so nothing was refunded, so
+        // nothing was cancelled, and the customer still owed 350 for a repair
+        // that had been undone and whose parts were back on the shelf.
+        if (delivery?.CustomerID) {
+          const owedOnDelivery = Math.max(0, delivery.RemainingAmount || 0);
+          if (owedOnDelivery > 0) {
+            db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?')
+              .run(owedOnDelivery, delivery.CustomerID);
+          }
+        }
+
+        // A refunded job earns nothing. Resetting the commission to unpaid
+        // (IsPaid = 0) left its Amount on the technician's account and the
+        // employees report — the technician was still owed 300 for a job the
+        // shop had taken back.
+        db.prepare("DELETE FROM commissions WHERE ReferenceType = 'maintenance_delivery' AND ReferenceID = ?").run(data.DeliveryID);
+      });
+
+      tx();
+    } catch (err: any) {
+      if (err?.userRefusal) return { success: false, message: err.message };
+      throw err;
     }
-
-    const tx = db.transaction(() => {
-      const result = db.prepare(`
-        INSERT INTO maintenance_returns (ReturnNumber, DeliveryID, TicketID, Date, Reason, TotalRefund, CashAccountID, PartsRestored, UserID)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(returnNumber, data.DeliveryID, data.TicketID, dateStr, data.Reason, data.TotalRefund, data.CashAccountID ?? null, data.PartsRestored, data.userId);
-
-      if (data.PartsRestored === 1) {
-        const parts = db.prepare('SELECT * FROM maintenance_parts WHERE TicketID = ?').all(data.TicketID) as any[];
-        for (const part of parts) {
-          restoreStock(db, part.ItemID, part.WarehouseID, part.Quantity, part.UnitCost || 0);
-        }
-      }
-
-      db.prepare("UPDATE maintenance_tickets SET Status = 'returned' WHERE TicketID = ?").run(data.TicketID);
-      db.prepare(`
-        INSERT INTO maintenance_status_log (TicketID, Status, Notes, UserID)
-        VALUES (?, 'returned', ?, ?)
-      `).run(data.TicketID, data.Reason, data.userId);
-
-      const delivery = db.prepare('SELECT * FROM maintenance_deliveries WHERE DeliveryID = ?').get(data.DeliveryID) as any;
-
-      // Reverse cash account
-      if (data.CashAccountID && data.TotalRefund > 0) {
-        db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(data.TotalRefund, data.CashAccountID);
-      }
-
-      // Reverse payment method
-      if (delivery?.PaymentMethodID && data.TotalRefund > 0) {
-        db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(data.TotalRefund, delivery.PaymentMethodID);
-      }
-
-      // Reverse the customer balance by what the DELIVERY put there, not by the
-      // refund.
-      //
-      // The delivery adds only the UNPAID part of the bill to the customer's
-      // account; the paid part went into the drawer. Subtracting the whole
-      // refund here therefore removed money the customer never owed: a repair
-      // charged 350 and paid in full left the balance at -350, so the shop
-      // appeared to owe the customer 350 while also handing back the cash. The
-      // full round trip cost the shop 350 out of nowhere.
-      //
-      // The two legs are now reversed independently: the drawer gives back what
-      // it received (capped at the refund), and the account gives back only
-      // what it was charged.
-      // The debt the delivery created is cancelled IN FULL, independently of
-      // the cash refund. They are two different legs of the same reversal:
-      //
-      //   the drawer  gives back what the customer actually paid   (TotalRefund)
-      //   the account gives back what the customer was charged     (Remaining)
-      //
-      // Tying the account leg to the refund broke the commonest case of all —
-      // a repair collected later. Nothing was paid, so nothing was refunded, so
-      // nothing was cancelled, and the customer still owed 350 for a repair
-      // that had been undone and whose parts were back on the shelf.
-      if (delivery?.CustomerID) {
-        const owedOnDelivery = Math.max(0, delivery.RemainingAmount || 0);
-        if (owedOnDelivery > 0) {
-          db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?')
-            .run(owedOnDelivery, delivery.CustomerID);
-        }
-      }
-
-      db.prepare("UPDATE commissions SET IsPaid = 0, PaidAmount = 0 WHERE ReferenceType = 'maintenance_delivery' AND ReferenceID = ?").run(data.DeliveryID);
-    });
-
-    tx();
     return { success: true, returnNumber };
   });
 }

@@ -1061,6 +1061,58 @@ export function registerPurchasesHandlers() {
       const details = db.prepare('SELECT * FROM purchase_return_details WHERE ReturnID = ?')
         .all(returnId) as any[];
 
+      // A return can only be un-done while its goods are still with the
+      // supplier. A handset re-received under a later invoice and then sold
+      // again is in neither place: "cancelling the return" would conjure it
+      // back onto the shelf from nowhere, re-adding a unit the shop no longer
+      // holds and leaving a phantom device available for a second sale.
+      //
+      // It is identified by serial STATE: 'returned' is the only condition in
+      // which the supplier still holds it. Re-receipt flips it to 'available',
+      // a sale flips it to 'sold' — either way the cancellation is refused.
+      // The pooled analogue (an accessory re-purchased then sold) cannot be
+      // told apart from the rest of the pool, so those lines are left alone.
+      for (const line of details) {
+        if (!line.ItemID) continue;
+        const isSerialised = (db.prepare(
+          'SELECT IsSerialized FROM items WHERE ItemID = ?',
+        ).get(line.ItemID) as any)?.IsSerialized;
+        if (!isSerialised) continue;
+        const tracked = (db.prepare(`
+          SELECT COUNT(*) AS n FROM purchase_details
+          WHERE PurchaseID = ? AND ItemID = ? AND IMEI IS NOT NULL AND IMEI <> ''
+        `).get(ret.PurchaseID, line.ItemID) as any)?.n || 0;
+        if (tracked === 0) continue;
+        const qty = Math.ceil(Number(line.Quantity) || 0);
+        if (line.SerialID) {
+          const s = db.prepare(
+            'SELECT Status, IMEI FROM item_serials WHERE SerialID = ?',
+          ).get(line.SerialID) as any;
+          if (!s || s.Status !== 'returned') {
+            return {
+              success: false,
+              message: `لا يمكن إلغاء المرتجع — الجهاز (IMEI ${s?.IMEI ?? line.SerialID}) لم يعد مرتجعاً للمورد`,
+            };
+          }
+        } else {
+          // No serial named on the line: the serials it marked 'returned' are
+          // resolved from this purchase, oldest first, exactly as the create
+          // side took them off the shelf.
+          const onHand = (db.prepare(`
+            SELECT COUNT(*) AS n FROM item_serials s
+            JOIN purchase_details pd ON pd.IMEI = s.IMEI AND pd.PurchaseID = ?
+            WHERE s.ItemID = ? AND s.Status = 'returned'
+          `).get(ret.PurchaseID, line.ItemID) as any)?.n || 0;
+          if (onHand < qty) {
+            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+            return {
+              success: false,
+              message: `لا يمكن إلغاء المرتجع — أجهزة "${info?.ItemName || line.ItemID}" لم تعد مرتجعة للمورد (المطلوب ${qty}، المتاح ${onHand})`,
+            };
+          }
+        }
+      }
+
       // Undoing the return means paying the supplier back what they refunded
       // us, so the drawer must be able to cover it.
       const cashRefund = ret.CashRefund || 0;

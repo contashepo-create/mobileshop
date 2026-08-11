@@ -147,16 +147,30 @@ export function registerDeleteHandlers() {
       const lines = db.prepare(
         'SELECT ItemID, Quantity, WarehouseID, IMEI FROM purchase_details WHERE PurchaseID = ?',
       ).all(purchaseId) as any[];
+
+      // Availability is checked against the SUM of each (item, warehouse),
+      // not line by line: two lines of the same item on one invoice would
+      // each see the full holding and both pass, then the deletion deducted
+      // 12 units against a pool of 8 and drove it negative.
+      const byKey = new Map<string, { qty: number; itemId: number; wh: number | null }>();
       for (const line of lines) {
-        if (!line.ItemID || !line.WarehouseID) continue;
+        if (!line.ItemID) continue;
+        const key = `${line.ItemID}:${line.WarehouseID ?? '?'}`;
+        const g = byKey.get(key) ?? { qty: 0, itemId: line.ItemID, wh: line.WarehouseID ?? null };
+        g.qty += Number(line.Quantity) || 0;
+        byKey.set(key, g);
+      }
+      for (const g of byKey.values()) {
+        if (!g.itemId || !g.wh) continue;
         const held = (db.prepare(
           'SELECT COALESCE(SUM(Quantity),0) AS qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
-        ).get(line.ItemID, line.WarehouseID) as any)?.qty || 0;
-        if (held < line.Quantity - 0.001) {
-          const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
-          shortages.push(`"${info?.ItemName || line.ItemID}" (المطلوب ${line.Quantity}، المتاح ${held})`);
-          continue;
+        ).get(g.itemId, g.wh) as any)?.qty || 0;
+        if (held < g.qty - 0.001) {
+          const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(g.itemId) as any;
+          shortages.push(`"${info?.ItemName || g.itemId}" (المطلوب ${g.qty}، المتاح ${held})`);
         }
+      }
+      for (const line of lines) {
         // For a handset, having "enough units" is not enough: THIS phone must
         // still be on the shelf. A pool of three other devices satisfied the
         // quantity check while the IMEI on this invoice had already been sold,
@@ -164,11 +178,55 @@ export function registerDeleteHandlers() {
         // record behind — the count and the IMEI list disagreed from then on.
         if (line.IMEI) {
           const serial = db.prepare(
-            'SELECT Status FROM item_serials WHERE IMEI = ?',
+            'SELECT SerialID, Status FROM item_serials WHERE IMEI = ?',
           ).get(line.IMEI) as any;
-          if (serial && serial.Status !== 'available') {
+          // A MISSING record is refused too, not just a sold/returned one.
+          // When a later receipt was cancelled, its deletion removed the
+          // device record while the earlier receipt stayed on the books —
+          // the row was gone, `serial && status !== 'available'` passed
+          // vacuously, and the deletion then removed the wrong unit's value
+          // with nothing on the shelf to explain it.
+          if (!serial || serial.Status !== 'available') {
             const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
-            shortages.push(`"${info?.ItemName || line.ItemID}" (IMEI ${line.IMEI} — الحالة: ${serial.Status})`);
+            shortages.push(`"${info?.ItemName || line.ItemID}" (IMEI ${line.IMEI} — الحالة: ${serial?.Status ?? 'محذوف'})`);
+            continue;
+          }
+          // A handset RE-RECEIVED under a later invoice cannot be un-received
+          // as part of the earlier one. Un-receiving this invoice deletes the
+          // device record and the unit of stock, but the later purchase already
+          // paid for that same unit — deleting the earlier receipt has no way
+          // to tell the later payment the phone is gone, so the books quietly
+          // lose the later cost. The balance sheet's own identity check caught
+          // exactly this drift (assets fell by the re-receipt's price while the
+          // later invoice still sat fully paid, with nothing on the shelf).
+          //
+          // Only a STRICTLY LATER receipt blocks this invoice. The receipt
+          // itself (the latest one with this IMEI) is a purchase that stands on
+          // its own: un-receiving it reverses its own payment and its own unit,
+          // which is exactly what a deletion must do.
+          const reReceived = db.prepare(`
+            SELECT p.PurchaseNumber FROM purchase_details pd
+            JOIN purchases p ON p.PurchaseID = pd.PurchaseID
+            WHERE pd.IMEI = ? AND pd.PurchaseID > ?
+            ORDER BY pd.PurchaseID DESC LIMIT 1
+          `).get(line.IMEI, purchaseId) as any;
+          if (reReceived) {
+            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+            shortages.push(
+              `"${info?.ItemName || line.ItemID}" (IMEI ${line.IMEI} — أُعيد استلامه في ${reReceived.PurchaseNumber})`);
+          }
+          // A SALE that still points at this device blocks un-receiving even
+          // when the state looks available again. The handset was sold once,
+          // then bought back under this receipt (reactivation); removing the
+          // record would dangle that sale's serial link — the database threw
+          // a bare foreign-key error here — and there is no shelf unit left
+          // to un-receive anyway.
+          const soldClaim = db.prepare(
+            'SELECT COUNT(*) AS n FROM sale_details WHERE SerialID = ?',
+          ).get((serial as any).SerialID) as { n: number };
+          if (soldClaim.n > 0) {
+            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+            shortages.push(`"${info?.ItemName || line.ItemID}" (IMEI ${line.IMEI} — الحالة: sold)`);
           }
         }
       }
@@ -187,16 +245,29 @@ export function registerDeleteHandlers() {
         // goods could have been sold in between. On a shared network database
         // every till is a separate process, and this was verified to drive a
         // warehouse to -5. Re-reading under the write lock cannot be overtaken.
+        //
+        // Checked against the SUM of each (item, warehouse) for the same reason
+        // as above: per-line figures let two lines of one item on the same
+        // invoice each pass against the same holding, and the deletion then
+        // over-deducts whatever slipped through between the checks.
+        const byKeyTx = new Map<string, { qty: number }>();
         for (const line of lines) {
           if (!line.ItemID || !line.WarehouseID) continue;
+          const key = `${line.ItemID}:${line.WarehouseID}`;
+          const g = byKeyTx.get(key) ?? { qty: 0 };
+          g.qty += Number(line.Quantity) || 0;
+          byKeyTx.set(key, g);
+        }
+        for (const [key, g] of byKeyTx) {
+          const [itemId, wh] = key.split(':');
           const held = (db.prepare(
             'SELECT COALESCE(SUM(Quantity),0) AS qty FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?',
-          ).get(line.ItemID, line.WarehouseID) as any)?.qty || 0;
-          if (held < line.Quantity - 0.001) {
-            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(line.ItemID) as any;
+          ).get(Number(itemId), Number(wh)) as any)?.qty || 0;
+          if (held < g.qty - 0.001) {
+            const info = db.prepare('SELECT ItemName FROM items WHERE ItemID = ?').get(Number(itemId)) as any;
             const refusal = new Error(
-              `لا يمكن حذف فاتورة الشراء - "${info?.ItemName || line.ItemID}" لم تعد بالمخزن `
-              + `(المطلوب ${line.Quantity}، المتاح ${held})`);
+              `لا يمكن حذف فاتورة الشراء - "${info?.ItemName || itemId}" لم تعد بالمخزن `
+              + `(المطلوب ${g.qty}، المتاح ${held})`);
             (refusal as any).userRefusal = true;
             throw refusal;
           }

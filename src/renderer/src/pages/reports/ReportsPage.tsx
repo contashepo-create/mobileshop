@@ -439,6 +439,7 @@ function FinancialPositionReport({ data }: { data: any }) {
           <ReportLine label="رصيد الخزائن والبنوك" value={assets.totalCash ?? 0} />
           <ReportLine label="رصيد ماكينات وأنظمة الدفع" value={assets.totalPaymentMethods ?? 0} />
           <ReportLine label="ذمم العملاء (مستحقة لنا)" value={assets.totalCustomers ?? 0} />
+          <ReportLine label="ذمم الموردين (مستحقة لنا) — فائض مدفوع أو مرتجع غير مسترد" value={assets.totalSupplierCredits ?? 0} />
           <ReportLine label="سلف الموظفين (غير مخصومة)" value={assets.employeeAdvances ?? 0} />
           <ReportLine label="قيمة المخزون" value={assets.totalInventory ?? 0} />
           <ReportLine label="إجمالي الأصول" value={assets.totalAssets ?? 0} bold />
@@ -660,6 +661,7 @@ function buildReportPrintHtml(
       ${printLine('رصيد الخزائن والبنوك', assets.totalCash)}
       ${printLine('رصيد ماكينات وأنظمة الدفع', assets.totalPaymentMethods)}
       ${printLine('ذمم العملاء (مستحقة لنا)', assets.totalCustomers)}
+      ${printLine('ذمم الموردين (مستحقة لنا) — فائض مدفوع أو مرتجع غير مسترد', assets.totalSupplierCredits)}
       ${printLine('سلف الموظفين (غير مخصومة)', assets.employeeAdvances)}
       ${printLine('قيمة المخزون', assets.totalInventory)}
       ${printLine('إجمالي الأصول', assets.totalAssets, true)}

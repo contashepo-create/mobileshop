@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Receipt, Trash2 } from 'lucide-react';
+import { Plus, Receipt, Trash2, Printer, Eye } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input, Select, Textarea } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
@@ -106,6 +106,28 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
     { value: 'employee', label: 'موظف' },
   ];
 
+  const printVoucher = async (voucher: any, direct = false) => {
+    const settings = await window.api.invoke('settings:getAll');
+    const template = settings.default_invoice_template || '1';
+    const paperSize = settings.paper_size || '80mm';
+    const defaultAction = settings.print_default_action || 'preview';
+    const printData = {
+      type: voucher.VoucherType === 'payment' ? 'voucher_payment' : 'voucher_receipt',
+      paperSize,
+      template,
+      companyInfo: settings,
+      invoiceData: {
+        voucherNumber: voucher.VoucherNumber,
+        date: voucher.Date,
+        amount: voucher.Amount,
+        description: voucher.Description,
+        partyName: voucher.PartyName || '—',
+      },
+    };
+    const action = direct ? 'print' : (defaultAction === 'print' ? 'print:invoice' : 'print:preview');
+    await window.api.invoke(action, printData);
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -128,7 +150,13 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
           { key: 'Description', title: 'البيان' },
           { key: 'PartyName', title: 'الطرف', render: (row) => row.PartyName || '—' },
           { key: 'Username', title: 'المستخدم' },
-          { key: 'actions', title: '', render: (row) => <button onClick={async () => { if (confirm('سيتم حذف السند وعكس كل التأثيرات. متابعة؟')) { const r = await window.api.invoke('delete:voucher', row.VoucherID); if (r.success) { showToast('success', r.message); fetchData(); } else { showToast('error', r.message); } } }} className="p-1.5 rounded text-slate-500 dark:text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20" title="حذف"><Trash2 size={14} /></button> },
+          { key: 'actions', title: '', render: (row) => (
+            <div className="flex items-center gap-1">
+              <button onClick={() => printVoucher(row, false)} className="p-1.5 rounded text-slate-500 dark:text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20" title="معاينة وطباعة"><Eye size={14} /></button>
+              <button onClick={() => printVoucher(row, true)} className="p-1.5 rounded text-slate-500 dark:text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20" title="طباعة مباشرة"><Printer size={14} /></button>
+              <button onClick={async () => { if (confirm('سيتم حذف السند وعكس كل التأثيرات. متابعة؟')) { const r = await window.api.invoke('delete:voucher', row.VoucherID); if (r.success) { showToast('success', r.message); fetchData(); } else { showToast('error', r.message); } } }} className="p-1.5 rounded text-slate-500 dark:text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20" title="حذف"><Trash2 size={14} /></button>
+            </div>
+          ) },
         ]}
         data={vouchers}
         keyField="VoucherID"

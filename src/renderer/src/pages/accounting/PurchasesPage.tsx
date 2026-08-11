@@ -3,7 +3,6 @@ import { Plus, Trash2, Search, Undo2, RotateCcw, FileText } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input, Select } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
-import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
@@ -259,9 +258,6 @@ export function PurchasesPage({ mode }: { mode?: 'purchases' | 'returns' } = {})
           { key: 'Date', title: 'التاريخ' },
           { key: 'SupplierName', title: 'المورد', render: (row) => <span className="font-medium">{row.SupplierName}</span> },
           { key: 'TotalAmount', title: 'الإجمالي', render: (row) => <span className="font-bold">{row.TotalAmount?.toFixed(2)}</span> },
-          { key: 'PaidAmount', title: 'المدفوع', render: (row) => <span className="text-green-600">{row.PaidAmount?.toFixed(2)}</span> },
-          { key: 'RemainingAmount', title: 'المتبقي', render: (row) => row.RemainingAmount > 0 ? <span className="text-red-600">{row.RemainingAmount?.toFixed(2)}</span> : '—' },
-          { key: 'Status', title: 'الحالة', render: (row) => <Badge variant={row.Status === 'completed' ? 'green' : row.Status === 'partial' ? 'yellow' : 'red'}>{row.Status === 'completed' ? 'مكتملة' : row.Status === 'partial' ? 'جزئية' : 'غير مدفوعة'}</Badge> },
           { key: 'ops', title: '', render: (row) => (
             <div className="flex items-center gap-1">
               <button onClick={() => startReturn(row)}

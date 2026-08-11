@@ -612,9 +612,6 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
           { key: 'Date', title: 'التاريخ' },
           { key: 'CustomerName', title: 'العميل', render: (row) => row.CustomerName || '—' },
           { key: 'TotalAmount', title: 'الإجمالي', render: (row) => <span className="font-bold">{row.TotalAmount?.toFixed(2)}</span> },
-          { key: 'PaidAmount', title: 'المدفوع', render: (row) => <span className="text-green-600">{row.PaidAmount?.toFixed(2)}</span> },
-          { key: 'RemainingAmount', title: 'المتبقي', render: (row) => row.RemainingAmount > 0 ? <span className="text-red-600">{row.RemainingAmount?.toFixed(2)}</span> : '—' },
-          { key: 'Status', title: 'الحالة', render: (row) => <Badge variant={row.Status === 'completed' ? 'green' : row.Status === 'partial' ? 'yellow' : 'red'}>{row.Status === 'completed' ? 'مكتملة' : row.Status === 'partial' ? 'جزئية' : 'غير مدفوعة'}</Badge> },
           { key: 'actions', title: 'طباعة', render: (row) => (
             <div className="flex items-center gap-1 relative">
               <button onClick={() => printInvoice(row)} className="p-1.5 rounded text-slate-500 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20" title="طباعة (بالإعداد الافتراضي)"><Printer size={14} /></button>

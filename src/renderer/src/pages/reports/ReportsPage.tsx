@@ -160,10 +160,6 @@ function ReportContent({ type, data }: { type: ReportType; data: any }) {
               { key: 'Date', title: 'التاريخ' },
               { key: 'CustomerName', title: 'العميل', render: (r) => r.CustomerName || '—' },
               { key: 'TotalAmount', title: 'الإجمالي', render: (r) => r.TotalAmount?.toFixed(2) },
-              { key: 'PaidAmount', title: 'مدفوع بالفاتورة', render: (r) => <span className="text-green-600">{r.PaidAmount?.toFixed(2)}</span> },
-              { key: 'LaterPayments', title: 'سدد لاحقاً', render: (r) => (r.LaterPayments > 0 ? <span className="text-cyan-600">{r.LaterPayments?.toFixed(2)}</span> : '—') },
-              { key: 'ActualRemaining', title: 'المتبقي فعلياً', render: (r) => r.ActualRemaining > 0 ? <span className="text-red-600 font-bold">{r.ActualRemaining?.toFixed(2)}</span> : <span className="text-green-600">0</span> },
-              { key: 'Status', title: 'الحالة', render: (r) => <Badge variant={r.ActualRemaining <= 0 ? 'green' : r.Status === 'partial' ? 'yellow' : 'red'}>{r.ActualRemaining <= 0 ? 'مكتملة' : r.Status === 'partial' ? 'جزئية' : 'غير مدفوعة'}</Badge> },
             ]}
             data={data.rows}
             keyField="SaleNumber"
@@ -187,8 +183,6 @@ function ReportContent({ type, data }: { type: ReportType; data: any }) {
               { key: 'Date', title: 'التاريخ' },
               { key: 'SupplierName', title: 'المورد' },
               { key: 'TotalAmount', title: 'الإجمالي', render: (r) => r.TotalAmount?.toFixed(2) },
-              { key: 'PaidAmount', title: 'المدفوع', render: (r) => r.PaidAmount?.toFixed(2) },
-              { key: 'RemainingAmount', title: 'المتبقي', render: (r) => r.RemainingAmount > 0 ? r.RemainingAmount?.toFixed(2) : '—' },
             ]}
             data={data.rows}
             keyField="PurchaseNumber"
@@ -518,9 +512,6 @@ function reportTableColumns(type: ReportType): PrintColumn[] | null {
         { title: 'التاريخ', align: 'center' as const, render: r => esc(r.Date) },
         { title: 'العميل', render: r => esc(r.CustomerName || '—') },
         { title: 'الإجمالي', render: r => escNum(r.TotalAmount) },
-        { title: 'مدفوع', render: r => escNum(r.PaidAmount) },
-        { title: 'سدد لاحقاً', render: r => escNum(r.LaterPayments) },
-        { title: 'المتبقي', bold: true as const, render: r => escNum(r.ActualRemaining) },
       ];
     case 'purchases':
       return [
@@ -528,8 +519,6 @@ function reportTableColumns(type: ReportType): PrintColumn[] | null {
         { title: 'التاريخ', align: 'center' as const, render: r => esc(r.Date) },
         { title: 'المورد', render: r => esc(r.SupplierName) },
         { title: 'الإجمالي', render: r => escNum(r.TotalAmount) },
-        { title: 'المدفوع', render: r => escNum(r.PaidAmount) },
-        { title: 'المتبقي', bold: true as const, render: r => escNum(r.RemainingAmount) },
       ];
     case 'maintenance':
       return [

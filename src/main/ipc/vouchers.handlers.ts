@@ -147,19 +147,55 @@ export function registerVouchersHandlers() {
     const prefix = data.VoucherType === 'receipt' ? 'RCV' : 'PAY';
     const voucherNumber = nextDocNumber(db, 'vouchers', 'VoucherNumber', prefix, dateStr);
 
-    // Check sufficient balance for payment vouchers (unless negative cash allowed)
+    // Both chosen assets must EXIST and be ACTIVE, in either direction.
+    //
+    // Receipts never ran any asset check: a receipt into a ghost drawer or into
+    // a disabled one sailed past every guard and either threw the SQLite
+    // foreign-key error out of the handler (a receipt into cash_accounts 99999)
+    // or — worse — landed money in a disabled safe that no one will ever look
+    // at. And a payment with `allow_negative_cash = '1'` skips the balance
+    // check below, so it reached the INSERT and threw the same FK error.
+    //
+    // MEASURED: receipts into cash_accounts 99999 and payment_methods 99999
+    // both crashed the handler with 'FOREIGN KEY constraint failed' instead of
+    // answering the form.
+    if (data.CashAccountID) {
+      const acc = db.prepare('SELECT IsActive FROM cash_accounts WHERE CashAccountID = ?')
+        .get(data.CashAccountID) as any;
+      if (!acc) return { success: false, message: 'الخزينة غير موجودة' };
+      if (!acc.IsActive) return { success: false, message: 'لا يمكن استخدام خزينة معطلة' };
+    }
+    if (data.PaymentMethodID) {
+      const pm = db.prepare('SELECT IsActive FROM payment_methods WHERE PaymentMethodID = ?')
+        .get(data.PaymentMethodID) as any;
+      if (!pm) return { success: false, message: 'طريقة الدفع غير موجودة' };
+      if (!pm.IsActive) return { success: false, message: 'لا يمكن استخدام طريقة دفع معطلة' };
+    }
+
+    // Check sufficient balance for payment vouchers.
+    //
+    // The DRAWER obeys the `allow_negative_cash` switch: when it is off the
+    // handler refuses here, and when it is on the UPDATE below is free to run
+    // (the cash trigger in the schema carries the same switch).
+    //
+    // The MACHINE never does. Its trigger refuses a negative balance with no
+    // exception, and MEASURED a payment of 5,300 against a 5,000 wallet threw
+    // "wallet balance must not be negative" straight out of the handler while
+    // the switch said `allow_negative_cash = '1'`. A form that the machine is
+    // allowed to refuse must answer with a message, not a crash, so the
+    // machine balance is checked HERE unconditionally, switch or not.
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
-    if (allowNegCash?.Value !== '1' && data.VoucherType === 'payment') {
-      if (data.CashAccountID) {
-        const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
-        if (!acc || (acc.Balance || 0) < data.Amount) {
-          return { success: false, message: `الرصيد غير كافٍ في الخزينة: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${data.Amount.toFixed(2)}` };
-        }
-      }
+    if (data.VoucherType === 'payment') {
       if (data.PaymentMethodID) {
         const pm = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(data.PaymentMethodID) as any;
         if (!pm || (pm.Balance || 0) < data.Amount) {
           return { success: false, message: `الرصيد غير كافٍ في طريقة الدفع: المتاح ${(pm?.Balance || 0).toFixed(2)}، المطلوب ${data.Amount.toFixed(2)}` };
+        }
+      }
+      if (allowNegCash?.Value !== '1' && data.CashAccountID) {
+        const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+        if (!acc || (acc.Balance || 0) < data.Amount) {
+          return { success: false, message: `الرصيد غير كافٍ في الخزينة: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${data.Amount.toFixed(2)}` };
         }
       }
     }
@@ -177,6 +213,13 @@ export function registerVouchersHandlers() {
     if (data.RentPaymentID) {
       if (data.VoucherType !== 'payment') {
         return { success: false, message: 'ربط الإيجار متاح لسندات الصرف فقط' };
+      }
+      if (data.PartyType && data.PartyID) {
+        return {
+          success: false,
+          message: 'لا يجوز ربط السند بقسط إيجار وبطرف معاً — '
+            + 'الدفعة الواحدة إما إيجار أو تسوية طرف.',
+        };
       }
       const rp = db.prepare('SELECT * FROM rent_payments WHERE RentPaymentID = ?')
         .get(data.RentPaymentID) as any;
@@ -202,8 +245,9 @@ export function registerVouchersHandlers() {
       `).run(
         voucherNumber, data.VoucherType, data.fiscalYearId, dateStr, data.Amount,
         data.PartyType ?? null, data.PartyID ?? null, data.PartyName ?? null,
-        data.Description, data.CashAccountID, data.PaymentMethodID ?? null,
-        data.ReferenceType ?? null, data.ReferenceID ?? null, data.userId
+        data.Description, data.CashAccountID ?? null, data.PaymentMethodID ?? null,
+        data.RentPaymentID ? 'rent' : (data.ReferenceType ?? null),
+        data.RentPaymentID ? data.RentPaymentID : (data.ReferenceID ?? null), data.userId
       );
 
       // The money lands in exactly ONE place.
@@ -232,6 +276,14 @@ export function registerVouchersHandlers() {
       // lines above. Letting the settle helper move it again would take the
       // amount twice for one payment — exactly the class of defect this whole
       // section was rebuilt to remove.
+      //
+      // The voucher carries `ReferenceType = 'rent'` so every report can tell
+      // "a voucher that settled rent" apart from "a general expense". The P&L
+      // and both statements used to count the linked voucher AND the
+      // `rent_payments` row it created — the same cash leaving twice on one
+      // page. MEASURED: a 1,500 rent voucher charged 3,000 to profit and -2,400
+      // on the drawer's own statement, and the balance sheet disagreed by the
+      // double-counted 1,500.
       if (data.RentPaymentID) {
         rentResult = applyToInstalment({
           db,

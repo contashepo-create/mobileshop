@@ -186,11 +186,17 @@ export function registerStatementHandlers() {
     `, fVR);
 
     // Voucher payments (money OUT)
+    //
+    // Rent-linked vouchers are excluded: the instalment they settled already
+    // appears as its OWN 'rent' row below, so keeping the voucher too showed
+    // the same money leaving TWICE. MEASURED: a 1,500 rent voucher made the
+    // drawer statement foot at -2,400 against a drawer that moved -900.
     const fVP = df('Date');
     const vPayments = q(`
       SELECT Date, VoucherNumber as RefNumber, PartyName as Party, 0 as InAmount,
         Amount as OutAmount, 'voucher_payment' as OpType, 'سند صرف' as OpLabel, VoucherID as RefID
-      FROM vouchers WHERE CashAccountID = ? AND VoucherType = 'payment' AND Amount > 0 ${fVP.sql}
+      FROM vouchers WHERE CashAccountID = ? AND VoucherType = 'payment' AND Amount > 0
+        AND (ReferenceType IS NULL OR ReferenceType <> 'rent') ${fVP.sql}
     `, fVP);
 
     // Purchases (money OUT)
@@ -441,6 +447,10 @@ export function registerStatementHandlers() {
     `, fSrv);
 
     // Vouchers (receipt = IN, payment = OUT)
+    //
+    // Rent-linked payments are excluded, exactly as in the cash statement: the
+    // instalment they settled already appears as its own 'rent' row below, and
+    // showing the voucher too would foot the statement at twice the movement.
     const fVR = df('Date');
     const vReceipts = q(`
       SELECT Date, VoucherNumber as RefNumber, PartyName as Party, Amount as InAmount,
@@ -451,7 +461,8 @@ export function registerStatementHandlers() {
     const vPayments = q(`
       SELECT Date, VoucherNumber as RefNumber, PartyName as Party, 0 as InAmount,
         Amount as OutAmount, 'voucher_payment' as OpType, 'سند صرف' as OpLabel, VoucherID as RefID
-      FROM vouchers WHERE PaymentMethodID = ? AND VoucherType = 'payment' AND Amount > 0 ${fVP.sql}
+      FROM vouchers WHERE PaymentMethodID = ? AND VoucherType = 'payment' AND Amount > 0
+        AND (ReferenceType IS NULL OR ReferenceType <> 'rent') ${fVP.sql}
     `, fVP);
 
     // Maintenance deliveries paid through this machine (money IN)

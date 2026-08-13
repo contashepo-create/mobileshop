@@ -79,8 +79,8 @@ function makeDb() {
       CashAccountID INTEGER, PaymentMethodID INTEGER, SourceType TEXT DEFAULT 'rent',
       SourceID INTEGER, Notes TEXT, ReversedAt TEXT, FiscalYearID INTEGER,
       UserID INTEGER, CreatedAt TEXT);
-    CREATE TABLE cash_accounts (CashAccountID INTEGER PRIMARY KEY, AccountName TEXT, Balance REAL);
-    CREATE TABLE payment_methods (PaymentMethodID INTEGER PRIMARY KEY, MethodName TEXT, Balance REAL);
+    CREATE TABLE cash_accounts (CashAccountID INTEGER PRIMARY KEY, AccountName TEXT, Balance REAL, IsActive INTEGER DEFAULT 1);
+    CREATE TABLE payment_methods (PaymentMethodID INTEGER PRIMARY KEY, MethodName TEXT, Balance REAL, IsActive INTEGER DEFAULT 1);
     CREATE TABLE settings (Key TEXT PRIMARY KEY, Value TEXT);
     CREATE TABLE vouchers (
       VoucherID INTEGER PRIMARY KEY AUTOINCREMENT, VoucherNumber TEXT, VoucherType TEXT,
@@ -92,8 +92,8 @@ function makeDb() {
            VALUES (1,'landlord','الحاج محمود','01000000000')`);
   db.exec(`INSERT INTO rents (RentID,RentName,RentType,Amount,Period,StartDate,RentPartyID)
            VALUES (1,'المحل','expense',5000,'monthly','2026-08-01',1)`);
-  db.exec(`INSERT INTO cash_accounts VALUES (1,'الخزنة',100000)`);
-  db.exec(`INSERT INTO payment_methods VALUES (1,'فودافون كاش',20000)`);
+  db.exec(`INSERT INTO cash_accounts (CashAccountID, AccountName, Balance) VALUES (1,'الخزنة',100000)`);
+  db.exec(`INSERT INTO payment_methods (PaymentMethodID, MethodName, Balance) VALUES (1,'فودافون كاش',20000)`);
   db.exec(`INSERT INTO rent_payments (RentID,PeriodLabel,Amount,DueDate,Status,FiscalYearID,UserID)
            VALUES (1,'أغسطس 2026',5000,'2026-08-01','pending',1,1),
                   (1,'سبتمبر 2026',5000,'2026-09-01','pending',1,1)`);

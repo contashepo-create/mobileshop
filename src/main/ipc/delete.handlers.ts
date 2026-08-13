@@ -521,6 +521,37 @@ export function registerDeleteHandlers() {
         };
       }
 
+      // A transfer fee voucher is one leg of a transfer that ALREADY happened:
+      // `transfers:create` recorded it and moved the fee out of the source
+      // account while `asset_transfers.Amount` describes the principal without
+      // it. Deleting the voucher puts the fee BACK but leaves the transfer
+      // row claiming the fee was paid, so the machine or drawer statement
+      // reconciles against a principal that no longer matches the books.
+      // MEASURED: a 2,000 transfer with a 40 separate fee deleted cleanly, and
+      // the balance sheet then disagreed by exactly the fee.
+      if (voucher.ReferenceType === 'transfer') {
+        return {
+          success: false,
+          message: 'لا يمكن حذف سند عمولة التحويل — هذا السند جزء من عملية التحويل. '
+            + 'احذف التحويل نفسه لتراجع عنه.',
+        };
+      }
+
+      // A rent-linked voucher settled (part of) an instalment: the month is
+      // paid, and `rent_transactions` and the P&L both already read the paid
+      // state from `rent_payments`. Deleting only the voucher refunds the cash
+      // while the rent screen still shows the month settled — money back with
+      // the month paid, and the instalment can then be "paid" a second time.
+      // MEASURED: deletion put the 1,200 back in the drawer while the
+      // instalment stayed 'paid' and the books disagreed by 1,200.
+      if (voucher.ReferenceType === 'rent') {
+        return {
+          success: false,
+          message: 'لا يمكن حذف سند مرتبط بقسط إيجار — القسط سُدّد بهذا السند. '
+            + 'تراجع عن الدفعة من شاشة الإيجارات.',
+        };
+      }
+
       const tx = db.transaction(() => {
         // Give back exactly what was taken — from ONE account.
         //

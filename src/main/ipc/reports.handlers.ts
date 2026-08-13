@@ -521,9 +521,16 @@ export function registerReportsHandlers() {
     // 1. General Expenses (voucher payments that are general)
     // `PartyType = 'rent'` is deliberately EXCLUDED: rent is reported from the
     // rent_payments table below. Including it in both places charged rent twice.
+    //
+    // Rent-linked vouchers carry `ReferenceType = 'rent'` (the vouchers
+    // handler stamps them) and are excluded for the same reason: the instalment
+    // they settled already appears in the rent figure. MEASURED: a 1,500
+    // voucher paying rent charged 3,000 to profit — the instalment AND the
+    // voucher — while the drawer moved once.
     const generalExpenses = db.prepare(`
       SELECT COALESCE(SUM(Amount),0) as total FROM vouchers
       WHERE VoucherType = 'payment' AND (PartyType = 'general' OR PartyType IS NULL)
+        AND (ReferenceType IS NULL OR ReferenceType <> 'rent')
       ${dateFilter}
     `).get(...params) as any;
 
@@ -803,7 +810,9 @@ export function registerReportsHandlers() {
     ).get() as any;
 
     // PartyType='rent' excluded here — rent comes from rent_payments below.
-    const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND (PartyType='general' OR PartyType IS NULL)").get() as any;
+    // Rent-linked vouchers (`ReferenceType='rent'`) carry the same exclusion:
+    // they settled an instalment that the rent figure already counts.
+    const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND (PartyType='general' OR PartyType IS NULL) AND (ReferenceType IS NULL OR ReferenceType <> 'rent')").get() as any;
     // Gross entitlement — see the note in reports:profitLoss.
     const salariesExpense = db.prepare('SELECT COALESCE(SUM(NetSalary + COALESCE(AdvancesTotal,0)),0) as total FROM salaries').get() as any;
     const rentExpenses = db.prepare(`

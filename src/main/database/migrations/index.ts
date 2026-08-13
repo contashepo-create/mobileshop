@@ -1948,8 +1948,10 @@ function seedData(db: Database.Database) {
     CREATE TRIGGER IF NOT EXISTS ck_items_type_update BEFORE UPDATE ON items
     WHEN NEW.ItemType IS NOT NULL AND NEW.ItemType NOT IN ('phone','accessory','service')
     BEGIN SELECT RAISE(ABORT, 'invalid item type'); END;
+    DROP TRIGGER IF EXISTS ck_cash_balance_update;
     CREATE TRIGGER IF NOT EXISTS ck_cash_balance_update BEFORE UPDATE ON cash_accounts
     WHEN NEW.Balance IS NOT NULL AND NEW.Balance < 0
+      AND (SELECT COALESCE(Value,'0') FROM settings WHERE Key = 'allow_negative_cash') <> '1'
     BEGIN SELECT RAISE(ABORT, 'cash balance must not be negative'); END;
     CREATE TRIGGER IF NOT EXISTS ck_wallet_balance_update BEFORE UPDATE ON payment_methods
     WHEN NEW.Balance IS NOT NULL AND NEW.Balance < 0

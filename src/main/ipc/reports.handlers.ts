@@ -672,6 +672,20 @@ export function registerReportsHandlers() {
       `SELECT COALESCE(SUM(Amount),0) as total FROM employee_advances WHERE IsDeducted = 0`
     ).get() as any;
 
+    // Rent advances (cash advanced against a rent the shop must still pay) are
+    // the same shape: money out of the drawer, still owed by the shop, still
+    // an asset until applied. Advances on income contracts are the mirror —
+    // money received before the month it covers, owed to the landlord until
+    // applied, collected below as a liability.
+    const rentAdvancesHeld = db.prepare(`
+      SELECT COALESCE(SUM(AdvanceBalance),0) as total FROM rents
+      WHERE RentType = 'expense' AND COALESCE(AdvanceBalance,0) > 0
+    `).get() as any;
+    const rentAdvancesCollected = db.prepare(`
+      SELECT COALESCE(SUM(AdvanceBalance),0) as total FROM rents
+      WHERE RentType = 'income' AND COALESCE(AdvanceBalance,0) > 0
+    `).get() as any;
+
     // Suppliers who owe US money are an ASSET.
     //
     // A supplier balance goes negative when they have credited or refunded more
@@ -688,7 +702,7 @@ export function registerReportsHandlers() {
     const totalSupplierCredits = supplierCredits.reduce((s, x) => s + Math.abs(x.Balance), 0);
 
     const totalAssets = totalCash + totalPaymentMethods + totalCustomers + totalInventory
-      + employeeAdvancesBalance.total + totalSupplierCredits;
+      + employeeAdvancesBalance.total + totalSupplierCredits + rentAdvancesHeld.total;
 
     // === LIABILITIES ===
     const suppliers = db.prepare('SELECT Name, Balance FROM suppliers WHERE Balance > 0').all() as any[];
@@ -707,7 +721,7 @@ export function registerReportsHandlers() {
     // out said `assets = liabilities + equity` held when it did not.
     const unpaidCommissions = db.prepare('SELECT COALESCE(SUM(Amount),0) as total FROM commissions WHERE IsPaid = 0').get() as any;
 
-    const totalLiabilities = totalSuppliers + totalEmployees + totalCustomerCredits + unpaidCommissions.total;
+    const totalLiabilities = totalSuppliers + totalEmployees + totalCustomerCredits + unpaidCommissions.total + rentAdvancesCollected.total;
 
     // === CAPITAL (Owner's Equity) ===
     const capitalSetting = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
@@ -830,6 +844,7 @@ export function registerReportsHandlers() {
         customers, totalCustomers,
         supplierCredits, totalSupplierCredits,
         employeeAdvances: employeeAdvancesBalance.total,
+        rentAdvancesHeld: rentAdvancesHeld.total,
         inventory: inventory.map(i => ({
           ItemName: i.ItemName,
           Qty: (i.IsSerialized && !i.UntrackedLines) ? i.AvailableSerials : i.Qty,
@@ -842,6 +857,7 @@ export function registerReportsHandlers() {
         suppliers, totalSuppliers,
         employees, totalEmployees,
         customerCredits, totalCustomerCredits,
+        rentAdvancesCollected: rentAdvancesCollected.total,
         totalLiabilities,
       },
       capital: {

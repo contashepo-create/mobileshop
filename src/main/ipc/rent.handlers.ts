@@ -101,6 +101,15 @@ export function registerRentHandlers() {
     if (!String(data?.RentName ?? '').trim()) {
       return { success: false, message: 'اسم العقد مطلوب' };
     }
+    // A link is only a link if the party exists. An id typed by hand — or
+    // stale, because a party was hidden while this form was open — would
+    // otherwise bind the contract to nobody, and the statement would collect
+    // the landlord's totals under a party that is not there.
+    if (data?.RentPartyID != null) {
+      const party = db.prepare('SELECT RentPartyID FROM rent_parties WHERE RentPartyID = ?')
+        .get(data.RentPartyID);
+      if (!party) return { success: false, message: 'الطرف المرتبط غير موجود' };
+    }
 
     const result = db.prepare(`
       INSERT INTO rents (RentName, RentType, Amount, Period, StartDate, EndDate,
@@ -122,6 +131,26 @@ export function registerRentHandlers() {
     const amt = checkAmount(data?.Amount, 'قيمة الإيجار', { allowZero: false });
     if (!amt.ok) return { success: false, message: amt.message };
 
+    // The same fields the create path refuses must be refused here. An update
+    // used to write `data.RentType` straight into the row, so an unrecognised
+    // type was stored and then counted as NEITHER expense nor income — and the
+    // direction money moves in `rentSettle.moveCash` is `rentType === 'expense'`,
+    // so anything else takes the income branch and pays INTO the till.
+    if (data?.RentType !== 'expense' && data?.RentType !== 'income') {
+      return { success: false, message: 'نوع الإيجار يجب أن يكون مدفوع أو مُحصَّل' };
+    }
+    if (data?.Period !== 'monthly' && data?.Period !== 'yearly') {
+      return { success: false, message: 'دورية الإيجار يجب أن تكون شهرية أو سنوية' };
+    }
+    if (!String(data?.RentName ?? '').trim()) {
+      return { success: false, message: 'اسم العقد مطلوب' };
+    }
+    if (data?.RentPartyID != null) {
+      const party = db.prepare('SELECT RentPartyID FROM rent_parties WHERE RentPartyID = ?')
+        .get(data.RentPartyID);
+      if (!party) return { success: false, message: 'الطرف المرتبط غير موجود' };
+    }
+
     const end = String(data?.EndDate ?? '').trim();
     if (end && end < String(existing.StartDate)) {
       return { success: false, message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية' };
@@ -131,6 +160,8 @@ export function registerRentHandlers() {
     // already been paid: those are settled facts, and the cash has moved. Only
     // the unpaid ones follow the new figure.
     db.transaction(() => {
+      // Every optional field is coalesced to NULL/1 below: a payload that
+      // omits one must not crash the statement on an unbindable undefined.
       db.prepare(`
         UPDATE rents SET RentName = ?, RentType = ?, Amount = ?, Period = ?,
           EndDate = ?, IsActive = ?, PartyName = ?, PartyPhone = ?, Notes = ?,
@@ -138,8 +169,8 @@ export function registerRentHandlers() {
         WHERE RentID = ?
       `).run(
         data.RentName, data.RentType, data.Amount, data.Period, end || null,
-        data.IsActive, data.PartyName, data.PartyPhone, data.Notes,
-        data.RentPartyID ?? null, id,
+        data.IsActive ?? 1, data.PartyName ?? null, data.PartyPhone ?? null,
+        data.Notes ?? null, data.RentPartyID ?? null, id,
       );
       if (Number(data.Amount) !== Number(existing.Amount)) {
         db.prepare(`
@@ -214,6 +245,9 @@ export function registerRentHandlers() {
     `;
     const params: any[] = [];
     if (rentId) { query += ' AND rp.RentID = ?'; params.push(rentId); }
+    // A withdrawn instalment reads as 'pending' with a CancelledAt stamp; the
+    // pay screen must not offer it as a month that still owes money.
+    query += ' AND rp.CancelledAt IS NULL';
     query += ' ORDER BY rp.DueDate DESC';
     return db.prepare(query).all(...params);
   });
@@ -326,9 +360,12 @@ export function registerRentHandlers() {
           db.prepare('UPDATE rent_transactions SET ReversedAt = ? WHERE RentTxnID = ?')
             .run(now, t.RentTxnID);
         }
-      } else if (payment.CashAccountID) {
+      } else if (payment.CashAccountID || payment.PaymentMethodID) {
         // A row paid before rent_transactions existed has no movements to walk,
-        // so fall back to the single account the instalment recorded.
+        // so fall back to the account the instalment recorded. The WALLET-only
+        // case used to fall through here: the check only looked at
+        // `CashAccountID`, a legacy wallet payment matched nothing, and the
+        // reversal returned success while the wallet kept the money.
         moveCash(db, rent?.RentType, payment.PaidAmount || payment.Amount,
           payment.CashAccountID, payment.PaymentMethodID, -1);
       }

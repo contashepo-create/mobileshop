@@ -357,23 +357,32 @@ try {
     t('none of the refusals moved a single pound', cash() === 100000 && mach() === 5000 && svcCount() === 0,
       `cash ${cash()}, mach ${mach()}, rows ${svcCount()}`);
 
-    // The DB enforces a non-negative floor on cash and machines with triggers
-    // (`cash balance must not be negative`, `wallet balance must not be
-    // negative`) that no setting overrides. So even with the friendly guard
-    // switched off, the overdraw aborts and nothing is saved — the setting
-    // only changes which message the user sees.
+    // `allow_negative_cash` is the shop's own choice, advertised in the
+    // settings screen as "السماح برصيد خزنة/بنك سالب". When it is ON the
+    // drawer may genuinely go negative — the trigger defers to the setting,
+    // exactly like the friendly guard above. The machine is the opposite: a
+    // POS terminal cannot be overdrawn, so its floor ignores the setting and
+    // the machine guard below runs no matter what.
     run("UPDATE settings SET Value = '1' WHERE Key = 'allow_negative_cash'");
     const neg1 = await service({ ...base, Amount: 100005, ChargeAmount: 100000, ServiceCost: 5, PaidAmount: 0, CashAccountID: 1 });
-    t('even with negative cash allowed the DB floor holds — the overdraw aborts, nothing is saved',
-      neg1?.success === false && cash() === 100000 && svcCount() === 0,
-      `${neg1?.message ?? 'accepted'} — cash ${cash()}`);
+    t('a shop that allows negative cash may overspend its drawer',
+      neg1?.success === true && cash() === 100000 - (100005 + 5) && svcCount() === 1,
+      `${neg1?.message ?? 'rejected'} — cash ${cash()}`);
     const neg2 = await service({ ...base, Amount: 5200, PaidAmount: 0, PaymentMethodID: 1 });
     t('the machine refuses with its numbers regardless of the setting',
       neg2?.success === false && /الرصيد غير كافٍ في طريقة الدفع: المتاح 5000\.00، المطلوب 5200\.00/.test(neg2?.message ?? ''),
       neg2?.message ?? 'accepted');
     run("UPDATE settings SET Value = '0' WHERE Key = 'allow_negative_cash'");
-    t('none of it moved a single pound', cash() === 100000 && mach() === 5000 && svcCount() === 0,
-      `cash ${cash()}, mach ${mach()}, rows ${svcCount()}`);
+    const neg3 = await service({ ...base, Amount: 100, ServiceCost: 0, PaidAmount: 0, CashAccountID: 1 });
+    t('switching the setting off restores the floor at once',
+      neg3?.success === false && cash() === 100000 - (100005 + 5) && svcCount() === 1,
+      `${neg3?.message ?? 'accepted'} — cash ${cash()}`);
+    // Undo the overdraw through the deletion path so the sections that follow
+    // open with the seeded books.
+    const overdrawn = q('SELECT ServiceSaleID v FROM service_sales ORDER BY ServiceSaleID DESC').v;
+    await call('delete:serviceSale', overdrawn);
+    t('deleting the overdrawn row restores the seeded books',
+      cash() === 100000 && svcCount() === 0, `cash ${cash()}, rows ${svcCount()}`);
   }
 
   // ---------------------------------------------------------------- 6

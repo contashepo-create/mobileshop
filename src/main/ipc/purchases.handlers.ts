@@ -916,7 +916,16 @@ export function registerPurchasesHandlers() {
           .run(woTotal, returnId);
       }
 
-      // Cancel only the part we still owe the supplier
+      // Cancel the returned VALUE from what we owe the supplier — but only the
+      // part of that value that stays on their account. The money-legs of the
+      // settlement (cash refund / transfer refund) are the supplier paying us
+      // BACK what we already paid them; those are not ALSO cancelled from the
+      // balance or the return benefits us twice. Subtracting the full
+      // `TotalAmount` while a refund went out did exactly that — measured: a
+      // 400 purchase paid 100, one 80 unit returned through the machine took
+      // 80 into the wallet AND dropped the balance 80, 160 back for an 80
+      // unit. The supplier statement reconciles leg-by-leg (`Credit` = the
+      // value returned, `Debit` = the refunds), so the two must agree.
       if (originalPurchase.SupplierID && debtRelief > 0) {
         db.prepare('UPDATE suppliers SET Balance = Balance - ? WHERE SupplierID = ?').run(debtRelief, originalPurchase.SupplierID);
       }

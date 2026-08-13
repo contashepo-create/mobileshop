@@ -106,17 +106,23 @@ export function applyToInstalment(args: ApplyArgs): ApplyResult {
   // The UPDATE is conditional on the figure we just read. If anything changed
   // underneath us the update matches nothing and we refuse, rather than
   // writing a total computed from stale data.
+  //
+  // `PaidDate` is stamped on the FIRST money an instalment receives, partial
+  // or not. Stamping only `paid` left PaidDate NULL on a partially-settled
+  // month that had genuinely received payment — so the profit report's date
+  // filter (which dates the income by PaidDate) silently dropped the money,
+  // and the statements had to guess `COALESCE(PaidDate, DueDate)`.
   const res = db.prepare(`
     UPDATE rent_payments
        SET PaidAmount = ?, Status = ?,
-           PaidDate = CASE WHEN ? = 'paid' THEN ? ELSE PaidDate END,
+           PaidDate = CASE WHEN ? > 0 THEN ? ELSE PaidDate END,
            CashAccountID = COALESCE(?, CashAccountID),
            PaymentMethodID = COALESCE(?, PaymentMethodID)
      WHERE RentPaymentID = ?
        AND COALESCE(PaidAmount, 0) = ?
        AND CancelledAt IS NULL
   `).run(
-    money(nowPaid), status, status, txnDate,
+    money(nowPaid), status, money(nowPaid), txnDate,
     cashAccountId ?? null, paymentMethodId ?? null,
     rentPaymentId, money(already),
   );

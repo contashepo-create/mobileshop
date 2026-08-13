@@ -95,6 +95,21 @@ export function registerStatementHandlers() {
         `).get(refId);
         return { primary: commission, items: [], title: 'عمولة' };
       }
+      case 'service_sale': {
+        // The service rows name a customer either by id or by captured
+        // name — the join must not clobber the captured name with NULL
+        // (same collision fixed in `serviceSales:get`).
+        const svc = db.prepare(`
+          SELECT ss.*, u.Username,
+            COALESCE(c.Name, ss.CustomerName) as CustomerName,
+            COALESCE(c.Phone, ss.CustomerPhone) as CustomerPhone
+          FROM service_sales ss
+          LEFT JOIN customers c ON ss.CustomerID = c.CustomerID
+          JOIN users u ON ss.UserID = u.UserID
+          WHERE ss.ServiceSaleID = ?
+        `).get(refId);
+        return { primary: svc, items: [], title: 'خدمة' };
+      }
       case 'deduction': {
         const deduction = db.prepare(`
           SELECT d.*, e.Name as EmployeeName
@@ -235,28 +250,64 @@ export function registerStatementHandlers() {
       WHERE r.CashAccountID = ? AND r.TotalRefund > 0 ${fMR.sql}
     `, fMR);
 
-    // Rent payments (expense = OUT, income = IN)
-    // FIX: `rents` has no PropertyName column — the correct column is RentName.
-    const fRent = df('rp.PaidDate');
+    // Rent payments (income = IN, expense = OUT)
+    //
+    // A PARTIAL instalment used to vanish from the statement entirely:
+    // `Status = 'paid'` missed `Status = 'partial'`, and the row recorded
+    // `PaidDate = NULL` for partials while the amount shown was the whole
+    // instalment — 50 paid against a 600 instalment appeared as nothing, and
+    // 50 paid against 600 appeared as 600. The statement must show what
+    // actually moved: PaidAmount, whenever it is non-zero, dated by the
+    // payment date when one was set.
+    const fRent = df('COALESCE(rp.PaidDate, rp.DueDate)');
     const rents = q(`
-      SELECT rp.PaidDate as Date, 'RNT-' || rp.RentPaymentID as RefNumber, r.RentName as Party,
-        CASE WHEN r.RentType = 'income' THEN rp.Amount ELSE 0 END as InAmount,
-        CASE WHEN r.RentType = 'expense' THEN rp.Amount ELSE 0 END as OutAmount,
+      SELECT COALESCE(rp.PaidDate, rp.DueDate) as Date,
+        'RNT-' || rp.RentPaymentID as RefNumber, r.RentName as Party,
+        CASE WHEN r.RentType = 'income' THEN rp.PaidAmount ELSE 0 END as InAmount,
+        CASE WHEN r.RentType = 'expense' THEN rp.PaidAmount ELSE 0 END as OutAmount,
         'rent' as OpType, CASE WHEN r.RentType = 'income' THEN 'إيجار وارد' ELSE 'إيجار منصرف' END as OpLabel,
         rp.RentPaymentID as RefID
       FROM rent_payments rp JOIN rents r ON rp.RentID = r.RentID
-      WHERE rp.CashAccountID = ? AND rp.Status = 'paid' ${fRent.sql}
+      WHERE rp.CashAccountID = ? AND COALESCE(rp.PaidAmount, 0) > 0 ${fRent.sql}
     `, fRent);
 
-    // Service sales (money IN)
+    // Service sales — the full truth about both legs.
+    //
+    // The old row showed only the money received (PaidAmount) and never the
+    // drawdown, so a service funded from the drawer looked like pure income:
+    // the 1,000 sent to the customer's phone was gone from the ledger but the
+    // statement of the very account it left showed nothing going out. The
+    // statement footed to a phantom surplus (a drawer that lost 300 net
+    // showed +100). Measured: a drawer-funded 300 transfer paid 100 showed
+    // In 100 / Out 0 where the books moved In 100 / Out 300.
+    //
+    // The drawdown is Amount + ServiceCost + TransferCost — but only when the
+    // drawer funded it (no machine). When a machine funded the operation the
+    // drawer only received, so its statement must show the receipt alone.
     const fSrv = df('Date');
     const services = q(`
-      SELECT Date, ServiceNumber as RefNumber, CustomerName as Party, PaidAmount as InAmount,
-        0 as OutAmount, 'service_sale' as OpType, 'خدمة' as OpLabel, ServiceSaleID as RefID
-      FROM service_sales WHERE CashAccountID = ? AND PaidAmount > 0 ${fSrv.sql}
+      SELECT Date, ServiceNumber as RefNumber, COALESCE(CustomerName,'') as Party, PaidAmount as InAmount,
+        CASE WHEN PaymentMethodID IS NULL
+             THEN COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)
+             ELSE 0 END as OutAmount,
+        'service_sale' as OpType, 'خدمة' as OpLabel, ServiceSaleID as RefID
+      FROM service_sales
+      WHERE CashAccountID = ?
+        AND (PaidAmount > 0
+             OR (PaymentMethodID IS NULL
+                 AND (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) > 0))
+        ${fSrv.sql}
     `, fSrv);
 
     // Asset transfers (IN or OUT depending on direction)
+    //
+    // The separate fee is NOT added to the outgoing row: `transfers:create`
+    // records it as its OWN payment voucher against the drawer, which already
+    // appears here as a `voucher_payment` row. Adding it to the transfer too
+    // showed the drawer losing the fee TWICE — measured: a 100 transfer with
+    // a 2 separate fee footed the statement at 104 against a ledger movement
+    // of 102. (When the fee is taken from the amount it is already inside
+    // `Amount`.)
     const fTIn = df('Date');
     const transfersIn = q(`
       SELECT Date, TransferNumber as RefNumber, '' as Party,
@@ -265,13 +316,10 @@ export function registerStatementHandlers() {
       FROM asset_transfers WHERE ToType = 'cash_account' AND ToID = ? ${fTIn.sql}
     `, fTIn);
 
-    // Only the separately-funded commission leaves the source account on top of
-    // the transferred amount; when the fee is taken from the amount it is already
-    // included in `Amount`.
     const fTOut = df('Date');
     const transfersOut = q(`
       SELECT Date, TransferNumber as RefNumber, '' as Party, 0 as InAmount,
-        (Amount + CASE WHEN TransferCostSource = 'separate' THEN TransferCost ELSE 0 END) as OutAmount,
+        Amount as OutAmount,
         'transfer_out' as OpType, 'تحويل صادر' as OpLabel, TransferID as RefID
       FROM asset_transfers WHERE FromType = 'cash_account' AND FromID = ? ${fTOut.sql}
     `, fTOut);
@@ -425,16 +473,18 @@ export function registerStatementHandlers() {
       WHERE d.PaymentMethodID = ? AND r.TotalRefund > 0 ${fMR.sql}
     `, fMR);
 
-    // Rent payments (income = IN, expense = OUT)
-    const fRent = df('rp.PaidDate');
+    // Rent payments (income = IN, expense = OUT) — partial instalments too,
+    // showing the amount that actually moved (same fix as the cash statement).
+    const fRent = df('COALESCE(rp.PaidDate, rp.DueDate)');
     const rents = q(`
-      SELECT rp.PaidDate as Date, 'RNT-' || rp.RentPaymentID as RefNumber, r.RentName as Party,
-        CASE WHEN r.RentType = 'income' THEN rp.Amount ELSE 0 END as InAmount,
-        CASE WHEN r.RentType = 'expense' THEN rp.Amount ELSE 0 END as OutAmount,
+      SELECT COALESCE(rp.PaidDate, rp.DueDate) as Date,
+        'RNT-' || rp.RentPaymentID as RefNumber, r.RentName as Party,
+        CASE WHEN r.RentType = 'income' THEN rp.PaidAmount ELSE 0 END as InAmount,
+        CASE WHEN r.RentType = 'expense' THEN rp.PaidAmount ELSE 0 END as OutAmount,
         'rent' as OpType, CASE WHEN r.RentType = 'income' THEN 'إيجار وارد' ELSE 'إيجار منصرف' END as OpLabel,
         rp.RentPaymentID as RefID
       FROM rent_payments rp JOIN rents r ON rp.RentID = r.RentID
-      WHERE rp.PaymentMethodID = ? AND rp.Status = 'paid' ${fRent.sql}
+      WHERE rp.PaymentMethodID = ? AND COALESCE(rp.PaidAmount, 0) > 0 ${fRent.sql}
     `, fRent);
 
     // Asset transfers (IN = received, OUT = sent plus any separately-funded fee)
@@ -671,14 +721,19 @@ export function registerCustomerStatementHandlers() {
     `).all(supplierId, ...fPur.vals);
     operations.push(...purchases);
 
-    // Purchase returns — mirror of the sale-return rule: only the part that
-    // cancelled what we still owed belongs on the supplier account.
+    // Purchase returns — the returned VALUE goes off what we owe, whatever
+    // The settlement has two legs: the returned VALUE goes on the debit side
+    // (the supplier's claim on us drops by the goods that came back) and the
+    // refunds they handed over (cash / machine) go on the credit side. The
+    // legs always sum to the full value, so `Debit − Credit` is exactly the
+    // `DebtRelief` the handler writes to `suppliers.Balance` — an 80 unit
+    // refunded to a machine shows 80 against an 80 refund (net zero, which a
+    // 0/0 row hid), a pure account credit shows 160 against nothing, and any
+    // mix nets to what the balance actually moved.
     const returns = db.prepare(`
       SELECT r.ReturnID as RefID, r.ReturnNumber as RefNumber, r.Date,
-             COALESCE(r.DebtRelief,
-               CASE WHEN COALESCE(p.PaidAmount,0) >= COALESCE(p.TotalAmount,0) THEN 0 ELSE r.TotalAmount END
-             ) as Debit,
-             0 as Credit,
+             COALESCE(r.TotalAmount, 0) as Debit,
+             COALESCE(r.CashRefund, 0) + COALESCE(r.TransferRefund, 0) as Credit,
              r.TotalAmount as ReturnTotal,
              COALESCE(r.CashRefund, 0) as CashRefund,
              'purchase_return' as OpType, 'مرتجع مشتريات' as Description,

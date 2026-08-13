@@ -591,9 +591,15 @@ export function registerDeleteHandlers() {
           db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(Math.abs(sale.RemainingAmount), sale.CustomerID);
         }
 
-        // Reverse cash account
-        if (sale.CashAccountID && sale.PaidAmount > 0) {
-          db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(sale.PaidAmount, sale.CashAccountID);
+        // Reverse the received payment — from the drawer, or from the machine
+        // when the machine was chosen as the receiving source (mirrors the
+        // create side since services began receiving into the machine).
+        if (sale.PaidAmount > 0) {
+          if (sale.CashAccountID) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(sale.PaidAmount, sale.CashAccountID);
+          } else if (sale.PaymentMethodID) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(sale.PaidAmount, sale.PaymentMethodID);
+          }
         }
 
         // Put the transferred principal back where it came from.

@@ -28,7 +28,7 @@ export function registerServicesHandlers() {
   ipcMain.handle('serviceSales:list', async (_event, filters?: { fromDate?: string; toDate?: string; customerId?: number }) => {
     const db = getDb();
     let query = `
-      SELECT ss.*, c.Name as CustomerName, u.Username
+      SELECT ss.*, COALESCE(c.Name, ss.CustomerName) as CustomerName, u.Username
       FROM service_sales ss
       LEFT JOIN customers c ON ss.CustomerID = c.CustomerID
       JOIN users u ON ss.UserID = u.UserID
@@ -82,6 +82,13 @@ export function registerServicesHandlers() {
     const sProvider = oneOf(data.Provider || 'other', 'المزوّد', SERVICE_PROVIDERS);
     if (!sProvider.ok) return { success: false, message: sProvider.message };
 
+    // The payment method is allow-listed, not stored raw. The screen sends
+    // `paid > 0 ? 'cash' : 'credit'`; before the check an 'ALIEN' string was
+    // accepted and stored, and it printed straight into the customer statement
+    // and the service list (COALESCE only covers ServiceType).
+    const sPay = oneOf(data.PaymentMethod || 'cash', 'طريقة الدفع', ['cash', 'credit']);
+    if (!sPay.ok) return { success: false, message: sPay.message };
+
     // The destination number is what the shop is paid to send money TO. An
     // empty one was accepted and stored, leaving a transfer nobody can prove
     // was made and no way to chase it with the provider.
@@ -114,6 +121,7 @@ export function registerServicesHandlers() {
       CustomerName: sCustName.value ?? undefined,
       CustomerPhone: sCustPhone.value ?? undefined,
       CustomerID: sCustId.value ?? undefined,
+      PaymentMethod: sPay.value,
     };
 
     try {
@@ -124,30 +132,66 @@ export function registerServicesHandlers() {
       const status = remaining > 0 ? (data.PaidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
       const profit = data.ChargeAmount - data.ServiceCost - data.Amount - (data.TransferCost || 0);
 
+      // The customer's cash must land in a real chosen source. Before this
+      // check a 500 payment with no drawer and no machine was booked onto the
+      // row (PaidAmount = 500), moved nobody's balance, and left the statement
+      // showing money that never appeared anywhere. The screen itself refuses
+      // to submit when paid > 0 and neither is chosen.
+      if ((data.PaidAmount || 0) > 0 && !data.CashAccountID && !data.PaymentMethodID) {
+        return { success: false, message: 'اختر مصدر استلام المبلغ (خزنة أو ماكينة)' };
+      }
+
       // Check sufficient balance in payment method for service cost (unless negative cash allowed)
       const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
       // Total leaving the funding source = principal + provider fee + transfer fee.
       // Checking only the principal let an operation overdraw by the fees.
       const totalOutflow = (data.Amount || 0) + (data.ServiceCost || 0) + (data.TransferCost || 0);
-      if (allowNegCash?.Value !== '1' && totalOutflow > 0) {
+      // A friendlier "you don't have this" than the DB trigger's generic abort.
+      // The trigger itself cannot be disabled, so this guard can only improve
+      // the MESSAGE — a ghost source answers as missing, a dead one as
+      // deactivated, a poor one with its numbers.
+      const guardFunds = (): string | null => {
         if (data.PaymentMethodID) {
-          const pm = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(data.PaymentMethodID) as any;
-          if (!pm || (pm.Balance || 0) < totalOutflow) {
-            return { success: false, message: `الرصيد غير كافٍ في طريقة الدفع: المتاح ${(pm?.Balance || 0).toFixed(2)}، المطلوب ${totalOutflow.toFixed(2)}` };
+          const pm = db.prepare('SELECT Balance, IsActive FROM payment_methods WHERE PaymentMethodID = ?').get(data.PaymentMethodID) as any;
+          // A ghost machine used to answer "الرصيد غير كافٍ ... 0.00" — a typo'd
+          // id read as a broke machine.
+          if (!pm) return 'ماكينة الدفع المختارة غير موجودة';
+          if (!pm.IsActive) return 'ماكينة الدفع المختارة غير مفعّلة';
+          // The DB trigger makes a negative wallet impossible, so the check runs
+          // no matter what `allow_negative_cash` says — that setting relaxes the
+          // guard for the cash drawer only.
+          if ((pm.Balance || 0) < totalOutflow) {
+            return `الرصيد غير كافٍ في طريقة الدفع: المتاح ${(pm.Balance || 0).toFixed(2)}، المطلوب ${totalOutflow.toFixed(2)}`;
           }
-        } else if (data.CashAccountID && (data.ServiceCost || data.TransferCost)) {
-          // Fees fall back to the cash account when no machine is used. The
-          // customer's payment lands in the same account, so only the net
-          // shortfall matters.
-          const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
-          const netNeeded = (data.ServiceCost || 0) + (data.TransferCost || 0) - (data.PaidAmount || 0);
-          if (netNeeded > 0 && (!acc || (acc.Balance || 0) < netNeeded)) {
-            return { success: false, message: `الرصيد غير كافٍ في الخزينة: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${netNeeded.toFixed(2)}` };
+        } else if (data.CashAccountID) {
+          const acc = db.prepare('SELECT Balance, IsActive FROM cash_accounts WHERE CashAccountID = ?').get(data.CashAccountID) as any;
+          if (!acc) return 'الخزنة المختارة غير موجودة';
+          if (!acc.IsActive) return 'الخزنة المختارة غير مفعّلة';
+          // What actually leaves the drawer: the principal AND the fees, minus
+          // what lands straight back. The old figure checked fees alone, so a
+          // drawer-funded transfer of 1,000,000 with no costs and no payment
+          // sailed through a check that demanded nothing of it and drained the
+          // drawer a million — the guard watched the fee, not the transfer.
+          const netNeeded = totalOutflow - (data.PaidAmount || 0);
+          if (allowNegCash?.Value !== '1' && netNeeded > 0 && (acc.Balance || 0) < netNeeded) {
+            return `الرصيد غير كافٍ في الخزينة: المتاح ${(acc.Balance || 0).toFixed(2)}، المطلوب ${netNeeded.toFixed(2)}`;
           }
         }
-      }
+        return null;
+      };
+      const firstGuard = guardFunds();
+      if (firstGuard) return { success: false, message: firstGuard };
 
       const tx = db.transaction(() => {
+        // Re-guard INSIDE the transaction: the pre-check above is a snapshot,
+        // and a rival till can drain the funding source between it and this
+        // write (measured: the wallet trigger then aborted with a generic
+        // support-ref instead of the till's friendly message). Reading the
+        // balance again here — in the same transaction as the writes — closes
+        // the gap. Throwing aborts the whole transaction cleanly.
+        const reGuard = guardFunds();
+        if (reGuard) throw Object.assign(new Error(reGuard), { isDeliberateGuard: true });
+
         db.prepare(`
           INSERT INTO service_sales (
             ServiceNumber, FiscalYearID, Date, CustomerID, CustomerName, CustomerPhone,
@@ -173,6 +217,11 @@ export function registerServicesHandlers() {
 
         if (data.PaidAmount > 0 && data.CashAccountID) {
           db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(data.PaidAmount, data.CashAccountID);
+        } else if (data.PaidAmount > 0 && data.PaymentMethodID) {
+          // No drawer chosen — the machine both funds and receives. Before
+          // this branch the payment simply vanished: the row kept
+          // PaidAmount but no account ever gained it.
+          db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(data.PaidAmount, data.PaymentMethodID);
         }
 
         // The principal we push out to the target line.
@@ -215,6 +264,7 @@ export function registerServicesHandlers() {
       tx();
       return { success: true, serviceNumber, profit, remaining, status };
     } catch (err: any) {
+      if (err?.isDeliberateGuard) return { success: false, message: err.message };
       console.error('[ServiceSales] Error:', err);
       return safeFailure('serviceSales:create', err);
     }
@@ -223,8 +273,15 @@ export function registerServicesHandlers() {
   // Get service sale details
   ipcMain.handle('serviceSales:get', async (_event, id: number) => {
     const db = getDb();
+    // `ss.*` already carries the stored CustomerName — a second `c.Name as
+    // CustomerName` alias would OVERWRITE it with NULL for a service recorded
+    // against a name without a customer id (LEFT JOIN misses → c.Name is
+    // NULL). The name vanished the moment the row was read back.
     return db.prepare(`
-      SELECT ss.*, c.Name as CustomerName, c.Phone as CustomerPhone, c.Balance as CustomerBalance
+      SELECT ss.*,
+        COALESCE(c.Name, ss.CustomerName) as CustomerName,
+        COALESCE(c.Phone, ss.CustomerPhone) as CustomerPhone,
+        c.Balance as CustomerBalance
       FROM service_sales ss
       LEFT JOIN customers c ON ss.CustomerID = c.CustomerID
       WHERE ss.ServiceSaleID = ?

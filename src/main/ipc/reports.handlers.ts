@@ -359,13 +359,21 @@ export function registerReportsHandlers() {
       ${dateFilter}
     `).get(...params) as any;
 
-    // 6. Rent Income (rent we receive)
+    // 6. Rent Income (rent we receive).
+    //
+    // A PARTIAL instalment (`Status='partial'`) is real money already received
+    // even though the period is not settled; counting only `paid` rows made
+    // partial receipts vanish from the income statement while the cash clearly
+    // arrived, so profit was understated by every one. Same rule as the
+    // statements: full amount when settled, `PaidAmount` when partial.
     const rentIncome = db.prepare(`
-      SELECT COALESCE(SUM(rp.Amount),0) as total
+      SELECT COALESCE(SUM(CASE WHEN rp.Status = 'paid' THEN rp.Amount
+             WHEN rp.Status = 'partial' THEN COALESCE(rp.PaidAmount, 0)
+             ELSE 0 END),0) as total
       FROM rent_payments rp
       JOIN rents r ON rp.RentID = r.RentID
-      WHERE rp.Status = 'paid' AND r.RentType = 'income'
-      ${filters.fromDate ? 'AND rp.PaidDate >= ?' : ''} ${filters.toDate ? 'AND rp.PaidDate <= ?' : ''}
+      WHERE r.RentType = 'income'
+      ${filters.fromDate ? 'AND COALESCE(rp.PaidDate, rp.DueDate) >= ?' : ''} ${filters.toDate ? 'AND COALESCE(rp.PaidDate, rp.DueDate) <= ?' : ''}
     `).get(...(filters.fromDate ? [filters.fromDate] : []), ...(filters.toDate ? [filters.toDate] : [])) as any;
 
     const totalRevenue = netSales + maintenanceRevenue.total - maintenanceReturns.total
@@ -537,16 +545,34 @@ export function registerReportsHandlers() {
         ${filters.toDate ? "AND Month <= substr(?,1,7)" : ''}
     `).get(...(filters.fromDate ? [filters.fromDate] : []), ...(filters.toDate ? [filters.toDate] : [])) as any;
 
-    // 3. Rent Expenses (rent we pay out)
+    // 3. Rent Expenses (rent we pay out) — same partial rule as rent income.
     const rentExpenses = db.prepare(`
-      SELECT COALESCE(SUM(rp.Amount),0) as total
+      SELECT COALESCE(SUM(CASE WHEN rp.Status = 'paid' THEN rp.Amount
+             WHEN rp.Status = 'partial' THEN COALESCE(rp.PaidAmount, 0)
+             ELSE 0 END),0) as total
       FROM rent_payments rp
       JOIN rents r ON rp.RentID = r.RentID
-      WHERE rp.Status = 'paid' AND r.RentType = 'expense'
-      ${filters.fromDate ? 'AND rp.PaidDate >= ?' : ''} ${filters.toDate ? 'AND rp.PaidDate <= ?' : ''}
+      WHERE r.RentType = 'expense'
+      ${filters.fromDate ? 'AND COALESCE(rp.PaidDate, rp.DueDate) >= ?' : ''} ${filters.toDate ? 'AND COALESCE(rp.PaidDate, rp.DueDate) <= ?' : ''}
     `).get(...(filters.fromDate ? [filters.fromDate] : []), ...(filters.toDate ? [filters.toDate] : [])) as any;
 
-    const totalExpenses = generalExpenses.total + salariesExpense.total + rentExpenses.total + warrantyPartsCost.total;
+    // 4. Commissions earned by technicians on delivered repairs. Accrued when
+    // earned (`IsPaid = 0`), exactly like salaries: the labour of a delivered
+    // job is a real cost whether or not the cash has gone out yet. A commission
+    // that a salary has already absorbed (`IsPaid = 1` with a PaidInSalaryID)
+    // lives inside that salary's NetSalary — charging it again in a second line
+    // deducted the same pound twice. The balance sheet holds the unpaid part as
+    // a liability on the same condition, so the two reports must both read
+    // `IsPaid = 0` or they disagree with each other and with the books.
+    const commissionsExpense = db.prepare(`
+      SELECT COALESCE(SUM(Amount),0) as total
+      FROM commissions
+      WHERE IsPaid = 0
+        ${filters.fromDate ? "AND Date >= ?" : ''} ${filters.toDate ? "AND Date <= ?" : ''}
+    `).get(...(filters.fromDate ? [filters.fromDate] : []), ...(filters.toDate ? [filters.toDate] : [])) as any;
+
+    const totalExpenses = generalExpenses.total + salariesExpense.total + rentExpenses.total
+      + warrantyPartsCost.total + commissionsExpense.total;
 
     // Net Profit = Gross Profit - Operating Expenses
     const netProfit = grossProfit - totalExpenses;
@@ -584,6 +610,7 @@ export function registerReportsHandlers() {
         general: generalExpenses.total,
         salaries: salariesExpense.total,
         rent: rentExpenses.total,
+        commissions: commissionsExpense.total,
         warrantyParts: warrantyPartsCost.total,
         total: totalExpenses,
       },
@@ -674,7 +701,13 @@ export function registerReportsHandlers() {
     const customerCredits = db.prepare('SELECT Name, Balance FROM customers WHERE Balance < 0').all() as any[];
     const totalCustomerCredits = customerCredits.reduce((s, c) => s + Math.abs(c.Balance), 0);
 
-    const totalLiabilities = totalSuppliers + totalEmployees + totalCustomerCredits;
+    // Commissions earned by technicians but not yet paid out — owed money, a
+    // liability, exactly like an issued-but-unpaid salary. The P&L charges them
+    // as an expense on the same accrual basis; a balance sheet that left them
+    // out said `assets = liabilities + equity` held when it did not.
+    const unpaidCommissions = db.prepare('SELECT COALESCE(SUM(Amount),0) as total FROM commissions WHERE IsPaid = 0').get() as any;
+
+    const totalLiabilities = totalSuppliers + totalEmployees + totalCustomerCredits + unpaidCommissions.total;
 
     // === CAPITAL (Owner's Equity) ===
     const capitalSetting = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
@@ -697,7 +730,11 @@ export function registerReportsHandlers() {
     const maintenanceReturns = db.prepare('SELECT COALESCE(SUM(TotalRefund),0) as total FROM maintenance_returns').get() as any;
     const serviceRevenue = db.prepare('SELECT COALESCE(SUM(ChargeAmount - COALESCE(Amount,0)),0) as total FROM service_sales').get() as any;
     const otherIncome = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='receipt' AND (PartyType='general' OR PartyType IS NULL)").get() as any;
-    const rentIncomeAll = db.prepare("SELECT COALESCE(SUM(rp.Amount),0) as total FROM rent_payments rp JOIN rents r ON rp.RentID=r.RentID WHERE rp.Status='paid' AND r.RentType='income'").get() as any;
+    const rentIncomeAll = db.prepare(`
+      SELECT COALESCE(SUM(CASE WHEN rp.Status = 'paid' THEN rp.Amount
+             WHEN rp.Status = 'partial' THEN COALESCE(rp.PaidAmount, 0)
+             ELSE 0 END),0) as total
+      FROM rent_payments rp JOIN rents r ON rp.RentID=r.RentID WHERE r.RentType='income'`).get() as any;
 
     const cogs = db.prepare("SELECT COALESCE(SUM(COALESCE(sd.UnitCost,0) * sd.Quantity),0) as total FROM sale_details sd JOIN sales s ON sd.SaleID = s.SaleID WHERE s.IsVoided = 0 AND s.IsWarranty = 0 AND COALESCE(s.Source,'direct') <> 'maintenance'").get() as any;
     const partsCost = db.prepare(`
@@ -755,13 +792,22 @@ export function registerReportsHandlers() {
     const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND (PartyType='general' OR PartyType IS NULL)").get() as any;
     // Gross entitlement — see the note in reports:profitLoss.
     const salariesExpense = db.prepare('SELECT COALESCE(SUM(NetSalary + COALESCE(AdvancesTotal,0)),0) as total FROM salaries').get() as any;
-    const rentExpenses = db.prepare("SELECT COALESCE(SUM(rp.Amount),0) as total FROM rent_payments rp JOIN rents r ON rp.RentID=r.RentID WHERE rp.Status='paid' AND r.RentType='expense'").get() as any;
+    const rentExpenses = db.prepare(`
+      SELECT COALESCE(SUM(CASE WHEN rp.Status = 'paid' THEN rp.Amount
+             WHEN rp.Status = 'partial' THEN COALESCE(rp.PaidAmount, 0)
+             ELSE 0 END),0) as total
+      FROM rent_payments rp JOIN rents r ON rp.RentID=r.RentID WHERE r.RentType='expense'`).get() as any;
+
+    // Only commissions NOT yet absorbed by a salary are a separate expense here —
+    // a settled one lives inside its salary's NetSalary, and charging both
+    // deducted the same pound twice. Mirrors the balance-sheet liability.
+    const commissionsAll = db.prepare('SELECT COALESCE(SUM(Amount),0) as total FROM commissions WHERE IsPaid = 0').get() as any;
 
     const netRevenue = salesRevenue.total - salesReturns.total + maintenanceRevenue.total - maintenanceReturns.total
       + serviceRevenue.total + otherIncome.total + rentIncomeAll.total;
     const totalCosts = cogs.total - cogsReturnsBS.total + partsCost.total + serviceCost.total
       + saleFeesBS.total + refundFeesBS.total + valuationAdjBS.total;
-    const totalExpenses = generalExpenses.total + salariesExpense.total + rentExpenses.total + warrantyPartsCost.total;
+    const totalExpenses = generalExpenses.total + salariesExpense.total + rentExpenses.total + warrantyPartsCost.total + commissionsAll.total;
     const netProfit = netRevenue - totalCosts - totalExpenses;
 
     // === BALANCE CHECK ===

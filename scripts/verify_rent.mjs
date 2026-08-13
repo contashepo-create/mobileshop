@@ -330,10 +330,12 @@ console.log('\n[6] An unpaid instalment is not an expense');
   const c2 = await H.get('rents:commitments')(EV);
   t('and the outstanding figure falls by the same amount', c2?.totalOwed === 5000, String(c2?.totalOwed));
 
-  // And the reports really do filter this way.
+  // And the reports really do filter this way — a PENDING instalment is never
+  // charged, and a PARTIAL one counts only what was actually received.
   const rep = raw('src/main/ipc/reports.handlers.ts');
   t("the P&L counts only paid rent",
-    /rent_payments rp JOIN rents r ON rp\.RentID=r\.RentID WHERE rp\.Status='paid'/.test(rep));
+    /CASE WHEN rp\.Status = 'paid' THEN rp\.Amount/.test(rep)
+    && /rp\.Status = 'partial' THEN COALESCE\(rp\.PaidAmount, 0\)/.test(rep));
   // Rent must not be counted once as a voucher and again as an instalment.
   t('rent is excluded from the general voucher expense line',
     /PartyType='rent' excluded here/.test(rep));

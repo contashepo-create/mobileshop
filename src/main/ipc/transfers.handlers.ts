@@ -57,6 +57,38 @@ export function registerTransfersHandlers() {
     if (!costSource.ok) return { success: false, message: costSource.message };
     data = { ...data, TransferCostSource: costSource.value };
 
+    // The account type is part of the identity of a funding source. A value
+    // outside the two real ones fell through to the payment-method branch on
+    // both the read AND the write: `getAccountBalance` treats anything that is
+    // not 'cash_account' as a machine, and the UPDATE below does the same, so
+    // `FromType: 'ALIEN'` with the drawer's id actually moved MACHINE money
+    // while the document claimed an alien type. The type is validated before
+    // any read or write can interpret it.
+    const fromType = oneOf(data.FromType, 'نوع الحساب المصدر', ['cash_account', 'payment_method'] as const);
+    if (!fromType.ok) return { success: false, message: fromType.message };
+    const toType = oneOf(data.ToType, 'نوع حساب الوصول', ['cash_account', 'payment_method'] as const);
+    if (!toType.ok) return { success: false, message: toType.message };
+    data = { ...data, FromType: fromType.value, ToType: toType.value };
+
+    // A destination that does not exist silently swallows the money: the
+    // UPDATE matched no row, the source lost the amount, and the books wrote
+    // a document for a transfer that never landed anywhere. MEASURED — a
+    // 5,000 transfer to ToID 99999 deducted the drawer and credited nothing.
+    if (data.FromType === 'cash_account') {
+      const src = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.FromID) as any;
+      if (!src) return { success: false, message: 'الحساب المصدر غير موجود' };
+    } else {
+      const src = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(data.FromID) as any;
+      if (!src) return { success: false, message: 'الحساب المصدر غير موجود' };
+    }
+    if (data.ToType === 'cash_account') {
+      const dst = db.prepare('SELECT CashAccountID FROM cash_accounts WHERE CashAccountID = ?').get(data.ToID) as any;
+      if (!dst) return { success: false, message: 'حساب الوصول غير موجود' };
+    } else {
+      const dst = db.prepare('SELECT PaymentMethodID FROM payment_methods WHERE PaymentMethodID = ?').get(data.ToID) as any;
+      if (!dst) return { success: false, message: 'حساب الوصول غير موجود' };
+    }
+
     // Moving money to the account it already sits in is not a transfer. It
     // costs the shop the fee, writes a document that explains nothing, and on
     // a shared row would net to a no-op that still deducted the commission.
@@ -64,13 +96,33 @@ export function registerTransfersHandlers() {
       return { success: false, message: 'لا يمكن التحويل إلى نفس الحساب' };
     }
 
+    // A fee taken FROM the money can never exceed it: the destination would
+    // be credited a negative amount — the transfer would both take from the
+    // source AND debit the destination, with the fee vouchered on top.
+    // (When the fee is 'separate' the source simply covers both, which the
+    // balance check below already enforces.)
+    if (data.TransferCostSource === 'from_amount' && data.TransferCost > data.Amount) {
+      return { success: false, message: 'رسوم التحويل أكبر من المبلغ المحوّل' };
+    }
+
     try {
       // Check source balance
       const sourceBalance = getAccountBalance(db, data.FromType, data.FromID);
       const totalDeduction = data.Amount + (data.TransferCostSource === 'separate' ? data.TransferCost : 0);
 
-      if (sourceBalance < totalDeduction) {
-        return { success: false, message: `الرصيد غير كافٍ. الرصيد المتاح: ${sourceBalance.toFixed(2)} والمطلوب: ${totalDeduction.toFixed(2)}` };
+      // Reliable balance in payment method for transfer (unless negative cash allowed)
+      const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
+
+      if (allowNegCash?.Value !== '1') {
+        const over = (balance: number) =>
+          `الرصيد غير كافٍ للتحويل: المتاح ${balance.toFixed(2)}، المطلوب ${totalDeduction.toFixed(2)}`;
+        if (data.FromType === 'cash_account') {
+          const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.FromID) as any;
+          if (!acc || (acc.Balance || 0) < totalDeduction) return { success: false, message: over(acc?.Balance || 0) };
+        } else {
+          const pm = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(data.FromID) as any;
+          if (!pm || (pm.Balance || 0) < totalDeduction) return { success: false, message: over(pm?.Balance || 0) };
+        }
       }
 
       const dateStr = businessToday();
@@ -78,22 +130,6 @@ export function registerTransfersHandlers() {
 
       // Amount received at destination (if cost from amount)
       const receivedAmount = data.TransferCostSource === 'from_amount' ? data.Amount - data.TransferCost : data.Amount;
-
-      // Check sufficient balance before transfer (unless negative cash allowed)
-      const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
-      if (allowNegCash?.Value !== '1') {
-        if (data.FromType === 'cash_account') {
-          const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(data.FromID) as any;
-          if (!acc || (acc.Balance || 0) < totalDeduction) {
-            return { success: false, message: `الرصيد غير كافٍ في الخزينة للتحويل: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${totalDeduction.toFixed(2)}` };
-          }
-        } else {
-          const pm = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(data.FromID) as any;
-          if (!pm || (pm.Balance || 0) < totalDeduction) {
-            return { success: false, message: `الرصيد غير كافٍ في طريقة الدفع للتحويل: المتاح ${(pm?.Balance || 0).toFixed(2)}، المطلوب ${totalDeduction.toFixed(2)}` };
-          }
-        }
-      }
 
       const tx = db.transaction(() => {
         // Record transfer
@@ -135,6 +171,30 @@ export function registerTransfersHandlers() {
           // same fee produced two indistinguishable vouchers, and deleting
           // one transfer removed BOTH. Measured — one delete, two rows gone,
           // and the second transfer's fee silently vanished from the books.
+          //
+          // WHICH account the voucher attaches to is the fee's GEOGRAPHY, and
+          // it must match where the fee actually left:
+          //
+          //   - separate + cash source: the fee is a separate drawer outflow,
+          //     already counted in the source deduction; the voucher IS its
+          //     statement leg, so it attaches to the drawer.
+          //   - from_amount: the fee is inside the transferred Amount — the
+          //     transfer leg of the source statement already carries it. An
+          //     attached voucher would show the drawer (or machine) paying
+          //     the fee a SECOND time.
+          //   - separate + machine source: the machine statement folds the
+          //     fee into its transfer leg for the same reason.
+          //
+          // In the last two cases the voucher must attach to NO account: it
+          // is a P&L record only. Attaching it anyway put a payment METHOD
+          // id into the CashAccountID column, which every statement query
+          // matches — a machine-sourced transfer then showed a phantom fee
+          // on the FIRST cash account (ids collide: cash 1, machine 1) while
+          // the real machine leg already carried the fee. MEASURED — a
+          // machine-to-drawer 1,000 transfer with a 20 separate fee showed
+          // 20 extra leaving the drawer on its statement.
+          const voucherSourceId = data.TransferCostSource === 'separate' && data.FromType === 'cash_account'
+            ? data.FromID : null;
           db.prepare(`
             INSERT INTO vouchers (VoucherNumber, VoucherType, FiscalYearID, Date, Amount,
               PartyType, PartyName, Description, CashAccountID, UserID,
@@ -144,7 +204,7 @@ export function registerTransfersHandlers() {
           `).run(
             nextDocNumber(db, 'vouchers', 'VoucherNumber', 'TRC', dateStr),
             data.fiscalYearId, dateStr, data.TransferCost,
-            data.FromID, data.userId, transferId
+            voucherSourceId, data.userId, transferId
           );
         }
       });

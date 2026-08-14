@@ -68,6 +68,17 @@ export function registerAssetsHandlers() {
       AccountName: name.value, AccountType: type.value, Balance: bal.value,
       BankName: bank.value, AccountNumber: accNo.value,
     });
+    // An opening balance is real money that must walk the books: the wallet
+    // handler has always raised owner capital for it, and the cash-account
+    // handler did NOT — so creating a bank with 20,000 made the balance sheet
+    // disagree with itself by 20,000 (assets rose, equity did not) while the
+    // machine equivalent stayed balanced. MEASURED in section 11: the same
+    // creation on both registries left the bank's identity off by its balance.
+    if (bal.value > 0) {
+      const currentCapital = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      const newCapital = (Number(currentCapital?.Value) || 0) + bal.value;
+      db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)").run(String(newCapital));
+    }
     return { success: true, id: result.lastInsertRowid };
   });
 
@@ -85,6 +96,15 @@ export function registerAssetsHandlers() {
     if (!accNo.ok) return { success: false, message: accNo.message };
     const active = requireFlag(data?.IsActive, 'نشط', 1);
     if (!active.ok) return { success: false, message: active.message };
+    // Deactivating through the update form is the same act as delete: a
+    // balance must be moved out first or it vanishes from the reports while
+    // the equity backing it stays (see `cashAccounts:delete`).
+    if (active.value === 0) {
+      const bal = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(rid.value) as any;
+      if (bal && Number(bal.Balance || 0) !== 0) {
+        return { success: false, message: 'لا يمكن إغلاق خزينة عليها رصيد — انقل الرصيد أولاً ثم أعد المحاولة' };
+      }
+    }
     const info = db.prepare(`
       UPDATE cash_accounts SET
         AccountName = @AccountName, AccountType = @AccountType,
@@ -118,6 +138,16 @@ export function registerAssetsHandlers() {
     if (!rid.ok) return { success: false, message: rid.message };
     const exists = db.prepare('SELECT 1 AS ok FROM cash_accounts WHERE CashAccountID = ?').get(rid.value);
     if (!exists) return { success: false, message: 'الخزينة غير موجودة' };
+    // Deactivating is not deleting: the money in a closed drawer does not stop
+    // existing, but the balance sheet only lists IsActive = 1 assets, so the
+    // cash would vanish from every report while the equity that backs it
+    // stayed — the identity broke by exactly the held balance. MEASURED in
+    // section 11: closing a drawer holding 100,000 left `difference: -100,000`.
+    // The money must be moved out before the drawer can be closed.
+    const bal = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(rid.value) as any;
+    if (Number(bal?.Balance || 0) !== 0) {
+      return { success: false, message: 'لا يمكن إغلاق خزينة عليها رصيد — انقل الرصيد أولاً ثم أعد المحاولة' };
+    }
     db.prepare('UPDATE cash_accounts SET IsActive = 0 WHERE CashAccountID = ?').run(rid.value);
     return { success: true };
   });
@@ -146,20 +176,26 @@ export function registerAssetsHandlers() {
     if (!provider.ok) return { success: false, message: provider.message };
     const phone = optionalText(data?.PhoneNumber, 'رقم الهاتف', LIMITS.PHONE);
     if (!phone.ok) return { success: false, message: phone.message };
-    const openingBalance = Math.max(0, Number(data?.OpeningBalance) || 0);
+    // An opening balance is money the machine actually holds. `Math.max(0, …)`
+    // used to swallow a NEGATIVE value into a silent zero — the form said
+    // "تم إنشاء" for a machine that never existed as entered — while the cash
+    // registry refuses the same input. MEASURED in section 11: -50 was clamped
+    // to 0 instead of refused.
+    const openingBalance = checkAmount(data?.OpeningBalance ?? 0, 'الرصيد الافتتاحي لطريقة الدفع');
+    if (!openingBalance.ok) return { success: false, message: openingBalance.message };
     const result = db.prepare(`
       INSERT INTO payment_methods (MethodName, MethodType, Provider, PhoneNumber, Balance, IsActive)
       VALUES (@MethodName, @MethodType, @Provider, @PhoneNumber, @Balance, 1)
     `).run({
       MethodName: name.value, MethodType: type.value,
       Provider: provider.value, PhoneNumber: phone.value,
-      Balance: openingBalance,
+      Balance: openingBalance.value,
     });
     // If an opening balance was set, add it to owner capital so the financial
     // position balances (Assets = Liabilities + Equity).
-    if (openingBalance > 0) {
+    if (openingBalance.value > 0) {
       const currentCapital = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
-      const newCapital = (Number(currentCapital?.Value) || 0) + openingBalance;
+      const newCapital = (Number(currentCapital?.Value) || 0) + openingBalance.value;
       db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)").run(String(newCapital));
     }
     return { success: true, id: result.lastInsertRowid };
@@ -179,6 +215,14 @@ export function registerAssetsHandlers() {
     if (!phone.ok) return { success: false, message: phone.message };
     const active = requireFlag(data?.IsActive, 'نشط', 1);
     if (!active.ok) return { success: false, message: active.message };
+    // Same rule as `paymentMethods:delete`: closing a machine that still
+    // holds money hides the balance from every report.
+    if (active.value === 0) {
+      const bal = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(rid.value) as any;
+      if (bal && Number(bal.Balance || 0) !== 0) {
+        return { success: false, message: 'لا يمكن إغلاق طريقة دفع عليها رصيد — انقل الرصيد أولاً ثم أعد المحاولة' };
+      }
+    }
     const info = db.prepare(`
       UPDATE payment_methods SET
         MethodName = @MethodName, MethodType = @MethodType,
@@ -199,6 +243,13 @@ export function registerAssetsHandlers() {
     if (!rid.ok) return { success: false, message: rid.message };
     const exists = db.prepare('SELECT 1 AS ok FROM payment_methods WHERE PaymentMethodID = ?').get(rid.value);
     if (!exists) return { success: false, message: 'طريقة الدفع غير موجودة' };
+    // Same rule as the drawer: a machine holding money cannot be closed, or
+    // the balance sheet drops the balance while the equity that backs it
+    // stays — measured off by the held amount in section 11.
+    const bal = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(rid.value) as any;
+    if (Number(bal?.Balance || 0) !== 0) {
+      return { success: false, message: 'لا يمكن إغلاق طريقة دفع عليها رصيد — انقل الرصيد أولاً ثم أعد المحاولة' };
+    }
     db.prepare('UPDATE payment_methods SET IsActive = 0 WHERE PaymentMethodID = ?').run(rid.value);
     return { success: true };
   });

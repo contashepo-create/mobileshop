@@ -133,7 +133,7 @@ const D1 = {
       async all() { return { results: sqlite.prepare(sql).all(...bound) }; },
       async run() {
         const r = sqlite.prepare(sql).run(...bound);
-        return { meta: { last_row_id: r.lastInsertRowid } };
+        return { meta: { last_row_id: r.lastInsertRowid, changes: r.changes } };
       },
     };
     return api;
@@ -395,6 +395,134 @@ console.log('\n[9] Fast lane (code push): manifest, object, gating, admin guard'
   const hj2 = await hb2.json();
   t('a code version older than the full build never hides the full build',
     hj2.config?.all?.latest_version === '1.0.10', JSON.stringify(hj2.config?.all));
+}
+
+// ------------------------------------------------------------------ 10
+console.log('\n[10] Message lifecycle: edit, delete, read tracking');
+{
+  const admin = { 'X-Admin-Key': ADMIN_KEY };
+  const client = { 'X-Client-Key': CLIENT_KEY };
+  const DEV_A = 'msgdev00000000000000000000';
+  const DEV_B = 'msgdev00000000000000000001';
+
+  t('message admin actions need the ADMIN key',
+    (await call('/message', { method: 'POST', headers: { 'X-Client-Key': CLIENT_KEY },
+      body: { action: 'list' } })).status === 401);
+  t('an unknown action is refused',
+    (await call('/message', { method: 'POST', headers: admin,
+      body: { action: 'spam' } })).status === 400);
+
+  const created = await call('/message', { method: 'POST', headers: admin,
+    body: { title: 'صيانة الليلة', body: 'صيانة السيرفر الساعة 2 صباحاً', severity: 'warning' } });
+  const createdJson = await created.json();
+  const id = createdJson.id;
+  t('a message is created', created.status === 200 && Number.isInteger(id));
+  t('a create with no content is refused',
+    (await call('/message', { method: 'POST', headers: admin, body: {} })).status === 400);
+
+  // Both devices check in and receive the message unread.
+  const hbA1 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_A, licenseStatus: 'trial' } });
+  const hA1 = await hbA1.json();
+  const hbB1 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_B, licenseStatus: 'trial' } });
+  const hB1 = await hbB1.json();
+  t('a fresh install receives the message unread',
+    hA1.ok === true && hA1.messages?.some(m => m.id === id && m.body.includes('صيانة')));
+  t('both devices receive a broadcast', hB1.messages?.some(m => m.id === id));
+
+  // A reads it; B has not.
+  const hbA2 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_A, licenseStatus: 'trial', readReceipts: [id] } });
+  const hA2 = await hbA2.json();
+  t('after the receipt the message is no longer listed for its reader',
+    hA2.ok === true && !hA2.messages?.some(m => m.id === id));
+
+  const reads1 = await call('/message', { method: 'POST', headers: admin, body: { action: 'reads', id } });
+  const r1 = await reads1.json();
+  t('reads lists the device that read it',
+    reads1.status === 200 && r1.read?.some(r => r.deviceId === DEV_A));
+  t('reads counts the reader', r1.readCount === 1, JSON.stringify(r1));
+  const devTotal = await env.DB.prepare('SELECT COUNT(*) AS n FROM devices').first();
+  t('reads counts the unread device', r1.unreadCount === (devTotal?.n ?? 0) - 1, JSON.stringify(r1));
+
+  // Edit: the corrected text reaches BOTH the reader (revision) and the
+  // unread device (message), and neither gets re-flagged as unread.
+  const edit = await call('/message', { method: 'POST', headers: admin,
+    body: { action: 'edit', id, body: 'الصيانة أُلغيت — شكراً لتفهمكم' } });
+  t('an edit is accepted', edit.status === 200 && (await edit.json()).ok === true);
+  t('editing nothing is refused',
+    (await call('/message', { method: 'POST', headers: admin, body: { action: 'edit', id } })).status === 400);
+  t('editing an unknown id is a 404',
+    (await call('/message', { method: 'POST', headers: admin,
+      body: { action: 'edit', id: 9999, body: 'x' } })).status === 404);
+
+  const hbA3 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_A, licenseStatus: 'trial' } });
+  const hA3 = await hbA3.json();
+  const rev = hA3.messageRevisions?.find(m => m.id === id);
+  t('the revision carries the new body to the reader', !!rev && rev.body.includes('أُلغيت'));
+  t('the edited message is not re-listed as unread', !hA3.messages?.some(m => m.id === id));
+
+  const hbB2 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_B, licenseStatus: 'trial' } });
+  const hB2 = await hbB2.json();
+  t('an unread device sees the corrected text too',
+    hB2.messages?.some(m => m.id === id && m.body.includes('أُلغيت')));
+
+  // Delete: the tombstone reaches the reader AND the unread device.
+  const del = await call('/message', { method: 'POST', headers: admin, body: { action: 'delete', id } });
+  t('a delete is accepted', del.status === 200 && (await del.json()).ok === true);
+  t('a bad id is refused',
+    (await call('/message', { method: 'POST', headers: admin,
+      body: { action: 'delete', id: 'abc' } })).status === 400);
+  t('deleting an unknown id is a 404',
+    (await call('/message', { method: 'POST', headers: admin,
+      body: { action: 'delete', id: 9999 } })).status === 404);
+
+  const hbA4 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_A, licenseStatus: 'trial' } });
+  const hA4 = await hbA4.json();
+  t('the reader receives the tombstone', hA4.ok === true && hA4.messageDeletes?.includes(id));
+  t('the deleted message is gone from the revisions', !hA4.messageRevisions?.some(m => m.id === id));
+  const hbB3 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_B, licenseStatus: 'trial' } });
+  const hB3 = await hbB3.json();
+  t('an unread device that saw the message receives the tombstone too',
+    hB3.messageDeletes?.includes(id));
+  t('the deleted message is gone from the unread list', !hB3.messages?.some(m => m.id === id));
+
+  // reads reflects the deletion, and the receipt history survives it.
+  const reads2 = await call('/message', { method: 'POST', headers: admin, body: { action: 'reads', id } });
+  const r2 = await reads2.json();
+  t('reads still reports the readers after a delete',
+    r2.ok === true && r2.deleted === true && r2.readCount === 1);
+
+  // Targeted messages: only the addressed device sees it (list, revisions, tombstone).
+  const T_A = await call('/message', { method: 'POST', headers: admin,
+    body: { title: 'خاص', body: 'خاص بالجهاز أ', target: DEV_A } });
+  const tAId = (await T_A.json()).id;
+  await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_A, licenseStatus: 'trial' } });
+  await call('/message', { method: 'POST', headers: admin, body: { action: 'delete', id: tAId } });
+  const hbB4 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_B, licenseStatus: 'trial' } });
+  const hB4 = await hbB4.json();
+  t('a targeted message never reaches another device',
+    !hB4.messages?.some(m => m.id === tAId)
+    && !hB4.messageRevisions?.some(m => m.id === tAId));
+  t('a targeted tombstone never leaks to another device',
+    !hB4.messageDeletes?.includes(tAId));
+  const hbA5 = await call('/heartbeat', { method: 'POST', headers: client,
+    body: { deviceId: DEV_A, licenseStatus: 'trial' } });
+  const hA5 = await hbA5.json();
+  t('the addressed device does get the targeted tombstone',
+    hA5.messageDeletes?.includes(tAId));
+
+  const list = await call('/message', { method: 'POST', headers: admin, body: { action: 'list' } });
+  const listJson = await list.json();
+  t('list returns the messages with their read counts',
+    list.status === 200 && listJson.messages?.some(m => m.id === id && m.readCount === 1 && m.deletedAt));
 }
 
 console.log('\n' + '='.repeat(72));

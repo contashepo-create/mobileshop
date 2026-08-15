@@ -36,7 +36,7 @@ function makeDB() {
       async run() {
         const st = db.prepare(norm);
         const r = st.run(...bound);
-        return { meta: { last_row_id: Number(r.lastInsertRowid) } };
+        return { meta: { last_row_id: Number(r.lastInsertRowid), changes: r.changes } };
       },
       async first() {
         const st = db.prepare(norm);
@@ -325,6 +325,92 @@ console.log('\n[11] Stale prompts cannot swallow a later command');
   await type('/start');                   // ...but a command arrives
   const m = lastOf('sendMessage');
   check('/start escapes the pending prompt', /لوحة التحكم/.test(m?.body?.text || ''));
+}
+
+// ---------------------------------------------------------------- 12
+console.log('\n[12] Message management: list, delete, edit, readers');
+{
+  // Seed two devices and a broadcast message with one read receipt.
+  const now = new Date().toISOString();
+  await env.DB.prepare(`INSERT INTO devices (device_id, shop_name, license_status) VALUES (?, ?, ?)`)
+    .bind('msgtest0000000000000000', '#1: محل القاهرة', 'active').run();
+  await env.DB.prepare(`INSERT INTO devices (device_id, shop_name, license_status) VALUES (?, ?, ?)`)
+    .bind('msgtest0000000000000001', '#2: محل الأقصر', 'active').run();
+  const ins = await env.DB.prepare(`INSERT INTO messages (target, title, body, severity, created_at, updated_at)
+    VALUES ('all', 'رسالة تجريبية', 'محتوى تجريبي لا يزال ظاهراً', 'info', ?, ?)`)
+    .bind(now, now).run();
+  const mid = ins.meta.last_row_id;
+  await env.DB.prepare(`INSERT INTO message_reads (message_id, device_id, read_at) VALUES (?, ?, ?)`)
+    .bind(mid, 'msgtest0000000000000000', now).run();
+  // A second, still-live message — the edit flow needs one that was not
+  // deleted, since editing a retracted message is deliberately refused.
+  const ins2 = await env.DB.prepare(`INSERT INTO messages (target, title, body, severity, created_at, updated_at)
+    VALUES ('all', 'إعلان', 'عروض الأسبوع', 'info', ?, ?)`)
+    .bind(now, now).run();
+  const mid2 = ins2.meta.last_row_id;
+
+  sent.length = 0;
+  await type('/start');
+  const menu = dataOf(lastOf('sendMessage'));
+  check('the main menu offers message management', menu.includes('msgs'));
+
+  // -- list
+  sent.length = 0;
+  await tap('msgs');
+  const list = lastOf('editMessageText');
+  check('the list screen names the seeded message', 
+    /#2/.test(list?.body?.text || '') && /رسالة تجريبية/.test(list?.body?.text || ''));
+  check('the list shows the real read count (1 of 2 devices)',
+    /قرأها 1/.test(list?.body?.text || ''));
+
+  // -- delete
+  sent.length = 0;
+  await tap('msgdel');
+  check('delete asks for the message number',
+    /رقم الرسالة/.test(lastOf('editMessageText')?.body?.text || ''));
+  await type(String(mid));
+  const delMsg = lastOf('sendMessage');
+  check('delete confirms', /تم حذف الرسالة/.test(delMsg?.body?.text || ''));
+  const afterDel = await env.DB.prepare('SELECT deleted_at FROM messages WHERE id = ?').bind(mid).first();
+  check('the message is marked deleted', afterDel?.deleted_at !== null && afterDel?.deleted_at !== undefined);
+
+  // -- edit
+  sent.length = 0;
+  await tap('msgedit');
+  check('edit asks for the message number',
+    /رقم الرسالة/.test(lastOf('editMessageText')?.body?.text || ''));
+  await type('not-a-number');
+  check('a non-numeric id is refused', /رسالة الصحيح/.test(lastOf('sendMessage')?.body?.text || ''));
+  await tap('msgedit');
+  await type(String(mid2));
+  check('edit asks for the new text', /النص الجديد/.test(lastOf('sendMessage')?.body?.text || ''));
+  await type('النص المعدل — لا مزيد من التجارب');
+  const editMsg = lastOf('sendMessage');
+  check('edit confirms', /تم تعديل الرسالة/.test(editMsg?.body?.text || ''));
+  const afterEdit = await env.DB.prepare('SELECT body, deleted_at FROM messages WHERE id = ?').bind(mid2).first();
+  check('the body is updated', afterEdit?.body === 'النص المعدل — لا مزيد من التجارب');
+  await tap('msgedit');
+  await type(String(mid));
+  const deletedEditPrompt = lastOf('sendMessage');
+  check('edit of a deleted id still asks for the text', /النص الجديد/.test(deletedEditPrompt?.body?.text || ''));
+  await type('لا يهم');
+  check('editing a retracted message is refused', /لا توجد رسالة رقم/.test(lastOf('sendMessage')?.body?.text || ''));
+
+  // -- readers
+  sent.length = 0;
+  await tap('msgreads');
+  check('readers asks for the message number',
+    /رقم الرسالة/.test(lastOf('editMessageText')?.body?.text || ''));
+  await type('99999');
+  check('an unknown message id is reported', /لا توجد رسالة رقم 99999/.test(lastOf('sendMessage')?.body?.text || ''));
+  await tap('msgreads');
+  await type(String(mid));
+  const rd = lastOf('sendMessage');
+  check('the report lists who read it', /محل القاهرة/.test(rd?.body?.text || ''));
+  const allDevices = (await env.DB.prepare('SELECT COUNT(*) AS n FROM devices').first())?.n ?? 0;
+  check('the report names the counts', /قرأها: 1/.test(rd?.body?.text || '')
+    && (new RegExp(`لم يقرأها: ${allDevices - 1}`)).test(rd?.body?.text || ''));
+  check('the report marks the message as deleted', /محذوفة/.test(rd?.body?.text || ''));
 }
 
 console.log('\n' + '='.repeat(70));

@@ -198,6 +198,25 @@ export function markReceiptsSynced(ids: number[]) {
   db.transaction(() => { for (const id of ids) stmt.run(id); })();
 }
 
+/**
+ * Removes local copies of messages the developer has RETRACTED.
+ *
+ * The server sends tombstone ids after a delete; a device that already
+ * received the message must drop it — read or not — so a test message sent by
+ * mistake disappears from every shop on the next check-in. Ids the device
+ * never received are a harmless no-op.
+ */
+export function removeRemoteMessages(ids: number[]) {
+  if (!Array.isArray(ids) || ids.length === 0) return;
+  const db = getDb();
+  const del = db.prepare('DELETE FROM remote_messages WHERE MessageID = ?');
+  db.transaction(() => {
+    for (const id of ids) {
+      if (typeof id === 'number' && Number.isInteger(id)) del.run(id);
+    }
+  })();
+}
+
 // ---------------------------------------------------------------- state
 
 export function getRemoteState(key: string): string | null {

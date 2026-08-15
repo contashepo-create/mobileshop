@@ -2,6 +2,7 @@ import { app } from 'electron';
 import { getDb } from '../database/connection';
 import {
   ensureRemoteTables, saveRemoteConfig, saveRemoteMessages,
+  removeRemoteMessages,
   getRemoteState, setRemoteState, pendingReadReceipts, markReceiptsSynced,
 } from './remoteStore';
 
@@ -163,6 +164,17 @@ export async function runHeartbeat(
     }
     if (Array.isArray(res.messages)) {
       saveRemoteMessages(res.messages);
+    }
+    // Retracted messages: drop the local copy, read or not, so a message the
+    // developer deleted no longer pops up on this install.
+    if (Array.isArray(res.messageDeletes) && res.messageDeletes.length) {
+      removeRemoteMessages(res.messageDeletes);
+    }
+    // Edited messages: the upsert refreshes the text while keeping the local
+    // read state — a device that already read the wrong version is corrected,
+    // and ReadAt is never reset to "unread".
+    if (Array.isArray(res.messageRevisions) && res.messageRevisions.length) {
+      saveRemoteMessages(res.messageRevisions);
     }
     if (Array.isArray(payload.readReceipts) && payload.readReceipts.length) {
       markReceiptsSynced(payload.readReceipts);

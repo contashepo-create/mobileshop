@@ -186,6 +186,54 @@ console.log('\n[9] Every About-page field is remotely manageable');
   check('all are rendered on the About page', missingFromUI.length === 0, missingFromUI.join(', '));
 }
 
+// ---------------------------------------------------------------- 6
+console.log('\n[6] Retraction and amendment reach the install');
+{
+  check('the heartbeat consumes retracted-message tombstones',
+    beat.includes('removeRemoteMessages(res.messageDeletes)'));
+  check('the heartbeat applies edited-message revisions',
+    beat.includes('saveRemoteMessages(res.messageRevisions)'));
+  check('the store can drop retracted messages',
+    store.includes('export function removeRemoteMessages'));
+  check('removal is keyed by the server id only',
+    store.includes('DELETE FROM remote_messages WHERE MessageID = ?'));
+  // The upsert refreshes text but never resets the local read state — a READ
+  // message stays read, so an edit cannot re-trigger popups.
+  const conflict = store.split('ON CONFLICT(MessageID) DO UPDATE SET')[1] || '';
+  check('an edited message keeps its read state',
+    !/ReadAt\s*=\s*excluded\.ReadAt/.test(conflict));
+  check('after a retraction the unread list can no longer see the id',
+    beat.includes('removeRemoteMessages'));
+  check('retractions and revisions are applied before receipts are marked',
+    beat.indexOf('removeRemoteMessages(res.messageDeletes)') < beat.indexOf('markReceiptsSynced(payload.readReceipts)')
+    && beat.indexOf('saveRemoteMessages(res.messageRevisions)') < beat.indexOf('markReceiptsSynced(payload.readReceipts)'));
+}
+
+// ---------------------------------------------------------------- 7
+console.log('\n[7] The server no longer serves retracted or amended text silently');
+{
+  // The unread feed must not list a deleted message...
+  check('the heartbeat unread query excludes deleted messages',
+    /AND m\.deleted_at IS NULL/.test(worker));
+  check('the heartbeat carries tombstones for retracted ids',
+    /messageDeletes/.test(worker));
+  check('the heartbeat carries revisions for edited ids',
+    /messageRevisions/.test(worker));
+  check('tombstones are limited to a recent window',
+    /deleted_at > datetime\('now', '-60 days'\)/.test(worker));
+  check('revisions are limited to a recent window',
+    /updated_at > datetime\('now', '-45 days'\)/.test(worker));
+  // The admin can still see who read a message after it is gone.
+  check('message_reads is joined to devices for the readers report',
+    /FROM message_reads r LEFT JOIN devices d ON d\.device_id = r\.device_id/.test(worker));
+  check('the bot lists the sent messages with their ids',
+    /SELECT m\.id, m\.target/.test(worker) && /screenMsgs/.test(worker));
+  check('the bot can delete and amend by id',
+    /await_msgdel/.test(worker) && /await_msgedit_text/.test(worker));
+  check('the bot can report readers',
+    /await_msgreads/.test(worker) && /messageReadsReport/.test(worker));
+}
+
 console.log('\n' + '='.repeat(72));
 console.log(`RESULT: ${PASS.length} passed, ${FAIL.length} failed`);
 console.log('='.repeat(72));

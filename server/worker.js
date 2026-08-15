@@ -223,7 +223,9 @@ async function ensureSchema(env) {
       body TEXT NOT NULL,
       severity TEXT DEFAULT 'info',
       created_at TEXT,
-      expires_at TEXT
+      expires_at TEXT,
+      updated_at TEXT,
+      deleted_at TEXT
     )`),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS message_reads (
       message_id INTEGER, device_id TEXT, read_at TEXT,
@@ -300,6 +302,19 @@ async function ensureSchema(env) {
   // harmlessly (duplicate column) and is swallowed.
   try {
     await env.DB.prepare(`ALTER TABLE releases ADD COLUMN sha512 TEXT`).run();
+  } catch {
+    // duplicate column — already migrated
+  }
+  // `messages` gained edit/delete tracking (for retracting and amending a
+  // broadcast) after the very first deploy, which created the table without
+  // the columns. Same explicit migration pattern as `releases.sha512` above.
+  try {
+    await env.DB.prepare(`ALTER TABLE messages ADD COLUMN updated_at TEXT`).run();
+  } catch {
+    // duplicate column — already migrated
+  }
+  try {
+    await env.DB.prepare(`ALTER TABLE messages ADD COLUMN deleted_at TEXT`).run();
   } catch {
     // duplicate column — already migrated
   }
@@ -595,10 +610,34 @@ async function handleHeartbeat(request, env) {
     SELECT m.id, m.title, m.body, m.severity, m.created_at, m.expires_at
     FROM messages m
     WHERE (m.target = 'all' OR m.target = ?)
+      AND m.deleted_at IS NULL
       AND (m.expires_at IS NULL OR m.expires_at > datetime('now'))
       AND NOT EXISTS (SELECT 1 FROM message_reads r WHERE r.message_id = m.id AND r.device_id = ?)
     ORDER BY m.id DESC LIMIT 20
   `).bind(deviceId, deviceId).all();
+
+  // Messages the developer EDITED after they were sent. The client upserts
+  // them, keeping its read state: a corrected message reaches devices that
+  // already read the wrong version, and an unread one keeps popping up with
+  // the new text. Windowed so every daily check-in sees the recent ones.
+  const revisions = await env.DB.prepare(`
+    SELECT m.id, m.title, m.body, m.severity, m.expires_at
+    FROM messages m
+    WHERE (m.target = 'all' OR m.target = ?)
+      AND m.deleted_at IS NULL AND m.updated_at IS NOT NULL
+      AND m.updated_at > datetime('now', '-45 days')
+    ORDER BY m.id DESC LIMIT 50
+  `).bind(deviceId).all();
+
+  // Messages the developer RETRACTED: the client deletes its local copy, so a
+  // test message sent by mistake disappears from every shop that syncs — read
+  // or not. Id-based, so a device that never received the message is unharmed.
+  const deletes = await env.DB.prepare(`
+    SELECT m.id FROM messages m
+    WHERE m.deleted_at IS NOT NULL
+      AND m.deleted_at > datetime('now', '-60 days')
+      AND (m.target = 'all' OR m.target = ?)
+  `).bind(deviceId).all();
 
   const toObj = rows => Object.fromEntries((rows?.results || []).map(r => [r.key, r.value]));
 
@@ -609,6 +648,11 @@ async function handleHeartbeat(request, env) {
       id: m.id, title: m.title, body: m.body,
       severity: m.severity, createdAt: m.created_at, expiresAt: m.expires_at,
     })),
+    messageRevisions: (revisions?.results || []).map(m => ({
+      id: m.id, title: m.title, body: m.body,
+      severity: m.severity, expiresAt: m.expires_at,
+    })),
+    messageDeletes: (deletes?.results || []).map(r => r.id),
     serverTime: now,
   });
 }
@@ -675,7 +719,66 @@ async function handleMessage(request, env) {
     return json({ ok: false, error: 'unauthorised' }, 401);
   }
   const b = await request.json().catch(() => null);
-  if (!b?.title && !b?.body) return json({ ok: false, error: 'empty message' }, 400);
+  if (!b || typeof b !== 'object') return json({ ok: false, error: 'bad json' }, 400);
+  const action = String(b.action || '');
+
+  // Management actions — the same contract as the bot's MESSAGES_MENU,
+  // exposed over the webhook so scripts and the developer can drive it
+  // directly: list what was sent, who read it, edit the text, retract it.
+  if (action === 'list') {
+    const rows = await env.DB.prepare(`
+      SELECT m.id, m.target, m.title, m.body, m.severity,
+             m.created_at, m.updated_at, m.expires_at, m.deleted_at,
+             (SELECT COUNT(*) FROM message_reads r WHERE r.message_id = m.id) AS read_count
+        FROM messages m
+       ORDER BY m.id DESC LIMIT 50
+    `).all();
+    const messages = (rows?.results || []).map(m => ({
+      id: m.id, target: m.target, title: m.title, body: m.body, severity: m.severity,
+      createdAt: m.created_at, updatedAt: m.updated_at, expiry: m.expires_at,
+      deletedAt: m.deleted_at, readCount: m.read_count,
+    }));
+    return json({ ok: true, messages });
+  }
+
+  if (action === 'reads') {
+    const id = Number(b.id);
+    if (!Number.isInteger(id)) return json({ ok: false, error: 'bad id' }, 400);
+    const report = await messageReadsReport(env, id);
+    if (!report) return json({ ok: false, error: 'no such message' }, 404);
+    return json({
+      ok: true, id, name: report.name,
+      read: report.read, readCount: report.readCount,
+      unreadCount: report.unreadCount, deleted: report.deleted,
+    });
+  }
+
+  if (action === 'edit') {
+    const id = Number(b.id);
+    if (!Number.isInteger(id)) return json({ ok: false, error: 'bad id' }, 400);
+    if (!b.body) return json({ ok: false, error: 'empty body' }, 400);
+    const res = await env.DB.prepare(
+      'UPDATE messages SET body = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL',
+    ).bind(String(b.body), new Date().toISOString(), id).run();
+    if ((res.meta?.changes ?? 0) === 0) {
+      return json({ ok: false, error: 'no such message' }, 404);
+    }
+    return json({ ok: true, id });
+  }
+
+  if (action === 'delete') {
+    const id = Number(b.id);
+    if (!Number.isInteger(id)) return json({ ok: false, error: 'bad id' }, 400);
+    const res = await env.DB.prepare(
+      'UPDATE messages SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL',
+    ).bind(new Date().toISOString(), id).run();
+    if ((res.meta?.changes ?? 0) === 0) {
+      return json({ ok: false, error: 'no such message' }, 404);
+    }
+    return json({ ok: true, id });
+  }
+
+  if (!b.title && !b.body) return json({ ok: false, error: 'empty message' }, 400);
   const res = await env.DB.prepare(`
     INSERT INTO messages (target, title, body, severity, created_at, expires_at)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -1360,12 +1463,78 @@ const MAIN_MENU = [
   [{ text: '📱 الأجهزة', callback_data: 'devs:0' },
    { text: '⏰ تنتهي قريباً', callback_data: 'exp' }],
   [{ text: '💬 رسالة للجميع', callback_data: 'msgall' },
-   { text: '⚙️ إعداد عام', callback_data: 'setall' }],
-  [{ text: '📊 إحصائيات', callback_data: 'stats' },
-   { text: '❓ مساعدة', callback_data: 'help' }],
+   { text: '📨 الرسائل', callback_data: 'msgs' }],
+  [{ text: '⚙️ إعداد عام', callback_data: 'setall' },
+   { text: '📊 إحصائيات', callback_data: 'stats' }],
+  [{ text: '❓ مساعدة', callback_data: 'help' }],
 ];
 
 const backTo = target => [[{ text: '⬅️ رجوع', callback_data: target }]];
+
+/** Message management submenu. */
+const MESSAGES_MENU = [
+  [{ text: '📋 قائمة الرسائل', callback_data: 'msglist' }],
+  [{ text: '🗑 حذف رسالة', callback_data: 'msgdel' },
+   { text: '✏️ تعديل رسالة', callback_data: 'msgedit' }],
+  [{ text: '👁 من قرأها', callback_data: 'msgreads' }],
+  [{ text: '⬅️ القائمة الرئيسية', callback_data: 'main' }],
+];
+
+/** A message id typed by the admin: strictly a positive integer. */
+function msgIdFrom(value) {
+  const id = Number(String(value || '').trim());
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+/** Lists the recent messages with their read counts, for the bot screen. */
+async function screenMsgs(env, messageId) {
+  const rows = await env.DB.prepare(`
+    SELECT m.id, m.target, m.title, m.created_at, m.deleted_at,
+      (SELECT COUNT(*) FROM message_reads r WHERE r.message_id = m.id) AS read_count
+    FROM messages m
+    ORDER BY m.id DESC LIMIT 15
+  `).all();
+  const list = rows?.results || [];
+  if (!list.length) {
+    return edit(env, messageId, '<b>📨 الرسائل</b>\n\nلا توجد رسائل بعد.', MESSAGES_MENU);
+  }
+  const lines = list.map(m => {
+    const mark = m.deleted_at ? '🗑' : (m.target === 'all' ? '📢' : '👤');
+    const when = (m.created_at || '').slice(0, 10);
+    return `${mark} <b>#${m.id}</b> — ${(m.title || 'بلا عنوان').slice(0, 24)}\n` +
+      `   ${when} · ${m.target === 'all' ? 'الكل' : 'جهاز'} · قرأها ${m.read_count}`;
+  });
+  return edit(env, messageId,
+    `<b>📨 الرسائل</b>\n\n${lines.join('\n')}\n\nاختر إجراءً:`, MESSAGES_MENU);
+}
+
+/** Builds the "who read message #id" report text. Shared by bot and webhook. */
+async function messageReadsReport(env, id) {
+  const msg = await env.DB.prepare('SELECT target, deleted_at FROM messages WHERE id = ?').bind(id).first();
+  if (!msg) return null;
+  const reads = await env.DB.prepare(`
+    SELECT r.read_at, r.device_id, d.shop_name
+    FROM message_reads r LEFT JOIN devices d ON d.device_id = r.device_id
+    WHERE r.message_id = ?
+    ORDER BY r.read_at
+  `).bind(id).all();
+  const list = reads?.results || [];
+  const readIds = new Set(list.map(r => r.device_id));
+  let unreadCount;
+  if (msg.target === 'all') {
+    const all = await env.DB.prepare('SELECT device_id FROM devices').all();
+    unreadCount = (all?.results || []).filter(d => !readIds.has(d.device_id)).length;
+  } else {
+    unreadCount = readIds.has(msg.target) ? 0 : 1;
+  }
+  const lines = list.length ? list.map(r =>
+    `• ${r.shop_name || r.device_id} — ${(r.read_at || '').slice(0, 16)}`) : ['لا أحد قرأها بعد.'];
+  return {
+    name: msg.target === 'all' ? 'الكل' : `الجهاز ${msg.target}`,
+    readCount: list.length, unreadCount, deleted: !!msg.deleted_at, lines,
+    read: list.map(r => ({ deviceId: r.device_id, readAt: r.read_at, shopName: r.shop_name ?? null })),
+  };
+}
 
 async function screenMain(env, messageId) {
   const text = '<b>🎛 لوحة التحكم</b>\n\nاختر ما تريد:';
@@ -1637,6 +1806,24 @@ async function handleCallback(env, cb) {
       [[{ text: '⬅️ رجوع', callback_data: `d:${deviceId}` }]]);
   }
 
+  // --- message management (listed / delete / edit / readers)
+  if (data === 'msgs' || data === 'msglist') return screenMsgs(env, messageId);
+  if (data === 'msgdel') {
+    await setPending(env, 'await_msgdel', {});
+    return edit(env, messageId, '<b>🗑 حذف رسالة</b>\n\n' +
+      'اكتب <b>رقم الرسالة</b> من القائمة أعلاه:', MESSAGES_MENU);
+  }
+  if (data === 'msgedit') {
+    await setPending(env, 'await_msgedit', {});
+    return edit(env, messageId, '<b>✏️ تعديل رسالة</b>\n\n' +
+      'اكتب <b>رقم الرسالة</b> من القائمة أعلاه:', MESSAGES_MENU);
+  }
+  if (data === 'msgreads') {
+    await setPending(env, 'await_msgreads', {});
+    return edit(env, messageId, '<b>👁 من قرأها</b>\n\n' +
+      'اكتب <b>رقم الرسالة</b> من القائمة أعلاه:', MESSAGES_MENU);
+  }
+
   // --- remote settings
   if (data === 'setall') {
     return edit(env, messageId, '<b>⚙️ إعداد عام لكل العملاء</b>\n\nاختر ما تريد تغييره:', configKeyboard('all'));
@@ -1692,13 +1879,58 @@ async function handleText(env, text) {
     }
 
     if (pending.action === 'await_msg') {
-      await env.DB.prepare(`INSERT INTO messages (target, title, body, severity, created_at)
-        VALUES (?, 'رسالة من المطور', ?, 'info', ?)`)
-        .bind(pending.data.target, value, new Date().toISOString()).run();
+      await env.DB.prepare(`INSERT INTO messages (target, title, body, severity, created_at, updated_at)
+        VALUES (?, 'رسالة من المطور', ?, 'info', ?, ?)`)
+        .bind(pending.data.target, value, new Date().toISOString(), new Date().toISOString()).run();
       await clearPending(env);
       return send(env,
         `✅ تم جدولة الرسالة${pending.data.target === 'all' ? ' لكل العملاء' : ''}.\n` +
         `ستظهر عند العميل في المزامنة القادمة.`, MAIN_MENU);
+    }
+
+    // --- message management: delete / edit / readers
+    if (pending.action === 'await_msgdel') {
+      const id = msgIdFrom(value);
+      if (!id) return send(env, '⚠️ اكتب رقم الرسالة الصحيح (مثلاً 12).', MESSAGES_MENU);
+      const res = await env.DB.prepare('UPDATE messages SET deleted_at = ? WHERE id = ?')
+        .bind(new Date().toISOString(), id).run();
+      if (!res.meta?.changes) return send(env, `⚠️ لا توجد رسالة رقم ${id}.`, MESSAGES_MENU);
+      await clearPending(env);
+      return send(env,
+        `🗑 تم حذف الرسالة <b>#${id}</b>.\n\n` +
+        `ستختفي من عملائها في المزامنة القادمة.`, MESSAGES_MENU);
+    }
+
+    if (pending.action === 'await_msgedit') {
+      const id = msgIdFrom(value);
+      if (!id) return send(env, '⚠️ اكتب رقم الرسالة الصحيح (مثلاً 12).', MESSAGES_MENU);
+      await setPending(env, 'await_msgedit_text', { id });
+      return send(env,
+        `<b>✏️ تعديل الرسالة #${id}</b>\n\nاكتب النص الجديد:`, MESSAGES_MENU);
+    }
+
+    if (pending.action === 'await_msgedit_text') {
+      const id = pending.data?.id;
+      const res = await env.DB.prepare('UPDATE messages SET body = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL')
+        .bind(String(value), new Date().toISOString(), id).run();
+      if (!res.meta?.changes) return send(env, `⚠️ لا توجد رسالة رقم ${id}.`, MESSAGES_MENU);
+      await clearPending(env);
+      return send(env,
+        `✏️ تم تعديل الرسالة <b>#${id}</b>.\n\n` +
+        `يصل النص الجديد للعملاء في المزامنة القادمة.`, MESSAGES_MENU);
+    }
+
+    if (pending.action === 'await_msgreads') {
+      const id = msgIdFrom(value);
+      if (!id) return send(env, '⚠️ اكتب رقم الرسالة الصحيح (مثلاً 12).', MESSAGES_MENU);
+      const report = await messageReadsReport(env, id);
+      if (!report) return send(env, `⚠️ لا توجد رسالة رقم ${id}.`, MESSAGES_MENU);
+      await clearPending(env);
+      return send(env,
+        `<b>👁 الرسالة #${id}</b> — إلى ${report.name}\n` +
+        `قرأها: ${report.readCount} · لم يقرأها: ${report.unreadCount}` +
+        (report.deleted ? ' · 🗑 محذوفة' : '') + `\n\n${report.lines.join('\n')}`,
+        MESSAGES_MENU);
     }
 
     if (pending.action === 'await_config') {

@@ -51,6 +51,11 @@ export function registerInventoryHandlers() {
     const db = getDb();
     const rid = optionalId(id, 'رقم المخزن');
     if (!rid.ok || rid.value === null) return { success: false, message: 'رقم المخزن غير صالح' };
+    // MEASURED in section 15: a ghost id updated no rows and still answered
+    // `{ success: true }` — the screen said the warehouse was closed while it
+    // was never touched. Same silent-success hole the delete handlers all had.
+    const exists = db.prepare('SELECT 1 AS ok FROM warehouses WHERE WarehouseID = ?').get(rid.value);
+    if (!exists) return { success: false, message: 'المخزن غير موجود' };
     db.prepare('UPDATE warehouses SET IsActive = 0 WHERE WarehouseID = ?').run(rid.value);
     return { success: true };
   });
@@ -510,6 +515,20 @@ export function registerInventoryHandlers() {
     if (data.FromWarehouseID === data.ToWarehouseID) {
       return { success: false, message: 'لا يمكن النقل إلى نفس المخزن' };
     }
+    // Both warehouses must EXIST and be ACTIVE.
+    //
+    // The source was protected by luck: the availability check below refused a
+    // ghost source because zero units are never enough. The destination had no
+    // such guard — MEASURED in section 15: a transfer INTO warehouse 99999
+    // threw the raw foreign-key error out of the handler instead of answering.
+    // A deactivated warehouse is the same problem in another hat: the goods
+    // would land on a shelf nobody can transfer out of again.
+    const fromWh = db.prepare('SELECT IsActive FROM warehouses WHERE WarehouseID = ?').get(data.FromWarehouseID) as any;
+    if (!fromWh) return { success: false, message: 'المخزن المصدر غير موجود' };
+    if (!fromWh.IsActive) return { success: false, message: 'لا يمكن النقل من مخزن معطل' };
+    const toWh = db.prepare('SELECT IsActive FROM warehouses WHERE WarehouseID = ?').get(data.ToWarehouseID) as any;
+    if (!toWh) return { success: false, message: 'المخزن الوجهة غير موجود' };
+    if (!toWh.IsActive) return { success: false, message: 'لا يمكن النقل إلى مخزن معطل' };
     for (const item of data.items) {
       const qty = typeof item.Quantity === 'number' ? item.Quantity : Number(item.Quantity);
       if (!Number.isFinite(qty) || qty <= 0) {

@@ -140,6 +140,17 @@ export function registerSettlementHandlers() {
         if (data.section === 'inventory') {
           diff = +(diff * adjustedUnitCost).toFixed(2);
         }
+        // A supplier balance is a LIABILITY: what the shop owes. Counting it
+        // LOWER than the books say means the shop owes less — a gain — while a
+        // customer balance is an ASSET, where a lower count is a loss. The
+        // voucher below recognises `diff` as income when positive and expense
+        // when negative, so the supplier section must be NEGATED to face the
+        // right way. MEASURED in section 12: a supplier count from 1,500 to
+        // -200 (we owe 1,700 less = we gained) was booked as a 1,700 EXPENSE,
+        // and the balance sheet disagreed by double the amount.
+        if (data.section === 'suppliers') {
+          diff = -diff;
+        }
         if (Math.abs(diff) >= 0.01) {
           const isShortage = diff < 0;
           const vType = isShortage ? 'payment' : 'receipt';

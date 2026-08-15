@@ -65,6 +65,10 @@ export function registerOpeningBalanceHandlers() {
     if (!res.ok) return { success: false, message: res.message };
     // Get the old balance to compute the difference for capital adjustment
     const old = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(id) as any;
+    // MEASURED in section 13: a ghost id updated NO rows and still answered
+    // `{ success: true }` — the screen said "تم الحفظ" for a drawer that was
+    // never touched, the same silent-success hole the delete handlers had.
+    if (!old) return { success: false, message: 'الخزينة غير موجودة' };
     const oldBalance = Number(old?.Balance) || 0;
     const diff = balance - oldBalance;
     db.prepare('UPDATE cash_accounts SET Balance = ? WHERE CashAccountID = ?').run(balance, id);
@@ -84,6 +88,8 @@ export function registerOpeningBalanceHandlers() {
     if (!res.ok) return { success: false, message: res.message };
     // Get the old balance to compute the difference for capital adjustment
     const old = db.prepare('SELECT Balance FROM payment_methods WHERE PaymentMethodID = ?').get(id) as any;
+    // Same ghost-id hole as the drawer: MEASURED succeeding silently.
+    if (!old) return { success: false, message: 'طريقة الدفع غير موجودة' };
     const oldBalance = Number(old?.Balance) || 0;
     const diff = balance - oldBalance;
     db.prepare('UPDATE payment_methods SET Balance = ? WHERE PaymentMethodID = ?').run(balance, id);
@@ -119,8 +125,21 @@ export function registerOpeningBalanceHandlers() {
       return { success: false, message: 'الرصيد الافتتاحي أكبر من الحد المسموح' };
     }
     const bal = { ok: true as const, value: balNum };
-    const info = db.prepare('UPDATE customers SET Balance = ? WHERE CustomerID = ?').run(bal.value, rid.value);
-    if (info.changes === 0) return { success: false, message: 'العميل غير موجود' };
+    const old = db.prepare('SELECT Balance FROM customers WHERE CustomerID = ?').get(rid.value) as any;
+    if (!old) return { success: false, message: 'العميل غير موجود' };
+    db.prepare('UPDATE customers SET Balance = ? WHERE CustomerID = ?').run(bal.value, rid.value);
+    // A customer balance is an ASSET (a receivable): raising it raises net
+    // worth, so owner capital must follow or the balance sheet breaks by the
+    // delta. MEASURED in section 13: opening a customer at 5,000 instead of
+    // 2,000 left the identity off by 3,000 while the drawer equivalent was
+    // balanced — the cash and wallet doors adjust capital, the party doors
+    // did not.
+    const diff = bal.value - (Number(old.Balance) || 0);
+    if (Math.abs(diff) > 0.001) {
+      const cap = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)")
+        .run(String((Number(cap?.Value) || 0) + diff));
+    }
     return { success: true };
   });
 
@@ -147,8 +166,19 @@ export function registerOpeningBalanceHandlers() {
       return { success: false, message: 'الرصيد الافتتاحي أكبر من الحد المسموح' };
     }
     const bal = { ok: true as const, value: balNum };
-    const info = db.prepare('UPDATE suppliers SET Balance = ? WHERE SupplierID = ?').run(bal.value, rid.value);
-    if (info.changes === 0) return { success: false, message: 'المورد غير موجود' };
+    const old = db.prepare('SELECT Balance FROM suppliers WHERE SupplierID = ?').get(rid.value) as any;
+    if (!old) return { success: false, message: 'المورد غير موجود' };
+    db.prepare('UPDATE suppliers SET Balance = ? WHERE SupplierID = ?').run(bal.value, rid.value);
+    // A supplier balance is a LIABILITY (what the shop owes): raising it
+    // LOWERS net worth, so capital moves by the NEGATED delta. MEASURED in
+    // section 13: opening a supplier at 2,500 instead of 1,500 left the
+    // identity off by +1,000 with no capital move.
+    const diff = bal.value - (Number(old.Balance) || 0);
+    if (Math.abs(diff) > 0.001) {
+      const cap = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)")
+        .run(String((Number(cap?.Value) || 0) - diff));
+    }
     return { success: true };
   });
 
@@ -175,8 +205,17 @@ export function registerOpeningBalanceHandlers() {
       return { success: false, message: 'الرصيد الافتتاحي أكبر من الحد المسموح' };
     }
     const bal = { ok: true as const, value: balNum };
-    const info = db.prepare('UPDATE employees SET Balance = ? WHERE EmployeeID = ?').run(bal.value, rid.value);
-    if (info.changes === 0) return { success: false, message: 'الموظف غير موجود' };
+    const old = db.prepare('SELECT Balance FROM employees WHERE EmployeeID = ?').get(rid.value) as any;
+    if (!old) return { success: false, message: 'الموظف غير موجود' };
+    db.prepare('UPDATE employees SET Balance = ? WHERE EmployeeID = ?').run(bal.value, rid.value);
+    // Same liability rule as the supplier: a wage balance the shop owes moves
+    // capital by the NEGATED delta.
+    const diff = bal.value - (Number(old.Balance) || 0);
+    if (Math.abs(diff) > 0.001) {
+      const cap = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)")
+        .run(String((Number(cap?.Value) || 0) - diff));
+    }
     return { success: true };
   });
 
@@ -193,11 +232,23 @@ export function registerOpeningBalanceHandlers() {
       const res = checkAmount(value, label);
       if (!res.ok) return { success: false, message: res.message };
     }
-    const existing = db.prepare('SELECT ID FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(itemId, warehouseId) as any;
+    const existing = db.prepare('SELECT ID, Quantity, CostPrice FROM stock_quantities WHERE ItemID = ? AND WarehouseID = ?').get(itemId, warehouseId) as any;
     if (existing) {
       db.prepare('UPDATE stock_quantities SET Quantity = ?, CostPrice = ? WHERE ID = ?').run(quantity, costPrice, existing.ID);
     } else {
       db.prepare('INSERT INTO stock_quantities (ItemID, WarehouseID, Quantity, CostPrice) VALUES (?, ?, ?, ?)').run(itemId, warehouseId, quantity, costPrice);
+    }
+    // Stock is carried at cost, so an opening-stock edit changes the inventory
+    // VALUE and therefore net worth — capital must follow or the balance sheet
+    // breaks by the value delta. MEASURED in section 13: resetting an item
+    // from 5 @ 60 to 10 @ 80 (value +500) left the identity off by 500.
+    const oldValue = existing ? (Number(existing.Quantity) || 0) * (Number(existing.CostPrice) || 0) : 0;
+    const newValue = (Number(quantity) || 0) * (Number(costPrice) || 0);
+    const diff = newValue - oldValue;
+    if (Math.abs(diff) > 0.001) {
+      const cap = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)")
+        .run(String((Number(cap?.Value) || 0) + diff));
     }
     return { success: true };
   });
@@ -261,21 +312,52 @@ export function registerOpeningBalanceHandlers() {
       return { success: false, message: problems.slice(0, 3).join(' • ') };
     }
 
+    // Every id must EXIST before anything is written. The single-record
+    // handlers refuse ghosts; the batch used to write what it was handed and
+    // report success — MEASURED in section 13: a batch naming customer 99999
+    // answered `{ success: true }` and the screen announced a saved state the
+    // books never received.
+    for (const [rows, label, table, col] of [
+      [data.cashAccounts, 'رصيد الخزينة', 'cash_accounts', 'CashAccountID'],
+      [data.paymentMethods, 'رصيد وسيلة الدفع', 'payment_methods', 'PaymentMethodID'],
+      [data.customers, 'رصيد العميل', 'customers', 'CustomerID'],
+      [data.suppliers, 'رصيد المورد', 'suppliers', 'SupplierID'],
+      [data.employees, 'رصيد الموظف', 'employees', 'EmployeeID'],
+    ] as const) {
+      for (const row of rows || []) {
+        const found = db.prepare(`SELECT 1 AS ok FROM ${table} WHERE ${col} = ?`).get(Number(row?.id)) as any;
+        if (!found) {
+          problems.push(`${label}: الحساب غير موجود`);
+        }
+      }
+    }
+    if (problems.length > 0) {
+      return { success: false, message: problems.slice(0, 3).join(' • ') };
+    }
+
     const tx = db.transaction(() => {
-      for (const c of data.cashAccounts) {
-        db.prepare('UPDATE cash_accounts SET Balance = ? WHERE CashAccountID = ?').run(c.balance, c.id);
-      }
-      for (const p of data.paymentMethods) {
-        db.prepare('UPDATE payment_methods SET Balance = ? WHERE PaymentMethodID = ?').run(p.balance, p.id);
-      }
-      for (const c of data.customers) {
-        db.prepare('UPDATE customers SET Balance = ? WHERE CustomerID = ?').run(c.balance, c.id);
-      }
-      for (const s of data.suppliers) {
-        db.prepare('UPDATE suppliers SET Balance = ? WHERE SupplierID = ?').run(s.balance, s.id);
-      }
-      for (const e of data.employees) {
-        db.prepare('UPDATE employees SET Balance = ? WHERE EmployeeID = ?').run(e.balance, e.id);
+      // Cash boxes and wallets are ASSETS (capital moves with the delta).
+      // Customers are assets too. Suppliers and employees are LIABILITIES
+      // (capital moves by the NEGATED delta). The old balances are read
+      // INSIDE the transaction so a rival edit cannot skew the adjustment.
+      for (const [rows, table, col, negate] of [
+        [data.cashAccounts, 'cash_accounts', 'CashAccountID', false],
+        [data.paymentMethods, 'payment_methods', 'PaymentMethodID', false],
+        [data.customers, 'customers', 'CustomerID', false],
+        [data.suppliers, 'suppliers', 'SupplierID', true],
+        [data.employees, 'employees', 'EmployeeID', true],
+      ] as const) {
+        for (const c of rows || []) {
+          const old = db.prepare(`SELECT Balance FROM ${table} WHERE ${col} = ?`).get(Number(c.id)) as any;
+          const oldBalance = Number(old?.Balance) || 0;
+          const diff = Number(c.balance) - oldBalance;
+          db.prepare(`UPDATE ${table} SET Balance = ? WHERE ${col} = ?`).run(Number(c.balance), Number(c.id));
+          if (Math.abs(diff) > 0.001) {
+            const cap = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+            db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('owner_capital', ?)")
+              .run(String((Number(cap?.Value) || 0) + (negate ? -diff : diff)));
+          }
+        }
       }
     });
     tx();

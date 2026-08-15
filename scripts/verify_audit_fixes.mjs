@@ -137,13 +137,14 @@ console.log('\n[3] Opening balances are validated before they are written');
 
   const live = new DatabaseSync(':memory:');
   live.exec(`
-    CREATE TABLE cash_accounts (CashAccountID INTEGER PRIMARY KEY, Balance REAL);
-    CREATE TABLE payment_methods (PaymentMethodID INTEGER PRIMARY KEY, Balance REAL);
+    CREATE TABLE cash_accounts (CashAccountID INTEGER PRIMARY KEY, Balance REAL, IsActive INTEGER DEFAULT 1);
+    CREATE TABLE payment_methods (PaymentMethodID INTEGER PRIMARY KEY, Balance REAL, IsActive INTEGER DEFAULT 1);
     CREATE TABLE customers (CustomerID INTEGER PRIMARY KEY, Balance REAL);
     CREATE TABLE suppliers (SupplierID INTEGER PRIMARY KEY, Balance REAL);
     CREATE TABLE employees (EmployeeID INTEGER PRIMARY KEY, Balance REAL);
     CREATE TABLE stock_quantities (ID INTEGER PRIMARY KEY, ItemID INTEGER, WarehouseID INTEGER, Quantity REAL, CostPrice REAL);
-    INSERT INTO cash_accounts VALUES (1, 5000);
+    CREATE TABLE settings (Key TEXT PRIMARY KEY, Value TEXT);
+    INSERT INTO cash_accounts VALUES (1, 5000, 1);
     INSERT INTO customers VALUES (1, 0);
   `);
   live.transaction = (fn) => (...a) => {

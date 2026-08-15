@@ -707,8 +707,12 @@ try {
     t('the party list agrees with the statement', near(list[0].TotalPaid, 6500) && near(list[0].Outstanding, 3500),
       JSON.stringify(list[0]));
     t('the party list counts the contract', list[0].ContractCount === 1);
-    t('and a party with no contracts shows outstanding zero',
-      list[0].RentPartyID !== landlord.id || true);
+    const idle = await call('rentParties:create', { PartyKind: 'landlord', Name: 'مالك بلا عقود' });
+    const idleList = await call('rentParties:list', 'landlord');
+    const idleRow = idleList.find(p => p.RentPartyID === idle.id);
+    t('a party with no contracts shows outstanding zero',
+      idleRow && near(idleRow.Outstanding, 0) && idleRow.ContractCount === 0,
+      JSON.stringify(idleRow));
 
     const ghosts = await call('rentParty:statement', 999);
     t('a statement for a missing party is refused', ghosts?.success === false, JSON.stringify(ghosts));

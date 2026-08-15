@@ -102,7 +102,7 @@ console.log('\n[2] The handler refuses both, and refuses neither');
       VoucherType TEXT, FiscalYearID INTEGER, Date TEXT, Amount REAL, PartyType TEXT,
       PartyID INTEGER, PartyName TEXT, Description TEXT, CashAccountID INTEGER,
       PaymentMethodID INTEGER, ReferenceType TEXT, ReferenceID INTEGER, UserID INTEGER);
-    CREATE TABLE cash_accounts (CashAccountID INTEGER PRIMARY KEY, AccountName TEXT, Balance REAL);
+    CREATE TABLE cash_accounts (CashAccountID INTEGER PRIMARY KEY, AccountName TEXT, Balance REAL, IsActive INTEGER DEFAULT 1);
     CREATE TABLE payment_methods (PaymentMethodID INTEGER PRIMARY KEY, MethodName TEXT, Balance REAL, IsActive INTEGER DEFAULT 1);
     CREATE TABLE settings (Key TEXT PRIMARY KEY, Value TEXT);
     CREATE TABLE customers (CustomerID INTEGER PRIMARY KEY, Balance REAL);
@@ -117,7 +117,7 @@ console.log('\n[2] The handler refuses both, and refuses neither');
       CashAccountID INTEGER, PaymentMethodID INTEGER, SourceType TEXT, SourceID INTEGER,
       Notes TEXT, ReversedAt TEXT, FiscalYearID INTEGER, UserID INTEGER);
   `);
-  db.exec(`INSERT INTO cash_accounts VALUES (1,'الخزنة',50000)`);
+  db.exec(`INSERT INTO cash_accounts (CashAccountID, AccountName, Balance, IsActive) VALUES (1,'الخزنة',50000,1)`);
   db.exec(`INSERT INTO payment_methods VALUES (1,'فودافون كاش',20000,1)`);
   db.transaction = (fn) => (...a) => {
     db.exec('BEGIN');

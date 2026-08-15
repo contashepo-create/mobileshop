@@ -281,7 +281,7 @@ try {
     t('deleting that sale restores the full count', del?.success === true && stock(4) === 50, JSON.stringify(del));
 
     const before = cash();
-    t('every refusal left the cash untouched', near(cash(), before) || true, '');
+    t('every refusal left the cash untouched', near(cash(), before), '');
   }
   // The walk-in cash sale (id 4) is deleted at [7] — tracked there.
 

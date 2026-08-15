@@ -137,12 +137,21 @@ export function registerStatementHandlers() {
     /**
      * Returns an `AND ...` predicate for `field` plus the values to bind.
      * The caller composes the final argument list so ordering stays correct.
+     *
+     * `mode: 'before'` produces `field < from` instead of the range bounds.
+     * Every movement query is run in that mode once, to compute the balance
+     * the account OPENED the period with — the carried-over figure that makes
+     * the statement reconcile: opening + movements = the stored balance.
      */
-    const df = (field: string) => {
+    const df = (field: string, mode: 'range' | 'before' = 'range') => {
       const parts: string[] = [];
       const vals: string[] = [];
-      if (from) { parts.push(`${field} >= ?`); vals.push(from); }
-      if (to) { parts.push(`${field} <= ?`); vals.push(to); }
+      if (mode === 'before') {
+        if (from) { parts.push(`${field} < ?`); vals.push(from); }
+      } else {
+        if (from) { parts.push(`${field} >= ?`); vals.push(from); }
+        if (to) { parts.push(`${field} <= ?`); vals.push(to); }
+      }
       return { sql: parts.length ? `AND ${parts.join(' AND ')}` : '', vals };
     };
 
@@ -151,39 +160,45 @@ export function registerStatementHandlers() {
     const q = (sql: string, f: { sql: string; vals: string[] }) =>
       db.prepare(sql).all(accountId, ...f.vals) as any[];
 
+    /**
+     * Builds one movement query and runs it twice: for the statement range
+     * and for the opening balance (every movement before the range starts).
+     */
+    const qq = (sql: (f: { sql: string; vals: string[] }) => string, field: string) => ({
+      range: q(sql(df(field)), df(field)),
+      before: q(sql(df(field, 'before')), df(field, 'before')),
+    });
+
     // Sales (money coming IN) — exclude maintenance invoices; the delivery row
     // below already carries the cash movement for those.
     // The InAmount is PAID MINUS the card/wallet commission. Whatever the
     // invoice says, the account was credited net of the fee in both bearer
     // cases, so a statement showing the gross would not reconcile with the
     // balance it describes.
-    const fSales = df('Date');
-    const sales = q(`
+    const sales = qq((f) => `
       SELECT Date, SaleNumber as RefNumber, CustomerName as Party,
         (PaidAmount - COALESCE(TransferCost,0)) as InAmount,
         0 as OutAmount, 'sale' as OpType, 'فاتورة بيع' as OpLabel, SaleID as RefID
       FROM sales
       WHERE CashAccountID = ? AND PaidAmount > 0 AND IsVoided = 0
-        AND COALESCE(Source,'direct') <> 'maintenance' ${fSales.sql}
-    `, fSales);
+        AND COALESCE(Source,'direct') <> 'maintenance' ${f.sql}
+    `, 'Date');
 
     // Sale returns (money going OUT)
-    const fRets = df('r.Date');
-    const rets = q(`
+    const rets = qq((f) => `
       SELECT r.Date, r.ReturnNumber as RefNumber, c.Name as Party, 0 as InAmount,
         r.TotalAmount as OutAmount, 'return' as OpType, 'مرتجع مبيعات' as OpLabel, r.ReturnID as RefID
       FROM sale_returns r JOIN sales s ON r.SaleID = s.SaleID
       LEFT JOIN customers c ON s.CustomerID = c.CustomerID
-      WHERE r.CashAccountID = ? AND r.TotalAmount > 0 ${fRets.sql}
-    `, fRets);
+      WHERE r.CashAccountID = ? AND r.TotalAmount > 0 ${f.sql}
+    `, 'r.Date');
 
     // Voucher receipts (money IN)
-    const fVR = df('Date');
-    const vReceipts = q(`
+    const vReceipts = qq((f) => `
       SELECT Date, VoucherNumber as RefNumber, PartyName as Party, Amount as InAmount,
         0 as OutAmount, 'voucher_receipt' as OpType, 'سند قبض' as OpLabel, VoucherID as RefID
-      FROM vouchers WHERE CashAccountID = ? AND VoucherType = 'receipt' AND Amount > 0 ${fVR.sql}
-    `, fVR);
+      FROM vouchers WHERE CashAccountID = ? AND VoucherType = 'receipt' AND Amount > 0 ${f.sql}
+    `, 'Date');
 
     // Voucher payments (money OUT)
     //
@@ -191,70 +206,63 @@ export function registerStatementHandlers() {
     // appears as its OWN 'rent' row below, so keeping the voucher too showed
     // the same money leaving TWICE. MEASURED: a 1,500 rent voucher made the
     // drawer statement foot at -2,400 against a drawer that moved -900.
-    const fVP = df('Date');
-    const vPayments = q(`
+    const vPayments = qq((f) => `
       SELECT Date, VoucherNumber as RefNumber, PartyName as Party, 0 as InAmount,
         Amount as OutAmount, 'voucher_payment' as OpType, 'سند صرف' as OpLabel, VoucherID as RefID
       FROM vouchers WHERE CashAccountID = ? AND VoucherType = 'payment' AND Amount > 0
-        AND (ReferenceType IS NULL OR ReferenceType <> 'rent') ${fVP.sql}
-    `, fVP);
+        AND (ReferenceType IS NULL OR ReferenceType <> 'rent') ${f.sql}
+    `, 'Date');
 
     // Purchases (money OUT)
     // FIX: the column is `PaymentSource`, not `PaymentSourceType`. The old query
     // threw "no such column" on every call, so this whole statement was broken.
-    const fPur = df('p.Date');
-    const purchases = q(`
+    const purchases = qq((f) => `
       SELECT p.Date, p.PurchaseNumber as RefNumber, s.Name as Party, 0 as InAmount,
         p.PaidAmount as OutAmount, 'purchase' as OpType, 'فاتورة شراء' as OpLabel, p.PurchaseID as RefID
       FROM purchases p JOIN suppliers s ON p.SupplierID = s.SupplierID
-      WHERE p.PaymentSource = 'cash_account' AND p.PaymentSourceID = ? AND p.PaidAmount > 0 ${fPur.sql}
-    `, fPur);
+      WHERE p.PaymentSource = 'cash_account' AND p.PaymentSourceID = ? AND p.PaidAmount > 0 ${f.sql}
+    `, 'p.Date');
 
     // Purchase returns (money IN)
-    const fPR = df('r.Date');
-    const purRets = q(`
+    const purRets = qq((f) => `
       SELECT r.Date, r.ReturnNumber as RefNumber, s.Name as Party, r.TotalAmount as InAmount,
         0 as OutAmount, 'purchase_return' as OpType, 'مرتجع مشتريات' as OpLabel, r.ReturnID as RefID
       FROM purchase_returns r JOIN purchases p ON r.PurchaseID = p.PurchaseID
       JOIN suppliers s ON p.SupplierID = s.SupplierID
-      WHERE r.CashAccountID = ? AND r.TotalAmount > 0 ${fPR.sql}
-    `, fPR);
+      WHERE r.CashAccountID = ? AND r.TotalAmount > 0 ${f.sql}
+    `, 'r.Date');
 
     // Salaries (money OUT)
-    const fSal = df('s.PaymentDate');
-    const salaries = q(`
+    const salaries = qq((f) => `
       SELECT s.PaymentDate as Date, 'SAL-' || s.SalaryID as RefNumber, e.Name as Party, 0 as InAmount,
         s.PaidAmount as OutAmount, 'salary' as OpType, 'راتب' as OpLabel, s.SalaryID as RefID
       FROM salaries s JOIN employees e ON s.EmployeeID = e.EmployeeID
-      WHERE s.CashAccountID = ? AND s.PaidAmount > 0 ${fSal.sql}
-    `, fSal);
+      WHERE s.CashAccountID = ? AND s.PaidAmount > 0 ${f.sql}
+    `, 's.PaymentDate');
 
     // Advances (money OUT)
-    const fAdv = df('a.Date');
-    const advances = q(`
+    const advances = qq((f) => `
       SELECT a.Date, 'ADV-' || a.AdvanceID as RefNumber, e.Name as Party, 0 as InAmount,
         a.Amount as OutAmount, 'advance' as OpType, 'سلفة' as OpLabel, a.AdvanceID as RefID
       FROM employee_advances a JOIN employees e ON a.EmployeeID = e.EmployeeID
-      WHERE a.CashAccountID = ? AND a.Amount > 0 ${fAdv.sql}
-    `, fAdv);
+      WHERE a.CashAccountID = ? AND a.Amount > 0 ${f.sql}
+    `, 'a.Date');
 
     // Maintenance deliveries (money IN)
-    const fMD = df('Date');
-    const maintDel = q(`
+    const maintDel = qq((f) => `
       SELECT Date, DeliveryNumber as RefNumber, CustomerName as Party, PaidAmount as InAmount,
         0 as OutAmount, 'maintenance_delivery' as OpType, 'تسليم صيانة' as OpLabel, DeliveryID as RefID
-      FROM maintenance_deliveries WHERE CashAccountID = ? AND PaidAmount > 0 ${fMD.sql}
-    `, fMD);
+      FROM maintenance_deliveries WHERE CashAccountID = ? AND PaidAmount > 0 ${f.sql}
+    `, 'Date');
 
     // Maintenance returns (money OUT)
-    const fMR = df('r.Date');
-    const maintRets = q(`
+    const maintRets = qq((f) => `
       SELECT r.Date, r.ReturnNumber as RefNumber, d.CustomerName as Party, 0 as InAmount,
         r.TotalRefund as OutAmount, 'maintenance_return' as OpType, 'مرتجع صيانة' as OpLabel, r.ReturnID as RefID
       FROM maintenance_returns r
       JOIN maintenance_deliveries d ON r.DeliveryID = d.DeliveryID
-      WHERE r.CashAccountID = ? AND r.TotalRefund > 0 ${fMR.sql}
-    `, fMR);
+      WHERE r.CashAccountID = ? AND r.TotalRefund > 0 ${f.sql}
+    `, 'r.Date');
 
     // Rent payments (income = IN, expense = OUT)
     //
@@ -265,8 +273,7 @@ export function registerStatementHandlers() {
     // 50 paid against 600 appeared as 600. The statement must show what
     // actually moved: PaidAmount, whenever it is non-zero, dated by the
     // payment date when one was set.
-    const fRent = df('COALESCE(rp.PaidDate, rp.DueDate)');
-    const rents = q(`
+    const rents = qq((f) => `
       SELECT COALESCE(rp.PaidDate, rp.DueDate) as Date,
         'RNT-' || rp.RentPaymentID as RefNumber, r.RentName as Party,
         CASE WHEN r.RentType = 'income' THEN rp.PaidAmount ELSE 0 END as InAmount,
@@ -274,8 +281,8 @@ export function registerStatementHandlers() {
         'rent' as OpType, CASE WHEN r.RentType = 'income' THEN 'إيجار وارد' ELSE 'إيجار منصرف' END as OpLabel,
         rp.RentPaymentID as RefID
       FROM rent_payments rp JOIN rents r ON rp.RentID = r.RentID
-      WHERE rp.CashAccountID = ? AND COALESCE(rp.PaidAmount, 0) > 0 ${fRent.sql}
-    `, fRent);
+      WHERE rp.CashAccountID = ? AND COALESCE(rp.PaidAmount, 0) > 0 ${f.sql}
+    `, 'COALESCE(rp.PaidDate, rp.DueDate)');
 
     // Service sales — the full truth about both legs.
     //
@@ -290,8 +297,7 @@ export function registerStatementHandlers() {
     // The drawdown is Amount + ServiceCost + TransferCost — but only when the
     // drawer funded it (no machine). When a machine funded the operation the
     // drawer only received, so its statement must show the receipt alone.
-    const fSrv = df('Date');
-    const services = q(`
+    const services = qq((f) => `
       SELECT Date, ServiceNumber as RefNumber, COALESCE(CustomerName,'') as Party, PaidAmount as InAmount,
         CASE WHEN PaymentMethodID IS NULL
              THEN COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)
@@ -302,8 +308,8 @@ export function registerStatementHandlers() {
         AND (PaidAmount > 0
              OR (PaymentMethodID IS NULL
                  AND (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) > 0))
-        ${fSrv.sql}
-    `, fSrv);
+        ${f.sql}
+    `, 'Date');
 
     // Asset transfers (IN or OUT depending on direction)
     //
@@ -314,33 +320,44 @@ export function registerStatementHandlers() {
     // a 2 separate fee footed the statement at 104 against a ledger movement
     // of 102. (When the fee is taken from the amount it is already inside
     // `Amount`.)
-    const fTIn = df('Date');
-    const transfersIn = q(`
+    const transfersIn = qq((f) => `
       SELECT Date, TransferNumber as RefNumber, '' as Party,
         ReceivedAmount as InAmount, 0 as OutAmount,
         'transfer_in' as OpType, 'تحويل وارد' as OpLabel, TransferID as RefID
-      FROM asset_transfers WHERE ToType = 'cash_account' AND ToID = ? ${fTIn.sql}
-    `, fTIn);
+      FROM asset_transfers WHERE ToType = 'cash_account' AND ToID = ? ${f.sql}
+    `, 'Date');
 
-    const fTOut = df('Date');
-    const transfersOut = q(`
+    const transfersOut = qq((f) => `
       SELECT Date, TransferNumber as RefNumber, '' as Party, 0 as InAmount,
         Amount as OutAmount,
         'transfer_out' as OpType, 'تحويل صادر' as OpLabel, TransferID as RefID
-      FROM asset_transfers WHERE FromType = 'cash_account' AND FromID = ? ${fTOut.sql}
-    `, fTOut);
+      FROM asset_transfers WHERE FromType = 'cash_account' AND FromID = ? ${f.sql}
+    `, 'Date');
 
     operations.push(
-      ...sales, ...rets, ...vReceipts, ...vPayments, ...purchases, ...purRets,
-      ...salaries, ...advances, ...maintDel, ...maintRets, ...rents, ...services,
-      ...transfersIn, ...transfersOut
+      ...sales.range, ...rets.range, ...vReceipts.range, ...vPayments.range, ...purchases.range,
+      ...purRets.range, ...salaries.range, ...advances.range, ...maintDel.range, ...maintRets.range,
+      ...rents.range, ...services.range, ...transfersIn.range, ...transfersOut.range
     );
 
     // Sort by date (NULL-safe)
     operations.sort((a, b) => String(a.Date ?? '').localeCompare(String(b.Date ?? '')));
 
-    // Calculate running balance
-    let runningBalance = 0;
+    // The OPENING balance: everything that moved BEFORE the range started.
+    //
+    // This is the carried-over figure that makes the statement reconcile:
+    // opening + net movement inside the range = the account's stored balance.
+    // With no from date the statement covers the whole history and opens at 0.
+    const openingBalance = from ? [
+      ...sales.before, ...rets.before, ...vReceipts.before, ...vPayments.before,
+      ...purchases.before, ...purRets.before, ...salaries.before, ...advances.before,
+      ...maintDel.before, ...maintRets.before, ...rents.before, ...services.before,
+      ...transfersIn.before, ...transfersOut.before,
+    ].reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0) : 0;
+
+    // Calculate running balance — starting at the opening balance, so the
+    // first row carries what the account entered the period with.
+    let runningBalance = openingBalance;
     for (const op of operations) {
       runningBalance += (op.InAmount || 0) - (op.OutAmount || 0);
       op.Balance = runningBalance;
@@ -348,11 +365,12 @@ export function registerStatementHandlers() {
 
     return {
       success: true,
-      account: { ...account, OpeningBalance: 0 },
+      account: { ...account, OpeningBalance: openingBalance },
       operations,
       totalIn: operations.reduce((s, o) => s + (o.InAmount || 0), 0),
       totalOut: operations.reduce((s, o) => s + (o.OutAmount || 0), 0),
-      netChange: operations.reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0)
+      netChange: operations.reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0),
+      openingBalance,
     };
   });
 
@@ -371,11 +389,15 @@ export function registerStatementHandlers() {
 
     const from = typeof filters?.fromDate === 'string' && filters.fromDate ? filters.fromDate : null;
     const to = typeof filters?.toDate === 'string' && filters.toDate ? filters.toDate : null;
-    const df = (field: string) => {
+    const df = (field: string, mode: 'range' | 'before' = 'range') => {
       const parts: string[] = [];
       const vals: string[] = [];
-      if (from) { parts.push(`${field} >= ?`); vals.push(from); }
-      if (to) { parts.push(`${field} <= ?`); vals.push(to); }
+      if (mode === 'before') {
+        if (from) { parts.push(`${field} < ?`); vals.push(from); }
+      } else {
+        if (from) { parts.push(`${field} >= ?`); vals.push(from); }
+        if (to) { parts.push(`${field} <= ?`); vals.push(to); }
+      }
       return { sql: parts.length ? `AND ${parts.join(' AND ')}` : '', vals };
     };
 
@@ -383,25 +405,32 @@ export function registerStatementHandlers() {
     const q = (sql: string, f: { sql: string; vals: string[] }) =>
       db.prepare(sql).all(methodId, ...f.vals) as any[];
 
+    /**
+     * Builds one movement query and runs it twice: for the statement range
+     * and for the opening balance (every movement before the range starts).
+     */
+    const qq = (sql: (f: { sql: string; vals: string[] }) => string, field: string) => ({
+      range: q(sql(df(field)), df(field)),
+      before: q(sql(df(field, 'before')), df(field, 'before')),
+    });
+
     // Sales (money IN). Credited net of the fee in BOTH bearer cases — when the
     // shop pays the fee it is a cost, when the customer pays it the fee arrived
     // inside the payment and then left again to the provider. Either way the
     // wallet balance only ACTUALLY rose by paid minus fee.
-    const fSales = df('Date');
-    const sales = q(`
+    const sales = qq((f) => `
       SELECT Date, SaleNumber as RefNumber, COALESCE(CustomerName, c.Name, 'عميل نقدي') as Party,
         (PaidAmount - COALESCE(TransferCost,0)) as InAmount,
         0 as OutAmount, 'sale' as OpType, 'فاتورة بيع' as OpLabel, SaleID as RefID
       FROM sales
       LEFT JOIN customers c ON sales.CustomerID = c.CustomerID
       WHERE PaymentMethodID = ? AND PaidAmount > 0 AND IsVoided = 0
-        AND COALESCE(Source,'direct') <> 'maintenance' ${fSales.sql}
-    `, fSales);
+        AND COALESCE(Source,'direct') <> 'maintenance' ${f.sql}
+    `, 'Date');
 
     // Sale returns refunded through this machine (money OUT). MORE leaves than
     // the customer receives when the shop absorbs the provider fee.
-    const fRets = df('r.Date');
-    const rets = q(`
+    const rets = qq((f) => `
       SELECT r.Date, r.ReturnNumber as RefNumber, COALESCE(c.Name,'') as Party, 0 as InAmount,
         (COALESCE(r.TransferRefund,0) + CASE WHEN COALESCE(r.TransferCostBearer,'shop') = 'shop'
            THEN COALESCE(r.TransferCost,0) ELSE 0 END) as OutAmount,
@@ -409,22 +438,20 @@ export function registerStatementHandlers() {
       FROM sale_returns r
       JOIN sales s ON r.SaleID = s.SaleID
       LEFT JOIN customers c ON s.CustomerID = c.CustomerID
-      WHERE r.PaymentMethodID = ? AND COALESCE(r.TransferRefund,0) > 0 ${fRets.sql}
-    `, fRets);
+      WHERE r.PaymentMethodID = ? AND COALESCE(r.TransferRefund,0) > 0 ${f.sql}
+    `, 'r.Date');
 
     // Purchases paid from this machine (money OUT).
-    const fPur = df('p.Date');
-    const purchases = q(`
+    const purchases = qq((f) => `
       SELECT p.Date, p.PurchaseNumber as RefNumber, su.Name as Party, 0 as InAmount,
         p.PaidAmount as OutAmount, 'purchase' as OpType, 'فاتورة شراء' as OpLabel, p.PurchaseID as RefID
       FROM purchases p JOIN suppliers su ON p.SupplierID = su.SupplierID
-      WHERE p.PaymentSource = 'payment_method' AND p.PaymentSourceID = ? AND p.PaidAmount > 0 ${fPur.sql}
-    `, fPur);
+      WHERE p.PaymentSource = 'payment_method' AND p.PaymentSourceID = ? AND p.PaidAmount > 0 ${f.sql}
+    `, 'p.Date');
 
     // Purchase returns refunded to this machine (money IN) — the supplier hands
     // money back into the wallet, net of a fee the SHOP absorbs.
-    const fPR = df('r.Date');
-    const purRets = q(`
+    const purRets = qq((f) => `
       SELECT r.Date, r.ReturnNumber as RefNumber, su.Name as Party,
         (COALESCE(r.TransferRefund,0) - CASE WHEN COALESCE(r.TransferCostBearer,'shop') = 'shop'
            THEN COALESCE(r.TransferCost,0) ELSE 0 END) as InAmount,
@@ -432,62 +459,56 @@ export function registerStatementHandlers() {
       FROM purchase_returns r
       JOIN purchases p ON r.PurchaseID = p.PurchaseID
       JOIN suppliers su ON p.SupplierID = su.SupplierID
-      WHERE r.PaymentMethodID = ? AND COALESCE(r.TransferRefund,0) > 0 ${fPR.sql}
-    `, fPR);
+      WHERE r.PaymentMethodID = ? AND COALESCE(r.TransferRefund,0) > 0 ${f.sql}
+    `, 'r.Date');
 
     // Service sales funded from this machine (money OUT): the principal pushed
     // out to the target line plus the service and network costs.
-    const fSrv = df('Date');
-    const services = q(`
+    const services = qq((f) => `
       SELECT Date, ServiceNumber as RefNumber, COALESCE(CustomerName,'') as Party, 0 as InAmount,
         (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) as OutAmount,
         'service_sale' as OpType, COALESCE(ServiceType,'خدمة') as OpLabel, ServiceSaleID as RefID
       FROM service_sales
-      WHERE PaymentMethodID = ? AND COALESCE(Amount,0) > 0 ${fSrv.sql}
-    `, fSrv);
+      WHERE PaymentMethodID = ? AND COALESCE(Amount,0) > 0 ${f.sql}
+    `, 'Date');
 
     // Vouchers (receipt = IN, payment = OUT)
     //
     // Rent-linked payments are excluded, exactly as in the cash statement: the
     // instalment they settled already appears as its own 'rent' row below, and
     // showing the voucher too would foot the statement at twice the movement.
-    const fVR = df('Date');
-    const vReceipts = q(`
+    const vReceipts = qq((f) => `
       SELECT Date, VoucherNumber as RefNumber, PartyName as Party, Amount as InAmount,
         0 as OutAmount, 'voucher_receipt' as OpType, 'سند قبض' as OpLabel, VoucherID as RefID
-      FROM vouchers WHERE PaymentMethodID = ? AND VoucherType = 'receipt' AND Amount > 0 ${fVR.sql}
-    `, fVR);
-    const fVP = df('Date');
-    const vPayments = q(`
+      FROM vouchers WHERE PaymentMethodID = ? AND VoucherType = 'receipt' AND Amount > 0 ${f.sql}
+    `, 'Date');
+    const vPayments = qq((f) => `
       SELECT Date, VoucherNumber as RefNumber, PartyName as Party, 0 as InAmount,
         Amount as OutAmount, 'voucher_payment' as OpType, 'سند صرف' as OpLabel, VoucherID as RefID
       FROM vouchers WHERE PaymentMethodID = ? AND VoucherType = 'payment' AND Amount > 0
-        AND (ReferenceType IS NULL OR ReferenceType <> 'rent') ${fVP.sql}
-    `, fVP);
+        AND (ReferenceType IS NULL OR ReferenceType <> 'rent') ${f.sql}
+    `, 'Date');
 
     // Maintenance deliveries paid through this machine (money IN)
-    const fMD = df('Date');
-    const maintDel = q(`
+    const maintDel = qq((f) => `
       SELECT Date, DeliveryNumber as RefNumber, COALESCE(CustomerName,'') as Party, PaidAmount as InAmount,
         0 as OutAmount, 'maintenance_delivery' as OpType, 'تسليم صيانة' as OpLabel, DeliveryID as RefID
-      FROM maintenance_deliveries WHERE PaymentMethodID = ? AND PaidAmount > 0 ${fMD.sql}
-    `, fMD);
+      FROM maintenance_deliveries WHERE PaymentMethodID = ? AND PaidAmount > 0 ${f.sql}
+    `, 'Date');
 
     // Maintenance returns refunded through the SAME machine the delivery was
     // paid through (money OUT) — the refund follows the delivery's source.
-    const fMR = df('r.Date');
-    const maintRets = q(`
+    const maintRets = qq((f) => `
       SELECT r.Date, r.ReturnNumber as RefNumber, COALESCE(d.CustomerName,'') as Party, 0 as InAmount,
         r.TotalRefund as OutAmount, 'maintenance_return' as OpType, 'مرتجع صيانة' as OpLabel, r.ReturnID as RefID
       FROM maintenance_returns r
       JOIN maintenance_deliveries d ON r.DeliveryID = d.DeliveryID
-      WHERE d.PaymentMethodID = ? AND r.TotalRefund > 0 ${fMR.sql}
-    `, fMR);
+      WHERE d.PaymentMethodID = ? AND r.TotalRefund > 0 ${f.sql}
+    `, 'r.Date');
 
     // Rent payments (income = IN, expense = OUT) — partial instalments too,
     // showing the amount that actually moved (same fix as the cash statement).
-    const fRent = df('COALESCE(rp.PaidDate, rp.DueDate)');
-    const rents = q(`
+    const rents = qq((f) => `
       SELECT COALESCE(rp.PaidDate, rp.DueDate) as Date,
         'RNT-' || rp.RentPaymentID as RefNumber, r.RentName as Party,
         CASE WHEN r.RentType = 'income' THEN rp.PaidAmount ELSE 0 END as InAmount,
@@ -495,37 +516,44 @@ export function registerStatementHandlers() {
         'rent' as OpType, CASE WHEN r.RentType = 'income' THEN 'إيجار وارد' ELSE 'إيجار منصرف' END as OpLabel,
         rp.RentPaymentID as RefID
       FROM rent_payments rp JOIN rents r ON rp.RentID = r.RentID
-      WHERE rp.PaymentMethodID = ? AND COALESCE(rp.PaidAmount, 0) > 0 ${fRent.sql}
-    `, fRent);
+      WHERE rp.PaymentMethodID = ? AND COALESCE(rp.PaidAmount, 0) > 0 ${f.sql}
+    `, 'COALESCE(rp.PaidDate, rp.DueDate)');
 
     // Asset transfers (IN = received, OUT = sent plus any separately-funded fee)
-    const fTIn = df('Date');
-    const transfersIn = q(`
+    const transfersIn = qq((f) => `
       SELECT Date, TransferNumber as RefNumber, '' as Party,
         ReceivedAmount as InAmount, 0 as OutAmount,
         'transfer_in' as OpType, 'تحويل وارد' as OpLabel, TransferID as RefID
-      FROM asset_transfers WHERE ToType = 'payment_method' AND ToID = ? ${fTIn.sql}
-    `, fTIn);
-    const fTOut = df('Date');
-    const transfersOut = q(`
+      FROM asset_transfers WHERE ToType = 'payment_method' AND ToID = ? ${f.sql}
+    `, 'Date');
+    const transfersOut = qq((f) => `
       SELECT Date, TransferNumber as RefNumber, '' as Party, 0 as InAmount,
         (Amount + CASE WHEN TransferCostSource = 'separate' THEN TransferCost ELSE 0 END) as OutAmount,
         'transfer' as OpType, 'تحويل صادر' as OpLabel, TransferID as RefID
-      FROM asset_transfers WHERE FromType = 'payment_method' AND FromID = ? ${fTOut.sql}
-    `, fTOut);
+      FROM asset_transfers WHERE FromType = 'payment_method' AND FromID = ? ${f.sql}
+    `, 'Date');
 
     operations.push(
-      ...sales, ...rets, ...purchases, ...purRets, ...services,
-      ...vReceipts, ...vPayments, ...maintDel, ...maintRets, ...rents,
-      ...transfersIn, ...transfersOut
+      ...sales.range, ...rets.range, ...purchases.range, ...purRets.range, ...services.range,
+      ...vReceipts.range, ...vPayments.range, ...maintDel.range, ...maintRets.range, ...rents.range,
+      ...transfersIn.range, ...transfersOut.range
     );
 
     // Sort by date (NULL-safe)
     operations.sort((a, b) => String(a.Date ?? '').localeCompare(String(b.Date ?? '')));
 
-    // Running balance — the wallet started where it did; every movement after
-    // that is visible here, so the closing figure reconciles with the balance.
-    let runningBalance = 0;
+    // The OPENING balance: everything that moved BEFORE the range started —
+    // the carried-over figure that makes the statement reconcile with the
+    // wallet's stored balance. With no from date it opens at 0.
+    const openingBalance = from ? [
+      ...sales.before, ...rets.before, ...purchases.before, ...purRets.before, ...services.before,
+      ...vReceipts.before, ...vPayments.before, ...maintDel.before, ...maintRets.before, ...rents.before,
+      ...transfersIn.before, ...transfersOut.before,
+    ].reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0) : 0;
+
+    // Running balance — starting at the opening balance, so the first row
+    // carries what the wallet entered the period with.
+    let runningBalance = openingBalance;
     for (const op of operations) {
       runningBalance += (op.InAmount || 0) - (op.OutAmount || 0);
       op.Balance = runningBalance;
@@ -533,11 +561,12 @@ export function registerStatementHandlers() {
 
     return {
       success: true,
-      method: { ...method, OpeningBalance: 0 },
+      method: { ...method, OpeningBalance: openingBalance },
       operations,
       totalIn: operations.reduce((s, o) => s + (o.InAmount || 0), 0),
       totalOut: operations.reduce((s, o) => s + (o.OutAmount || 0), 0),
-      netChange: operations.reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0)
+      netChange: operations.reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0),
+      openingBalance,
     };
   });
 }
@@ -558,26 +587,28 @@ export function registerCustomerStatementHandlers() {
     // JOIN queries failed with "ambiguous column name".
     const from = typeof filters?.fromDate === 'string' && filters.fromDate ? filters.fromDate : null;
     const to = typeof filters?.toDate === 'string' && filters.toDate ? filters.toDate : null;
-    const df = (col: string) => {
+    const df = (col: string, mode: 'range' | 'before' = 'range') => {
       let sql = '';
       const vals: string[] = [];
-      if (from) { sql += ` AND ${col} >= ?`; vals.push(from); }
-      if (to) { sql += ` AND ${col} <= ?`; vals.push(to); }
+      if (mode === 'before') {
+        if (from) { sql += ` AND ${col} < ?`; vals.push(from); }
+      } else {
+        if (from) { sql += ` AND ${col} >= ?`; vals.push(from); }
+        if (to) { sql += ` AND ${col} <= ?`; vals.push(to); }
+      }
       return { sql, vals };
     };
 
-    const fSales = df('Date');
-    const fRet = df('r.Date');
-    const fDel = df('d.Date');
-    const fVR = df('v.Date');
-    const fVP = df('v.Date');
-    const fSrv = df('ss.Date');
+    const qq = (sql: (f: { sql: string; vals: string[] }) => string, col: string) => ({
+      range: db.prepare(sql(df(col))).all(customerId, ...df(col).vals) as any[],
+      before: db.prepare(sql(df(col, 'before'))).all(customerId, ...df(col, 'before').vals) as any[],
+    });
 
     // Sales (debit = full invoice amount, credit = amount paid at time of sale)
     // Maintenance deliveries write a mirror invoice into `sales` for printing;
     // that same charge is listed below from `maintenance_deliveries`, so it must
     // be excluded here or the customer is billed twice on their own statement.
-    const sales = db.prepare(`
+    const sales = qq((f) => `
       SELECT SaleID as RefID, SaleNumber as RefNumber, Date,
              TotalAmount as Debit,
              PaidAmount as Credit,
@@ -586,9 +617,9 @@ export function registerCustomerStatementHandlers() {
              PaymentMethod, PaidAmount, RemainingAmount, Status
       FROM sales
       WHERE CustomerID = ? AND IsVoided = 0
-        AND COALESCE(Source,'direct') <> 'maintenance' ${fSales.sql}
-    `).all(customerId, ...fSales.vals);
-    operations.push(...sales);
+        AND COALESCE(Source,'direct') <> 'maintenance' ${f.sql}
+    `, 'Date');
+    operations.push(...sales.range);
 
     // Sale returns — only the portion that CANCELLED DEBT belongs on the
     // customer account. The cash-refunded portion left the till instead and
@@ -596,7 +627,7 @@ export function registerCustomerStatementHandlers() {
     // statement disagree with customers.Balance by exactly the refunded amount.
     // Legacy rows (before DebtRelief existed) fall back to the old behaviour
     // only when the invoice actually had an unpaid portion.
-    const returns = db.prepare(`
+    const returns = qq((f) => `
       SELECT r.ReturnID as RefID, r.ReturnNumber as RefNumber, r.Date, 0 as Debit,
              COALESCE(r.DebtRelief,
                CASE WHEN COALESCE(s.PaidAmount,0) >= COALESCE(s.TotalAmount,0) THEN 0 ELSE r.TotalAmount END
@@ -607,27 +638,27 @@ export function registerCustomerStatementHandlers() {
              NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, NULL as Status
       FROM sale_returns r
       JOIN sales s ON r.SaleID = s.SaleID
-      WHERE s.CustomerID = ? ${fRet.sql}
-    `).all(customerId, ...fRet.vals);
-    operations.push(...returns);
+      WHERE s.CustomerID = ? ${f.sql}
+    `, 'r.Date');
+    operations.push(...returns.range);
 
     // Maintenance deliveries (debit = total cost, credit = amount paid at delivery)
-    const deliveries = db.prepare(`
+    const deliveries = qq((f) => `
       SELECT d.DeliveryID as RefID, d.DeliveryNumber as RefNumber, d.Date,
              d.TotalCost as Debit,
              d.PaidAmount as Credit,
              'maintenance_delivery' as OpType, 'تسليم صيانة' as Description,
              d.PaymentMethod, d.PaidAmount, d.RemainingAmount, NULL as Status
       FROM maintenance_deliveries d
-      WHERE d.CustomerID = ? AND d.VoidedSaleID IS NULL ${fDel.sql}
-    `).all(customerId, ...fDel.vals);
-    operations.push(...deliveries);
+      WHERE d.CustomerID = ? AND d.VoidedSaleID IS NULL ${f.sql}
+    `, 'd.Date');
+    operations.push(...deliveries.range);
 
     // Service sales (balance transfers, bill payments, top-ups).
     // These charge the customer and can be left partly unpaid, so they move
     // customers.Balance — yet they were missing from the statement entirely,
     // making it disagree with the actual account balance.
-    const services = db.prepare(`
+    const services = qq((f) => `
       SELECT ss.ServiceSaleID as RefID, ss.ServiceNumber as RefNumber, ss.Date,
              ss.ChargeAmount as Debit,
              ss.PaidAmount as Credit,
@@ -635,31 +666,31 @@ export function registerCustomerStatementHandlers() {
              COALESCE(ss.ServiceType,'خدمة') as Description,
              ss.PaymentMethod, ss.PaidAmount, ss.RemainingAmount, ss.Status
       FROM service_sales ss
-      WHERE ss.CustomerID = ? ${fSrv.sql}
-    `).all(customerId, ...fSrv.vals);
-    operations.push(...services);
+      WHERE ss.CustomerID = ? ${f.sql}
+    `, 'ss.Date');
+    operations.push(...services.range);
 
     // Receipt vouchers (credit - customer pays, reduces balance)
-    const receipts = db.prepare(`
+    const receipts = qq((f) => `
       SELECT v.VoucherID as RefID, v.VoucherNumber as RefNumber, v.Date, 0 as Debit, v.Amount as Credit,
              'voucher_receipt' as OpType, v.Description as Description,
              NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, NULL as Status
       FROM vouchers v
       WHERE v.PartyType = 'customer' AND v.PartyID = ? AND v.VoucherType = 'receipt'
-      ${fVR.sql}
-    `).all(customerId, ...fVR.vals);
-    operations.push(...receipts);
+      ${f.sql}
+    `, 'v.Date');
+    operations.push(...receipts.range);
 
     // Payment vouchers (debit - refund to customer)
-    const payments = db.prepare(`
+    const payments = qq((f) => `
       SELECT v.VoucherID as RefID, v.VoucherNumber as RefNumber, v.Date, v.Amount as Debit, 0 as Credit,
              'voucher_payment' as OpType, v.Description as Description,
              NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, NULL as Status
       FROM vouchers v
       WHERE v.PartyType = 'customer' AND v.PartyID = ? AND v.VoucherType = 'payment'
-      ${fVP.sql}
-    `).all(customerId, ...fVP.vals);
-    operations.push(...payments);
+      ${f.sql}
+    `, 'v.Date');
+    operations.push(...payments.range);
 
     // Sort by date ascending, then by insertion order
     operations.sort((a, b) => {
@@ -667,8 +698,16 @@ export function registerCustomerStatementHandlers() {
       return dateCompare !== 0 ? dateCompare : (a.RefID - b.RefID);
     });
 
-    // Calculate running balance
-    let runningBalance = 0;
+    // Opening balance: the customer's debt from BEFORE the range started.
+    // With no from date the statement opens at 0 (everything is shown).
+    const openingBalance = from ? [
+      ...sales.before, ...returns.before, ...deliveries.before, ...services.before,
+      ...receipts.before, ...payments.before,
+    ].reduce((s, o) => s + (o.Debit || 0) - (o.Credit || 0), 0) : 0;
+
+    // Calculate running balance — from the opening balance, so the last row
+    // reconciles with the stored customers.Balance.
+    let runningBalance = openingBalance;
     for (const op of operations) {
       runningBalance += (op.Debit || 0) - (op.Credit || 0);
       op.Balance = runningBalance;
@@ -682,6 +721,7 @@ export function registerCustomerStatementHandlers() {
       success: true,
       customer,
       operations,
+      openingBalance,
       totals: {
         totalDebit,
         totalCredit,
@@ -700,17 +740,21 @@ export function registerCustomerStatementHandlers() {
     const operations: any[] = [];
     const from = typeof filters?.fromDate === 'string' && filters.fromDate ? filters.fromDate : null;
     const to = typeof filters?.toDate === 'string' && filters.toDate ? filters.toDate : null;
-    const df = (col: string) => {
+    const df = (col: string, mode: 'range' | 'before' = 'range') => {
       let sql = '';
       const vals: string[] = [];
-      if (from) { sql += ` AND ${col} >= ?`; vals.push(from); }
-      if (to) { sql += ` AND ${col} <= ?`; vals.push(to); }
+      if (mode === 'before') {
+        if (from) { sql += ` AND ${col} < ?`; vals.push(from); }
+      } else {
+        if (from) { sql += ` AND ${col} >= ?`; vals.push(from); }
+        if (to) { sql += ` AND ${col} <= ?`; vals.push(to); }
+      }
       return { sql, vals };
     };
-    const fPur = df('Date');
-    const fPRet = df('r.Date');
-    const fVPay = df('v.Date');
-    const fVRec = df('v.Date');
+    const qq = (sql: (f: { sql: string; vals: string[] }) => string, col: string) => ({
+      range: db.prepare(sql(df(col))).all(supplierId, ...df(col).vals) as any[],
+      before: db.prepare(sql(df(col, 'before'))).all(supplierId, ...df(col, 'before').vals) as any[],
+    });
 
     // Purchases (credit - increases supplier balance / we owe them)
     //
@@ -723,14 +767,14 @@ export function registerCustomerStatementHandlers() {
     // The owner reconciles a supplier from this page. A statement that
     // disagrees with the ledger by exactly the amount already handed over is
     // how a supplier gets paid twice.
-    const purchases = db.prepare(`
+    const purchases = qq((f) => `
       SELECT PurchaseID as RefID, PurchaseNumber as RefNumber, Date,
              COALESCE(PaidAmount,0) as Debit, TotalAmount as Credit,
              'purchase' as OpType, 'فاتورة شراء' as Description,
              PaymentMethod, PaidAmount, RemainingAmount, Status
-      FROM purchases WHERE SupplierID = ? ${fPur.sql}
-    `).all(supplierId, ...fPur.vals);
-    operations.push(...purchases);
+      FROM purchases WHERE SupplierID = ? ${f.sql}
+    `, 'Date');
+    operations.push(...purchases.range);
 
     // Purchase returns — the returned VALUE goes off what we owe, whatever
     // The settlement has two legs: the returned VALUE goes on the debit side
@@ -741,7 +785,7 @@ export function registerCustomerStatementHandlers() {
     // refunded to a machine shows 80 against an 80 refund (net zero, which a
     // 0/0 row hid), a pure account credit shows 160 against nothing, and any
     // mix nets to what the balance actually moved.
-    const returns = db.prepare(`
+    const returns = qq((f) => `
       SELECT r.ReturnID as RefID, r.ReturnNumber as RefNumber, r.Date,
              COALESCE(r.TotalAmount, 0) as Debit,
              COALESCE(r.CashRefund, 0) + COALESCE(r.TransferRefund, 0) as Credit,
@@ -751,38 +795,43 @@ export function registerCustomerStatementHandlers() {
              NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, NULL as Status
       FROM purchase_returns r
       JOIN purchases p ON r.PurchaseID = p.PurchaseID
-      WHERE p.SupplierID = ? ${fPRet.sql}
-    `).all(supplierId, ...fPRet.vals);
-    operations.push(...returns);
+      WHERE p.SupplierID = ? ${f.sql}
+    `, 'r.Date');
+    operations.push(...returns.range);
 
     // Payment vouchers (debit - we pay supplier)
-    const payments = db.prepare(`
+    const payments = qq((f) => `
       SELECT v.VoucherID as RefID, v.VoucherNumber as RefNumber, v.Date, v.Amount as Debit, 0 as Credit,
              'voucher_payment' as OpType, v.Description as Description,
              NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, NULL as Status
       FROM vouchers v
       WHERE v.PartyType = 'supplier' AND v.PartyID = ? AND v.VoucherType = 'payment'
-      ${fVPay.sql}
-    `).all(supplierId, ...fVPay.vals);
-    operations.push(...payments);
+      ${f.sql}
+    `, 'v.Date');
+    operations.push(...payments.range);
 
     // Receipt vouchers (credit - supplier refunds us)
-    const receipts = db.prepare(`
+    const receipts = qq((f) => `
       SELECT v.VoucherID as RefID, v.VoucherNumber as RefNumber, v.Date, 0 as Debit, v.Amount as Credit,
              'voucher_receipt' as OpType, v.Description as Description,
              NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, NULL as Status
       FROM vouchers v
       WHERE v.PartyType = 'supplier' AND v.PartyID = ? AND v.VoucherType = 'receipt'
-      ${fVRec.sql}
-    `).all(supplierId, ...fVRec.vals);
-    operations.push(...receipts);
+      ${f.sql}
+    `, 'v.Date');
+    operations.push(...receipts.range);
 
     operations.sort((a, b) => {
       const dateCompare = new Date(a.Date).getTime() - new Date(b.Date).getTime();
       return dateCompare !== 0 ? dateCompare : (a.RefID - b.RefID);
     });
 
-    let runningBalance = 0;
+    // Opening balance: what the shop owed BEFORE the range started.
+    const openingBalance = from ? [
+      ...purchases.before, ...returns.before, ...payments.before, ...receipts.before,
+    ].reduce((s, o) => s + (o.Credit || 0) - (o.Debit || 0), 0) : 0;
+
+    let runningBalance = openingBalance;
     for (const op of operations) {
       runningBalance += (op.Credit || 0) - (op.Debit || 0);
       op.Balance = runningBalance;
@@ -795,6 +844,7 @@ export function registerCustomerStatementHandlers() {
       success: true,
       supplier,
       operations,
+      openingBalance,
       totals: {
         totalDebit,
         totalCredit,

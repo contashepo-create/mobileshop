@@ -4,7 +4,7 @@ import { safeFailure, safeMessage } from '../security/errorResponse';
 import { requireId } from '../../shared/validate';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, warehouseStock, deductStock, deductStockAtCost, restoreStockAtCost, recordValuationResidual, addStockLot } from '../database/stock';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
 
 export function registerPurchasesHandlers() {
@@ -185,7 +185,8 @@ export function registerPurchasesHandlers() {
       const paidAmount = data.PaidAmount || 0;
       const remaining = totalAmount - paidAmount;
 
-      const dateStr = businessToday();
+      const dateStr = resolveDocDate(data as any);
+      if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
       const purchaseNumber = nextDocNumber(db, 'purchases', 'PurchaseNumber', 'PUR', dateStr);
 
       const status = remaining > 0 ? (paidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
@@ -408,7 +409,8 @@ export function registerPurchasesHandlers() {
     TransferCost?: number; TransferCostBearer?: 'shop' | 'party';
   }) => {
     const db = getDb();
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
 
     // === EVERY FIGURE COMES FROM THE ORIGINAL PURCHASE, NOT THE CALLER ===
     //

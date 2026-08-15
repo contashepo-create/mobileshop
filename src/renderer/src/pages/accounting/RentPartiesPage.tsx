@@ -8,7 +8,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage } from '../../lib/ipc';
 import { escapeHtml as esc, safeNumber } from '../../../../shared/escapeHtml';
-import { printHeaderHtml, printFooterHtml, printHeaderCss } from '../../lib/printHeader';
+import { printHeaderHtml, printFooterHtml, printHeaderCss, printDocument } from '../../lib/printHeader';
 
 /**
  * LANDLORDS AND TENANTS.
@@ -118,8 +118,6 @@ export function RentPartiesPage() {
     // that unmounts the whole application and leaves the shop staring at a
     // blank window.
     if (!statement?.party || !statement?.totals) return;
-    const w = window.open('', '_blank');
-    if (!w) return;
     const t = statement.totals;
     const isLandlord = statement.party.PartyKind === 'landlord';
     const instalments = Array.isArray(statement.instalments) ? statement.instalments : [];
@@ -191,10 +189,8 @@ export function RentPartiesPage() {
       <div class="sig-box"><div class="line">${esc(isLandlord ? 'المؤجر' : 'المستأجر')}</div></div>
     </div>
     ${printFooterHtml(settings, 'هذا الكشف معتمد ومعتبر لدى الطرفين')}
-    <script>window.print();window.onafterprint=()=>window.close();<\/script>
     </body></html>`;
-    w.document.write(html);
-    w.document.close();
+    printDocument(html);
   };
 
   return (

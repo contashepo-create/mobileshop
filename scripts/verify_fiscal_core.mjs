@@ -2,10 +2,13 @@
 // SECTION 16 — FISCAL YEAR: the open/close lifecycle on the REAL stack. Same
 // harness as sections 7-15.
 //
-// The accounting claim under test: exactly one year is open at a time;
-// closing partitions time without overlap or gap, names the new year from the
-// start of its period, stamps the closer, refuses ghosts and re-closes; and
-// documents posted after the close carry the new year.
+// The accounting claim under test: a year can only be closed once it has
+// ACTUALLY ended; closing partitions time without overlap or gap, names the
+// new year from the start of its period, stamps the closer, carries the
+// balances into the new year as written opening balances, refuses ghosts and
+// re-closes; a non-overlapping year (a past year opened beside the current
+// one, for backdated documents) is allowed; and documents posted after the
+// close carry the new year.
 import { build } from 'esbuild';
 import { createRequire } from 'module';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
@@ -19,6 +22,7 @@ export { getDb, closeDb } from './src/main/database/connection.ts';
 export { runMigrations } from './src/main/database/migrations/index.ts';
 export { registerFiscalYearHandlers } from './src/main/ipc/fiscalYear.handlers.ts';
 export { registerVouchersHandlers } from './src/main/ipc/vouchers.handlers.ts';
+export { businessToday } from './src/shared/businessDate.ts';
 `;
 
 const entryFile = join(PROJECT_ROOT, '_fy_entry.ts');
@@ -99,10 +103,12 @@ try {
   const qa = (db, sql, ...p) => db.prepare(sql).all(...p);
   const near = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) < 0.01;
 
+  // Seed a year that has DEFINITELY ended (2020), so closing it is legal under
+  // the EndDate guard whatever day the suite runs.
   const seed = (db, extra = '') => db.exec(`
     DELETE FROM fiscal_years;
     INSERT INTO fiscal_years (FiscalYearID, YearName, StartDate, EndDate, Status)
-      VALUES (1, 'السنة المالية 2026', '2026-01-01', '2026-12-31', 'open');
+      VALUES (1, 'السنة المالية 2020', '2020-01-01', '2020-12-31', 'open');
     UPDATE cash_accounts SET Balance = 100000, IsActive = 1 WHERE CashAccountID = 1;
     ${extra}
   `);
@@ -111,8 +117,8 @@ try {
   console.log('\n[1] Creation guards');
   await scenario(async ({ db, call }) => {
     seed(db);
-    const second = await call('fiscalYear:create', { YearName: '2027', StartDate: '2027-01-01', EndDate: '2027-12-31' });
-    t('a second open year is refused while one is open', second?.success === false, second?.message ?? '');
+    const overlapping = await call('fiscalYear:create', { YearName: '2021', StartDate: '2020-06-01', EndDate: '2021-05-31' });
+    t('an open year overlapping the current one is refused', overlapping?.success === false, overlapping?.message ?? '');
     const noName = await call('fiscalYear:create', { YearName: '', StartDate: '2027-01-01', EndDate: '2027-12-31' });
     t('an unnamed year is refused', noName?.success === false, noName?.message ?? '');
     const noDates = await call('fiscalYear:create', { YearName: '2027' });
@@ -124,11 +130,23 @@ try {
     const shortGarbage = await call('fiscalYear:create', { YearName: '2027', StartDate: '01-2027', EndDate: '31-2027' });
     t('a partial date is refused', shortGarbage?.success === false, shortGarbage?.message ?? '');
     const stillOne = qa(db, 'SELECT * FROM fiscal_years WHERE Status = \'open\'');
-    t('exactly one year remains open', stillOne.length === 1, `open ${stillOne.length}`);
+    t('exactly one year remains open after the refusals', stillOne.length === 1, `open ${stillOne.length}`);
+
+    // NEW CONTRACT: a year whose period does NOT overlap the open one may be
+    // opened beside it — the backdating case (a shop that started using the
+    // system this year and needs a 2019 year for its old register). The
+    // posting guard is date-driven, so a document dated 2019 lands in 2019
+    // no matter which year id the screen sends.
+    const past = await call('fiscalYear:create', { YearName: 'السنة المالية 2019', StartDate: '2019-01-01', EndDate: '2019-12-31' });
+    t('a non-overlapping past year can be opened beside the current one', past?.success === true, JSON.stringify(past));
+    const twoOpen = qa(db, "SELECT * FROM fiscal_years WHERE Status = 'open' ORDER BY StartDate");
+    t('two open years now coexist, periods apart', twoOpen.length === 2, `open ${twoOpen.length}`);
+    const active = await call('fiscalYear:getActive');
+    t('getActive still resolves the LATEST open year (2020)', active?.FiscalYearID === 1 && active?.StartDate === '2020-01-01', JSON.stringify(active));
   });
 
   // ---------------------------------------------------------------- 2
-  console.log('\n[2] Closing partitions time');
+  console.log('\n[2] Closing partitions time and carries the balances');
   await scenario(async ({ db, call }) => {
     seed(db);
     const r = await call('fiscalYear:close', 1, 1);
@@ -137,17 +155,40 @@ try {
     t('the old year is closed and stamped', closed.Status === 'closed' && !!closed.ClosedAt, JSON.stringify(closed));
     const nxt = q(db, 'SELECT * FROM fiscal_years WHERE Status = \'open\'');
     t('a new year opened', !!nxt && nxt.FiscalYearID !== 1, JSON.stringify(nxt));
-    t('it starts the day after the old one ended', nxt.StartDate === '2027-01-01', nxt.StartDate);
-    t('it ends one day before the anniversary', nxt.EndDate === '2027-12-31', nxt.EndDate);
-    t('it is named from the start of its period', nxt.YearName === 'السنة المالية 2027', nxt.YearName);
+    t('it starts the day after the old one ended', nxt.StartDate === '2021-01-01', nxt.StartDate);
+    t('it ends one day before the anniversary', nxt.EndDate === '2021-12-31', nxt.EndDate);
+    t('it is named from the start of its period', nxt.YearName === 'السنة المالية 2021', nxt.YearName);
     t('the ranges partition time with no overlap and no gap',
-      nxt.StartDate === '2027-01-01' && nxt.EndDate === '2027-12-31' && closed.EndDate === '2026-12-31', '');
+      nxt.StartDate === '2021-01-01' && nxt.EndDate === '2021-12-31' && closed.EndDate === '2020-12-31', '');
     const active = await call('fiscalYear:getActive');
     t('getActive returns the new year', active?.FiscalYearID === nxt.FiscalYearID, JSON.stringify(active));
     const again = await call('fiscalYear:close', 1, 1);
     t('closing the same year again is refused', again?.success === false, again?.message ?? '');
     const ghost = await call('fiscalYear:close', 99999, 1);
     t('closing a ghost year is refused', ghost?.success === false, ghost?.message ?? '');
+
+    // The balance snapshot: the 100000 in the cash account at the moment of
+    // the close becomes the new year's WRITTEN opening balance, for every
+    // account family the owner asked to see on the fiscal-year screen.
+    const cashOpen = q(db, 'SELECT Balance v FROM fiscal_year_openings WHERE FiscalYearID = ? AND AccountType = \'cash_account\' AND AccountID = 1', nxt.FiscalYearID);
+    t('the cash balance was carried as the new year\'s opening', near(cashOpen?.v, 100000), JSON.stringify(cashOpen));
+    const count = q(db, 'SELECT COUNT(*) v FROM fiscal_year_openings WHERE FiscalYearID = ?', nxt.FiscalYearID);
+    t('the opening snapshot covers every ACTIVE account (only the seeded cash account is active here)',
+      count.v === 1, `rows ${count.v}`);
+    const activeOpen = await call('fiscalYear:getActive');
+    t('getActive exposes the opening balances', Array.isArray(activeOpen?.openingBalances) && activeOpen.openingBalances.length > 0,
+      JSON.stringify(activeOpen?.openingBalances));
+
+    // REOPEN: a closed year can be deliberately reopened to record old
+    // operations; the opening snapshots of the years after it are dropped
+    // (they are re-taken at the next close, since late entries moved them).
+    const reopen = await call('fiscalYear:reopen', 1, 1);
+    t('reopening the closed year succeeds', reopen?.success === true, JSON.stringify(reopen));
+    t('the year is open again', q(db, 'SELECT Status v FROM fiscal_years WHERE FiscalYearID = 1').v === 'open', '');
+    const left = q(db, 'SELECT COUNT(*) v FROM fiscal_year_openings WHERE FiscalYearID > 1');
+    t('the later years\' opening snapshots were dropped', left.v === 0, `rows ${left.v}`);
+    const reopenAgain = await call('fiscalYear:reopen', 1, 1);
+    t('reopening an already-open year is refused', reopenAgain?.success === false, reopenAgain?.message ?? '');
   });
 
   // ---------------------------------------------------------------- 3
@@ -156,12 +197,12 @@ try {
     seed(db);
     await call('fiscalYear:close', 1, 1);
     const yr2 = q(db, "SELECT FiscalYearID v FROM fiscal_years WHERE Status = 'open'").v;
-    t('the first close auto-opened 2027', q(db, 'SELECT StartDate v FROM fiscal_years WHERE FiscalYearID = ?', yr2).v === '2027-01-01', '');
+    t('the first close auto-opened 2021', q(db, 'SELECT StartDate v FROM fiscal_years WHERE FiscalYearID = ?', yr2).v === '2021-01-01', '');
     await call('fiscalYear:close', yr2, 1);
     const yr3 = q(db, "SELECT FiscalYearID v FROM fiscal_years WHERE Status = 'open'").v;
-    t('the second close auto-opened 2028', q(db, 'SELECT StartDate v FROM fiscal_years WHERE FiscalYearID = ?', yr3).v === '2028-01-01', '');
-    const dup = await call('fiscalYear:create', { YearName: '2029', StartDate: '2029-01-01', EndDate: '2029-12-31' });
-    t('a manual year is still refused while 2028 is open', dup?.success === false, dup?.message ?? '');
+    t('the second close auto-opened 2022', q(db, 'SELECT StartDate v FROM fiscal_years WHERE FiscalYearID = ?', yr3).v === '2022-01-01', '');
+    const dup = await call('fiscalYear:create', { YearName: '2023', StartDate: '2022-06-01', EndDate: '2023-05-31' });
+    t('a manual year OVERLAPPING the open 2022 is refused', dup?.success === false, dup?.message ?? '');
     const list = await call('fiscalYear:list');
     t('the list shows the three-year history', Array.isArray(list) && list.length === 3, `rows ${list?.length}`);
     const closedOnes = list.filter(y => y.Status === 'closed');
@@ -203,6 +244,27 @@ try {
     const sum1 = q(db, 'SELECT COALESCE(SUM(Amount),0) v FROM vouchers WHERE FiscalYearID = ?', active1.FiscalYearID).v;
     const sum2 = q(db, 'SELECT COALESCE(SUM(Amount),0) v FROM vouchers WHERE FiscalYearID = ?', active2.FiscalYearID).v;
     t('the years never mix amounts', near(sum1, 700) && near(sum2, 300), `${sum1} / ${sum2}`);
+  });
+
+  // ---------------------------------------------------------------- 6
+  console.log('\n[6] A year that has NOT ended cannot be closed');
+  await scenario(async ({ db, call }) => {
+    // The CURRENT calendar year: on any date the suite runs, it has not
+    // ended yet — so closing it must be refused by the EndDate guard.
+    const today = mod.businessToday();
+    const y = today.slice(0, 4);
+    db.exec(`
+      DELETE FROM fiscal_years;
+      INSERT INTO fiscal_years (FiscalYearID, YearName, StartDate, EndDate, Status)
+        VALUES (1, 'السنة المالية ${y}', '${y}-01-01', '${y}-12-31', 'open');
+    `);
+    const r = await call('fiscalYear:close', 1, 1);
+    t('closing the current (not-yet-ended) year is refused',
+      r?.success === false && /انتهائها/.test(r?.message ?? ''), JSON.stringify(r));
+    const stillOpen = q(db, "SELECT COUNT(*) v FROM fiscal_years WHERE Status = 'open'").v;
+    t('the year stays open and untouched after the refusal', stillOpen === 1, '');
+    const noNewYear = q(db, 'SELECT COUNT(*) v FROM fiscal_years');
+    t('no new year was created by the refused close', noNewYear.v === 1, `rows ${noNewYear.v}`);
   });
 
   console.log(`\nSECTION 16 RESULT: ${PASS.length} passed, ${FAIL.length} failed`);

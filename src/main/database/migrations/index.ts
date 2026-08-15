@@ -175,6 +175,26 @@ export function runMigrations(db: Database.Database) {
       ClosedByUserID  INTEGER
     );
 
+    -- Balances carried into a fiscal year at the moment it was opened.
+    --
+    -- A snapshot, not the source of truth: statements compute the true
+    -- opening from movements (so late entries in a reopened earlier year
+    -- still flow into the year that follows), but this row is the written
+    -- record of "what was carried over" the owner asked for, and it is what
+    -- the fiscal-year screen shows.
+    CREATE TABLE IF NOT EXISTS fiscal_year_openings (
+      OpeningID     INTEGER PRIMARY KEY AUTOINCREMENT,
+      FiscalYearID  INTEGER NOT NULL,
+      AccountType   TEXT NOT NULL,   -- 'cash_account' | 'payment_method' | 'customer' | 'supplier'
+      AccountID     INTEGER NOT NULL,
+      Balance       REAL NOT NULL DEFAULT 0,
+      CreatedAt     TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (FiscalYearID) REFERENCES fiscal_years(FiscalYearID),
+      UNIQUE (FiscalYearID, AccountType, AccountID)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_fyo_year ON fiscal_year_openings(FiscalYearID);
+
     CREATE TABLE IF NOT EXISTS roles (
       RoleID    INTEGER PRIMARY KEY AUTOINCREMENT,
       RoleName  TEXT NOT NULL,

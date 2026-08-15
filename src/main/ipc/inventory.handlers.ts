@@ -2,7 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { safeFailure } from '../security/errorResponse';
 import { nextDocNumber } from '../database/docNumber';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import { moveLots } from '../database/stock';
 import { checkAmount } from '../../shared/money';
 import {
@@ -496,7 +496,8 @@ export function registerInventoryHandlers() {
     userId: number;
   }) => {
     const db = getDb();
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
 
     // === INPUT VALIDATION ===
     // A transfer moves goods; it cannot create them.

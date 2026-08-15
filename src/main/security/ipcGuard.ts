@@ -527,10 +527,12 @@ export function installIpcGuard() {
 }
 
 /**
- * Refuses any document addressed to a CLOSED fiscal year.
+ * Refuses any document addressed to a CLOSED fiscal year — and refuses any
+ * document whose DATE does not belong to the fiscal year it is being posted
+ * into.
  *
- * WHY THIS EXISTS
- * ---------------
+ * WHY THE CLOSED-YEAR HALF EXISTS
+ * -------------------------------
  * `fiscalYear:close` stamps `Status = 'closed'` and opens the next year. NO
  * handler read that column. Measured, driving the real code — close 2026, then
  * post into it:
@@ -547,6 +549,24 @@ export function installIpcGuard() {
  * figure somebody already relied on, and the two years stop adding up to the
  * whole. It is also the single easiest way to hide a theft — post the
  * correction into a period nobody is looking at any more.
+ *
+ * WHY THE DATE HALF EXISTS
+ * ------------------------
+ * Every document is stamped with a fiscal year id the renderer chose. Until
+ * this check existed the id was taken on trust: a screen that still pointed at
+ * a year whose range did not contain today's date (a year closed early, a
+ * year that starts in the future) wrote the document into a period it did not
+ * belong to, and because reports filter by DATE, the figures of the wrong
+ * year moved while the right ones stayed silent. The year a document belongs
+ * to is a fact of its date, so the guard enforces the date against the year
+ * before the handler writes anything.
+ *
+ * WHEN THE CALLER SUPPLIES A DATE, THE DATE DECIDES THE YEAR. A backdated
+ * document (an old invoice recorded later) must land in the year that
+ * contains its date, no matter what id a stale screen sent — so the guard
+ * overrides the id with the year that contains the date. When no date is
+ * supplied the document is dated today, and the addressed year must contain
+ * today.
  *
  * WHY HERE RATHER THAN IN EACH HANDLER
  * ------------------------------------
@@ -570,6 +590,93 @@ function refuseClosedYear(channel: string, args: unknown[]): { success: false; m
     return null;
   }
 
+  let db: { prepare: (s: string) => { get: (...a: unknown[]) => unknown } };
+  try {
+    // Synchronous require: this runs on the hot path of every write, and an
+    // await here would leave the check racing the handler it is meant to gate.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    db = require('../database/connection').getDb();
+  } catch {
+    return null;   // no database yet (first run) — nothing to protect
+  }
+
+  // The document date: an explicit one from the payload (backdating), else
+  // today, computed locally — this function is extracted and executed
+  // standalone by the verifier, so it cannot import the shared date module.
+  let payload: Record<string, unknown> | null = null;
+  for (const arg of args) {
+    if (arg && typeof arg === 'object' && !Array.isArray(arg)) { payload = arg as Record<string, unknown>; break; }
+  }
+  if (!payload) return null;
+
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+
+  const explicitDate = payload.Date;
+  const hasExplicitDate = explicitDate !== undefined && explicitDate !== null && explicitDate !== '';
+  if (hasExplicitDate && (typeof explicitDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(explicitDate))) {
+    return {
+      success: false,
+      code: 'FISCAL_YEAR_DATE_INVALID',
+      message: 'تاريخ المستند غير صالح - الصيغة المطلوبة YYYY-MM-DD',
+    };
+  }
+  const effectiveDate = hasExplicitDate ? (explicitDate as string) : today;
+
+  // A document dated in the future is refused; two days of tolerance absorb a
+  // clock a few minutes fast and a posting made just after midnight.
+  const limit = new Date(now);
+  limit.setDate(limit.getDate() + 2);
+  const limitStr = `${limit.getFullYear()}-${pad(limit.getMonth() + 1)}-${pad(limit.getDate())}`;
+  if (effectiveDate > limitStr) {
+    return {
+      success: false,
+      code: 'FISCAL_YEAR_FUTURE_DATE',
+      message: `لا يمكن تسجيل عملية بتاريخ مستقبلي (${effectiveDate})`,
+    };
+  }
+
+  const refuseClosed = (row: { Status?: string; YearName?: string }, id: number): { success: false; code: string; message: string } => {
+    console.error(`[IPC] "${channel}" refused: fiscal year ${id} is closed`);
+    return {
+      success: false,
+      code: 'FISCAL_YEAR_CLOSED',
+      message: `السنة المالية «${row.YearName || id}» مغلقة - لا يمكن تسجيل حركات فيها`,
+    };
+  };
+
+  // === THE CALLER SUPPLIED A DATE: THE DATE DECIDES THE YEAR ===
+  //
+  // Backdated documents must land in the year that contains their date. The
+  // id the renderer sent is ignored for the decision — the date is
+  // authoritative — and the payload is rewritten so the handler stamps the
+  // correct year. A closed year still refuses, until it is deliberately
+  // reopened.
+  if (hasExplicitDate) {
+    let row: { FiscalYearID?: number; Status?: string; YearName?: string } | undefined;
+    try {
+      row = db.prepare(
+        'SELECT FiscalYearID, Status, YearName FROM fiscal_years WHERE StartDate <= ? AND EndDate >= ? ORDER BY StartDate DESC LIMIT 1'
+      ).get(effectiveDate, effectiveDate) as { FiscalYearID?: number; Status?: string; YearName?: string } | undefined;
+    } catch {
+      return null;   // table missing during a migration — do not block trading
+    }
+    if (!row) {
+      return {
+        success: false,
+        code: 'FISCAL_YEAR_MISSING',
+        message: `لا توجد سنة مالية تغطي تاريخ ${effectiveDate} - راجع تاريخ المستند`,
+      };
+    }
+    if (row.Status === 'closed') return refuseClosed(row, row.FiscalYearID ?? 0);
+    payload.fiscalYearId = row.FiscalYearID;
+    payload.FiscalYearID = row.FiscalYearID;
+    return null;
+  }
+
+  // === NO DATE: the addressed year must contain TODAY ===
+
   // Find the year the caller is addressing. Both spellings are in use.
   let yearId: unknown;
   for (const arg of args) {
@@ -583,32 +690,36 @@ function refuseClosedYear(channel: string, args: unknown[]): { success: false; m
   const id = Number(yearId);
   if (!Number.isInteger(id) || id <= 0) return null;   // the handler's own validation reports this
 
-  let db: { prepare: (s: string) => { get: (...a: unknown[]) => unknown } };
+  let row: { Status?: string; YearName?: string; StartDate?: string; EndDate?: string } | undefined;
   try {
-    // Synchronous require: this runs on the hot path of every write, and an
-    // await here would leave the check racing the handler it is meant to gate.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    db = require('../database/connection').getDb();
-  } catch {
-    return null;   // no database yet (first run) — nothing to protect
-  }
-
-  let row: { Status?: string; YearName?: string } | undefined;
-  try {
-    row = db.prepare('SELECT Status, YearName FROM fiscal_years WHERE FiscalYearID = ?')
-      .get(id) as { Status?: string; YearName?: string } | undefined;
+    row = db.prepare('SELECT Status, YearName, StartDate, EndDate FROM fiscal_years WHERE FiscalYearID = ?')
+      .get(id) as { Status?: string; YearName?: string; StartDate?: string; EndDate?: string } | undefined;
   } catch {
     return null;   // table missing during a migration — do not block trading
   }
 
-  if (!row || row.Status !== 'closed') return null;
+  if (!row) {
+    return {
+      success: false,
+      code: 'FISCAL_YEAR_MISSING',
+      message: `السنة المالية رقم ${id} غير موجودة`,
+    };
+  }
 
-  console.error(`[IPC] "${channel}" refused: fiscal year ${id} is closed`);
-  return {
-    success: false,
-    code: 'FISCAL_YEAR_CLOSED',
-    message: `السنة المالية «${row.YearName || id}» مغلقة - لا يمكن تسجيل حركات فيها`,
-  };
+  if (row.Status === 'closed') return refuseClosed(row, id);
+
+  // The document is dated today, so the addressed year must contain today. A
+  // stale screen pointing at a year whose range does not include today is
+  // told to use the right one instead of writing into the wrong period.
+  if (today < (row.StartDate ?? '') || today > (row.EndDate ?? '')) {
+    return {
+      success: false,
+      code: 'FISCAL_YEAR_DATE_OUT_OF_RANGE',
+      message: `تاريخ اليوم (${today}) لا يقع ضمن نطاق هذه السنة المالية (${row.StartDate} إلى ${row.EndDate}) - اختر السنة المالية الصحيحة`,
+    };
+  }
+
+  return null;
 }
 
 /**

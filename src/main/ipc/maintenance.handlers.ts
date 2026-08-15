@@ -3,7 +3,7 @@ import { getDb } from '../database/connection';
 import { getCallerUserId } from '../security/ipcGuard';
 import { nextDocNumber } from '../database/docNumber';
 import { deductStock, restoreStock, restoreStockAtCost } from '../database/stock';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import {
   oneOf, requireText, optionalText, optionalNote, optionalDate, optionalId, requireId,
   LIMITS, MAINTENANCE_WORKFLOW_STATUSES,
@@ -175,7 +175,8 @@ export function registerMaintenanceHandlers() {
       AgreedCost: rcvAgreedCost ?? undefined,
     };
 
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
     const ticketNumber = nextDocNumber(db, 'maintenance_tickets', 'TicketNumber', 'MNT', dateStr);
     const maintenanceType = data.MaintenanceType || 'normal';
 
@@ -736,7 +737,8 @@ export function registerMaintenanceHandlers() {
       }
     }
 
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
     const deliveryNumber = nextDocNumber(db, 'maintenance_deliveries', 'DeliveryNumber', 'DLV', dateStr);
 
     // Sale number
@@ -970,7 +972,8 @@ export function registerMaintenanceHandlers() {
     const retDelivery = requireId(data?.DeliveryID, 'التسليم');
     if (!retDelivery.ok) return { success: false, message: retDelivery.message };
     data = { ...data, Reason: retReason.value, TicketID: retTicket.value, DeliveryID: retDelivery.value };
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
     const returnNumber = nextDocNumber(db, 'maintenance_returns', 'ReturnNumber', 'MRT', dateStr);
 
     // The return is a reversal of ONE specific delivery.

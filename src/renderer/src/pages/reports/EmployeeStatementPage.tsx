@@ -8,7 +8,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { asRows } from '../../lib/ipc';
 import { escapeHtml as esc, safeNumber } from '../../../../shared/escapeHtml';
-import { printHeaderHtml, printFooterHtml, printHeaderCss } from '../../lib/printHeader';
+import { printHeaderHtml, printFooterHtml, printHeaderCss, printDocument } from '../../lib/printHeader';
 
 export function EmployeeStatementPage() {
   const { showToast } = useToastStore();
@@ -179,24 +179,18 @@ export function EmployeeStatementPage() {
       <table>${fields.map(f => `<tr><td style="width:30%;font-weight:600;background:#f8fafc">${esc(f.label)}</td><td>${esc(f.value ?? '—')}</td></tr>`).join('')}</table>
       ${data.items?.length ? `<h3 style="margin-top:20px">الأصناف</h3><table class="items-table"><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr>${data.items.map((item: any) => `<tr><td>${esc(item.ItemName || item.Description || '—')}</td><td>${esc(item.Quantity ?? '—')}</td><td>${item.UnitPrice ?? item.UnitCost ?? item.Amount ? safeNumber(item.UnitPrice ?? item.UnitCost ?? item.Amount) : '—'}</td><td>${item.Total != null ? safeNumber(item.Total) : '—'}</td></tr>`).join('')}</table>` : ''}
       <p style="margin-top:30px;text-align:center;font-size:12px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:10px">تمت الطباعة من نظام المحمول</p>
-      <script>window.print();window.onafterprint=()=>window.close();<\/script>
       </body></html>`;
   };
 
   const handlePrintRecord = () => {
     if (!previewRef.current?.primary) return;
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
     const html = buildPrintHTML(previewRef.current, previewOp);
     if (!html) return;
-    printWindow.document.write(html);
-    printWindow.document.close();
+    printDocument(html);
   };
 
   const handlePrintStatement = () => {
     if (!data?.operations?.length || !employee) return;
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
     const rows = data.operations.map((op: any) => {
       const info = opTypeLabels[op.OpType] || { label: op.OpType, variant: 'gray' };
       let statusText = '';
@@ -266,10 +260,8 @@ export function EmployeeStatementPage() {
       </div>
       ${printFooterHtml(settings, 'هذا الكشف معتمد ومعتبر لدى الطرفين')}
     </div>
-    <script>window.print();window.onafterprint=()=>window.close();<\/script>
     </body></html>`;
-    printWindow.document.write(html);
-    printWindow.document.close();
+    printDocument(html);
   };
 
   const opTypeLabels: Record<string, { label: string; variant: string }> = {

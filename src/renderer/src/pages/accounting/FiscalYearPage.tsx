@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Calendar, Lock, Unlock, Plus, CheckCircle } from 'lucide-react';
+import { Calendar, Lock, Unlock, Plus, CheckCircle, Wallet } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
@@ -7,12 +7,21 @@ import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 
+const accountTypeLabels: Record<string, string> = {
+  cash_account: 'خزينة/بنك',
+  payment_method: 'ماكينة/محفظة',
+  customer: 'عميل',
+  supplier: 'مورد',
+};
+
 export function FiscalYearPage() {
   const { showToast } = useToastStore();
   const [fiscalYears, setFiscalYears] = useState<any[]>([]);
   const [activeFy, setActiveFy] = useState<any>(null);
   const [showModal, setShowModal] = useState(false);
   const [closingId, setClosingId] = useState<number | null>(null);
+  const [showOpenings, setShowOpenings] = useState<number | null>(null);
+  const [openings, setOpenings] = useState<any[]>([]);
   const [form, setForm] = useState({
     YearName: '',
     StartDate: new Date().toISOString().split('T')[0],
@@ -41,6 +50,8 @@ export function FiscalYearPage() {
       setShowModal(false);
       setForm({ YearName: '', StartDate: new Date().toISOString().split('T')[0], EndDate: '' });
       fetchData();
+    } else {
+      showToast('error', result.message);
     }
   };
 
@@ -58,6 +69,29 @@ export function FiscalYearPage() {
     setClosingId(null);
   };
 
+  const handleReopen = async (id: number) => {
+    if (!confirm('إعادة فتح سنة مالية مقفلة؟ يمكنك حينها تسجيل عمليات بتاريخ يقع داخل فترة هذه السنة، مع العلم أن أرصدة الافتتاحية المعروضة للسنوات اللاحقة ستُحذف وتُلتقط من جديد عند الإقفال التالي.')) {
+      return;
+    }
+    const result = await window.api.invoke('fiscalYear:reopen', id, 1);
+    if (result.success) {
+      showToast('success', 'تمت إعادة فتح السنة المالية');
+      fetchData();
+    } else {
+      showToast('error', result.message);
+    }
+  };
+
+  const handleShowOpenings = async (id: number) => {
+    const result = await window.api.invoke('fiscalYear:openings', id);
+    if (result.success) {
+      setOpenings(result.openings);
+      setShowOpenings(id);
+    } else {
+      showToast('error', result.message);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -73,6 +107,11 @@ export function FiscalYearPage() {
             <div className="font-semibold text-green-800 dark:text-green-300">السنة المالية الحالية: {activeFy.YearName}</div>
             <div className="text-sm text-green-600 dark:text-green-400">{activeFy.StartDate} ← {activeFy.EndDate}</div>
           </div>
+          {Array.isArray(activeFy.openingBalances) && activeFy.openingBalances.length > 0 && (
+            <button onClick={() => { setOpenings(activeFy.openingBalances); setShowOpenings(activeFy.FiscalYearID); }} className="mr-auto text-xs text-green-700 dark:text-green-300 hover:underline flex items-center gap-1">
+              <Wallet size={14} /> عرض الأرصدة الافتتاحية ({activeFy.openingBalances.length})
+            </button>
+          )}
         </div>
       ) : (
         <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-4 flex items-center gap-3">
@@ -94,17 +133,48 @@ export function FiscalYearPage() {
           { key: 'ClosedAt', title: 'تاريخ الإقفال', render: (r) => r.ClosedAt || '—' },
           {
             key: 'actions', title: 'إجراءات',
-            render: (r) => r.Status === 'open' ? (
-              <button onClick={() => handleClose(r.FiscalYearID)} className="text-xs text-red-500 hover:underline flex items-center gap-1">
-                <Lock size={12} /> إقفال
-              </button>
-            ) : <span className="text-xs text-slate-500 dark:text-slate-400">—</span>,
+            render: (r) => (
+              <div className="flex items-center gap-3">
+                <button onClick={() => handleShowOpenings(r.FiscalYearID)} className="text-xs text-primary-600 hover:underline flex items-center gap-1">
+                  <Wallet size={12} /> الأرصدة الافتتاحية
+                </button>
+                {r.Status === 'open' ? (
+                  <button onClick={() => handleClose(r.FiscalYearID)} className="text-xs text-red-500 hover:underline flex items-center gap-1">
+                    <Lock size={12} /> إقفال
+                  </button>
+                ) : (
+                  <button onClick={() => handleReopen(r.FiscalYearID)} className="text-xs text-slate-500 hover:underline flex items-center gap-1">
+                    <Unlock size={12} /> إعادة فتح
+                  </button>
+                )}
+              </div>
+            ),
           },
         ]}
         data={fiscalYears}
         keyField="FiscalYearID"
         emptyMessage="لا توجد سنوات مالية"
       />
+
+      {/* Opening balances Modal */}
+      <Modal isOpen={showOpenings !== null} onClose={() => setShowOpenings(null)} title={`الأرصدة الافتتاحية - ${fiscalYears.find(y => y.FiscalYearID === showOpenings)?.YearName || ''}`}>
+        <div className="max-h-[60vh] overflow-y-auto">
+          {openings.length === 0 ? (
+            <p className="text-center text-slate-500 py-6">لا توجد أرصدة افتتاحية مسجلة لهذه السنة (تُلتقط عند إقفال السنة السابقة)</p>
+          ) : (
+            <DataTable
+              columns={[
+                { key: 'AccountType', title: 'النوع', render: (r) => <Badge variant="blue">{accountTypeLabels[r.AccountType] || r.AccountType}</Badge> },
+                { key: 'AccountID', title: 'المعرف', render: (r) => <span className="font-mono text-xs">{r.AccountID}</span> },
+                { key: 'Balance', title: 'الرصيد الافتتاحي', render: (r) => <span className="font-bold">{Number(r.Balance || 0).toFixed(2)}</span> },
+              ]}
+              data={openings}
+              keyField="AccountID"
+              emptyMessage="لا توجد بيانات"
+            />
+          )}
+        </div>
+      </Modal>
 
       {/* Create Modal */}
       <Modal isOpen={showModal} onClose={() => setShowModal(false)} title="فتح سنة مالية جديدة"

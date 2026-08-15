@@ -7,7 +7,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage, asRows } from '../../lib/ipc';
 import { escapeHtml as esc, safeNumber } from '../../../../shared/escapeHtml';
-import { printHeaderHtml, printFooterHtml, printHeaderCss } from '../../lib/printHeader';
+import { printHeaderHtml, printFooterHtml, printHeaderCss, printDocument } from '../../lib/printHeader';
 
 type ReportType = 'sales' | 'purchases' | 'maintenance' | 'customers' | 'suppliers' | 'employees' | 'inventory' | 'profitLoss' | 'financialPosition';
 
@@ -87,10 +87,7 @@ export function ReportsPage() {
       return;
     }
     const html = buildReportPrintHtml(activeReport, report.data, settings, fromDate, toDate);
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-    printWindow.document.write(html);
-    printWindow.document.close();
+    printDocument(html);
   };
 
   const showDateFilter = ['sales', 'purchases', 'maintenance', 'profitLoss'].includes(activeReport);
@@ -755,7 +752,6 @@ function buildReportPrintHtml(
     ${body}
     ${printFooterHtml(settings, 'تمت الطباعة من نظام إدارة محلات الموبايلات')}
   </div>
-  <script>window.print();window.onafterprint=()=>window.close();<\/script>
   </body></html>`;
 }
 

@@ -59,6 +59,26 @@ export function formatLocalDateTime(d: Date = new Date()): string {
   return `${formatLocalDate(d)} ${hh}:${mm}:${ss}`;
 }
 
+/**
+ * The date a document is stamped with.
+ *
+ * A document recorded on the spot is dated today. A BACKDATED document — an
+ * old invoice found later, a voucher that was never written — carries an
+ * explicit `Date` in the payload, and that date decides which fiscal year it
+ * belongs to. The IPC guard enforces the date against the year before the
+ * handler runs; here the handler only resolves and validates the value.
+ *
+ * Returns null when a supplied date is malformed; the caller refuses the
+ * document rather than stamping anything wrong.
+ */
+export function resolveDocDate(data: Record<string, unknown> | null | undefined): string | null {
+  if (data && data.Date !== undefined && data.Date !== null && data.Date !== '') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(data.Date))) return null;
+    return String(data.Date);
+  }
+  return businessToday();
+}
+
 /** Local date `n` days before `now`, for "not seen in N days" style filters. */
 export function localDateDaysAgo(days: number, now: Date = new Date()): string {
   const d = new Date(now);

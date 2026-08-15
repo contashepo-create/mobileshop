@@ -105,3 +105,26 @@ export function printFooterHtml(
   const name = (settings?.company_name || '').trim();
   return `<div class="footer">${esc(text)}${name ? ` — ${esc(name)}` : ''}</div>`;
 }
+
+/**
+ * Print an HTML document built in the renderer.
+ *
+ * WHY THIS TAKES THE SCRIPT OUT OF THE PAGE
+ * ------------------------------------------
+ * The print pages used to end with an inline
+ * `<script>window.print();window.onafterprint=...</script>`. The child opened
+ * by `window.open('', '_blank')` inherits the app's Content-Security-Policy
+ * (`script-src 'self'`), so that inline script was BLOCKED — nothing printed,
+ * and the console showed a CSP violation. The page never had to print itself:
+ * the opener holds a live handle to the child and can call `print()` there.
+ * No script in the child, no CSP conflict.
+ */
+export function printDocument(html: string): void {
+  const printWindow = window.open('', '_blank');
+  if (!printWindow) return;
+  printWindow.document.write(html);
+  printWindow.document.close();
+  printWindow.onafterprint = () => printWindow.close();
+  // Let the page finish painting before the dialog opens.
+  setTimeout(() => printWindow.print(), 300);
+}

@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import { checkAmount } from '../../shared/money';
 
 export function registerSettlementHandlers() {
@@ -45,7 +45,8 @@ export function registerSettlementHandlers() {
       }
     }
 
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
     const settlementNumber = nextDocNumber(db, 'settlements', 'SettlementNumber', 'SET', dateStr);
 
     // Settlement variances must hit the income statement. Writing the new

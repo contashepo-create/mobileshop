@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { nextDocNumber } from '../database/docNumber';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import { applyToInstalment, remainingOn } from './rentSettle';
 import { checkAmounts } from '../../shared/money';
 import {
@@ -143,7 +143,8 @@ export function registerVouchersHandlers() {
         message: 'اختر أصلاً واحداً فقط - إما خزينة/بنك أو محفظة',
       };
     }
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
     const prefix = data.VoucherType === 'receipt' ? 'RCV' : 'PAY';
     const voucherNumber = nextDocNumber(db, 'vouchers', 'VoucherNumber', prefix, dateStr);
 

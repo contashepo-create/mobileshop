@@ -183,17 +183,24 @@ console.log('\n[5] The fiscal year gates what can be posted');
 }
 {
   seed();
-  // Two years both marked open makes "which year does this sale belong to"
-  // ambiguous: getActive picks by StartDate DESC LIMIT 1, so postings meant
-  // for the old year silently land in the new one.
+  // The date-driven posting guard makes the LATEST open year the target for
+  // new (today-dated) documents, so a non-overlapping year may be opened
+  // beside the current one — that is how a shop records its backdated 2025
+  // operations. What must stay impossible is two open years covering the
+  // SAME date: that makes "which year does this posting belong to" ambiguous.
   const res = await raw('fiscalYear:create', {
-    YearName: '2027', StartDate: '2027-01-01', EndDate: '2027-12-31',
+    YearName: '2027', StartDate: '2026-06-01', EndDate: '2027-05-31',
   });
-  t('opening a second year while one is still open is refused',
+  t('opening a year that OVERLAPS the open one is refused',
     res?.success === false, JSON.stringify(res).slice(0, 75));
   t('so exactly one year is ever active',
     q("SELECT COUNT(*) v FROM fiscal_years WHERE Status='open'").v === 1,
     `${q("SELECT COUNT(*) v FROM fiscal_years WHERE Status='open'").v} open years`);
+  const past = await raw('fiscalYear:create', {
+    YearName: '2025', StartDate: '2025-01-01', EndDate: '2025-12-31',
+  });
+  t('a non-overlapping past year opens beside the current one (backdating)',
+    past?.success === true, JSON.stringify(past).slice(0, 75));
 }
 {
   seed();

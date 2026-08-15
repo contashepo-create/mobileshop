@@ -5,7 +5,7 @@ import { requireId } from '../../shared/validate';
 import { nextDocNumber } from '../database/docNumber';
 import { resolveSourceWarehouse, deductStock, deductStockAtCost, restoreStock, restoreStockAtCost, totalStock, planStockAllocation, recordValuationResidual } from '../database/stock';
 import type { StockShortage } from '../database/stock';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import { validateSettlement, suggestSettlement, money } from '../../shared/returnSettlement';
 
 /**
@@ -272,7 +272,8 @@ export function registerSalesHandlers() {
       const rawRemaining = money(effectiveTotal - paidAmount);
       const remaining = Math.abs(rawRemaining) < 0.01 ? 0 : rawRemaining;
 
-      const dateStr = businessToday();
+      const dateStr = resolveDocDate(data as any);
+      if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
       const saleNumber = nextDocNumber(db, 'sales', 'SaleNumber', 'SAL', dateStr);
 
       const status = remaining > 0 ? (paidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
@@ -516,7 +517,8 @@ export function registerSalesHandlers() {
     TransferCost?: number; TransferCostBearer?: 'shop' | 'party';
   }) => {
     const db = getDb();
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
 
     // === EVERY FIGURE COMES FROM THE ORIGINAL INVOICE, NOT THE CALLER ===
     //

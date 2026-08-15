@@ -32,6 +32,14 @@
  *   - the PERIOD was 366 days, so 2028-01-01 belonged to two fiscal years at
  *     once and a `BETWEEN StartDate AND EndDate` report counted it twice.
  *
+ * AND THE DATE HALF
+ * -----------------
+ * The year a document belongs to is a fact of its DATE. When the caller
+ * supplies a date the guard routes the document to the year that contains it
+ * (backdating), refuses a closed year, a future date, an invalid date and a
+ * period no fiscal year covers. When no date is supplied the document is dated
+ * today and the addressed year must contain today.
+ *
  * WHY THE CHECK IS TESTED THIS WAY
  * --------------------------------
  * The guard lives in `installIpcGuard`, which the handler harness deliberately
@@ -85,6 +93,21 @@ const ok = (label, cond, detail = '') => {
   if (!cond) failures.push(`${label}${detail ? ' — ' + detail : ''}`);
 };
 
+// The fixture is built around the CURRENT year so the "today" branches of the
+// guard are real regardless of when the suite is run. Year 1: the previous
+// year, closed. Year 2: the current year, open. Year 3: a NON-overlapping
+// past year (2019) opened beside the current one — the backdating case.
+// Year 4: an old closed year (2020).
+const now = new Date();
+const pad = (n) => String(n).padStart(2, '0');
+const Y = now.getFullYear();
+const YEAR_NAME = {
+  1: String(Y - 1),
+  2: String(Y),
+  3: '2019',
+  4: '2020',
+};
+
 // ---------------------------------------------------------------- extract
 /**
  * Pulls a named function out of a TypeScript file and compiles it.
@@ -119,7 +142,13 @@ if (!body) {
 
 const db = new DatabaseSync(':memory:');
 db.exec('CREATE TABLE fiscal_years (FiscalYearID INTEGER PRIMARY KEY, YearName TEXT, StartDate TEXT, EndDate TEXT, Status TEXT)');
-db.exec("INSERT INTO fiscal_years VALUES (1,'2026','2026-01-01','2026-12-31','closed'),(2,'2027','2027-01-01','2027-12-31','open')");
+db.exec(`
+  INSERT INTO fiscal_years VALUES
+    (1,'${YEAR_NAME[1]}','${Y - 1}-01-01','${Y - 1}-12-31','closed'),
+    (2,'${YEAR_NAME[2]}','${Y}-01-01','${Y}-12-31','open'),
+    (3,'${YEAR_NAME[3]}','${YEAR_NAME[3]}-01-01','${YEAR_NAME[3]}-12-31','open'),
+    (4,'${YEAR_NAME[4]}','${YEAR_NAME[4]}-01-01','${YEAR_NAME[4]}-12-31','closed')
+`);
 globalThis.__TEST_DB_FOR_GUARD__ = db;
 
 const dir = mkdtempSync(join(tmpdir(), 'fyguard-'));
@@ -154,7 +183,7 @@ console.log('\n── 1. a CLOSED year refuses every kind of document ──');
     if (r) {
       ok(`${channel} says WHY in Arabic`, /مغلقة/.test(r.message), r.message);
       ok(`${channel} carries a machine-readable code`, r.code === 'FISCAL_YEAR_CLOSED', r.code);
-      ok(`${channel} names the year`, /2026/.test(r.message), r.message);
+      ok(`${channel} names the year`, r.message.includes(YEAR_NAME[1]), r.message);
     }
   }
 
@@ -170,7 +199,8 @@ console.log('── 2. an OPEN year is untouched ──');
 // ===========================================================================
 {
   // A guard that refuses a legitimate operation is worse than the hole it
-  // closes. Every refusal above is paired with an acceptance here.
+  // closes. Every refusal above is paired with an acceptance here. Year 2 is
+  // the CURRENT year, so "today" lies inside its range.
   for (const channel of ['sales:create', 'purchases:create', 'vouchers:create',
     'advances:create', 'salaries:pay', 'transfers:create', 'maintenance:deliver']) {
     ok(`${channel} is allowed in an open year`,
@@ -204,15 +234,17 @@ console.log('── 3. a closed year is still fully READABLE ──');
 console.log('── 4. the guard does not invent refusals ──');
 // ===========================================================================
 {
-  // Anything it cannot resolve to a genuinely closed year must be passed on to
-  // the handler, which has the context to produce the right Arabic message.
+  // A payload the guard cannot resolve to a genuinely closed year is passed on
+  // to the handler, which has the context to produce the right Arabic message.
+  // (The one exception is a year id that is a real number but does not EXIST:
+  // the guard answers FISCAL_YEAR_MISSING directly, because a year the caller
+  // addressed that is not there is always an error worth stopping early.)
   const PASS_THROUGH = [
     ['no year in the payload', [{}]],
     ['no payload at all', []],
     ['a null payload', [null]],
     ['a primitive argument', [42]],
     ['an array argument', [[1, 2, 3]]],
-    ['a year id that does not exist', [{ fiscalYearId: 999 }]],
     ['a non-numeric year id', [{ fiscalYearId: 'BANANA' }]],
     ['a negative year id', [{ fiscalYearId: -1 }]],
     ['a zero year id', [{ fiscalYearId: 0 }]],
@@ -232,10 +264,70 @@ console.log('── 4. the guard does not invent refusals ──');
   ok('a numeric string year id is still caught',
     refuseClosedYear('sales:create', [{ fiscalYearId: '1' }]) !== null,
     'a <select> sends its value as a string');
+
+  // A year id that does not exist is refused with its own code.
+  const ghost = refuseClosedYear('sales:create', [{ fiscalYearId: 999 }]);
+  ok('a missing year id is refused, not silently posted into',
+    ghost !== null && ghost.code === 'FISCAL_YEAR_MISSING', JSON.stringify(ghost));
 }
 
 // ===========================================================================
-console.log('── 5. the new year created by a close is correct ──');
+console.log('── 5. a supplied DATE decides the year ──');
+// ===========================================================================
+{
+  // BACKDATING: a date inside the OPEN 2019 year (created beside the current
+  // one) must route the document there no matter what id the screen sent, and
+  // the payload must be rewritten so the handler stamps the right year.
+  const p = { fiscalYearId: 2, Date: '2019-06-15' };
+  const r = refuseClosedYear('vouchers:create', [p]);
+  ok('a backdated date into an open past year is allowed', r === null, JSON.stringify(r));
+  ok('the payload is rewritten to the year that contains the date',
+    p.fiscalYearId === 3 && p.FiscalYearID === 3,
+    `fiscalYearId ${p.fiscalYearId} / FiscalYearID ${p.FiscalYearID}`);
+
+  // BACKDATING INTO A CLOSED YEAR: refused, even though the caller pointed at
+  // the current (open) year — the date is authoritative.
+  const rc = refuseClosedYear('vouchers:create', [{ fiscalYearId: 2, Date: '2020-05-01' }]);
+  ok('a backdated date into a closed year is refused',
+    rc !== null && rc.code === 'FISCAL_YEAR_CLOSED', JSON.stringify(rc));
+
+  // A date whose period no year covers: refused with its own code.
+  const rm = refuseClosedYear('vouchers:create', [{ fiscalYearId: 2, Date: '2024-06-15' }]);
+  ok('a date no fiscal year covers is refused',
+    rm !== null && rm.code === 'FISCAL_YEAR_MISSING', JSON.stringify(rm));
+
+  // A malformed date: refused before it reaches any SQL.
+  const rd = refuseClosedYear('vouchers:create', [{ fiscalYearId: 2, Date: 'garbage' }]);
+  ok('a malformed date is refused',
+    rd !== null && rd.code === 'FISCAL_YEAR_DATE_INVALID', JSON.stringify(rd));
+
+  // A FUTURE date: refused (two days of tolerance absorb a fast clock).
+  const future = new Date(now);
+  future.setDate(future.getDate() + 3);
+  const futureStr = `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())}`;
+  const rf = refuseClosedYear('vouchers:create', [{ fiscalYearId: 2, Date: futureStr }]);
+  ok('a date in the future is refused',
+    rf !== null && rf.code === 'FISCAL_YEAR_FUTURE_DATE', JSON.stringify(rf));
+}
+
+// ===========================================================================
+console.log('── 6. without a date, the addressed year must contain TODAY ──');
+// ===========================================================================
+{
+  // The open 2019 year does not contain today: a stale screen pointing at it
+  // must be told to pick the right year, not write into the wrong period.
+  const r = refuseClosedYear('vouchers:create', [{ fiscalYearId: 3 }]);
+  ok('an open year that does not contain today is refused',
+    r !== null && r.code === 'FISCAL_YEAR_DATE_OUT_OF_RANGE', JSON.stringify(r));
+
+  // The current open year contains today: allowed (already covered in
+  // section 2, asserted here for the record).
+  ok('the current open year still accepts today-dated documents',
+    refuseClosedYear('vouchers:create', [{ fiscalYearId: 2 }]) === null);
+}
+
+// ===========================================================================
+console.log('── 7. the new year created by a close is correct ──');
 // ===========================================================================
 {
   // Reproduces the handler's own date arithmetic from the shipped source, so a
@@ -282,7 +374,7 @@ console.log('── 5. the new year created by a close is correct ──');
 }
 
 // ===========================================================================
-console.log('── 6. the guard is actually wired into the IPC path ──');
+console.log('── 8. the guard is actually wired into the IPC path ──');
 // ===========================================================================
 {
   // A guard nothing calls is a comment. This is the one text check in the

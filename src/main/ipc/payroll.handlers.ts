@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import { checkAmounts } from '../../shared/money';
 import { requireId, optionalText, optionalId, LIMITS } from '../../shared/validate';
 
@@ -221,7 +221,8 @@ export function registerPayrollHandlers() {
     const remaining = +(netSalary - alreadyPaid).toFixed(2);
     const paidAmount = data.PaidAmount !== undefined && data.PaidAmount > 0 ? Math.min(data.PaidAmount, remaining) : remaining;
     const status = paidAmount >= remaining - 0.001 ? 'paid' : 'partial';
-    const paymentDate = businessToday();
+    const paymentDate = resolveDocDate(data as any);
+    if (!paymentDate) return { success: false, message: 'تاريخ المستند غير صالح' };
 
     // Check sufficient balance before paying salary (unless negative cash allowed)
     const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
@@ -477,7 +478,8 @@ export function registerPayrollHandlers() {
     CashAccountID: number; userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
 
     // A negative advance ran the payment backwards: measured, Amount = -5000
     // ADDED 5,000 to the cash box while recording an advance to the employee.
@@ -561,7 +563,8 @@ export function registerPayrollHandlers() {
     Notes?: string; userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
-    const dateStr = businessToday();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
 
     // A negative deduction is a bonus nobody authorised.
     const badDed = checkAmounts([[data.Amount, 'مبلغ الخصم', { allowZero: false }]]);

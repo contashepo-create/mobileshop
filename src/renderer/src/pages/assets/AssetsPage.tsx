@@ -8,7 +8,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage, asRows } from '../../lib/ipc';
 import { escapeHtml as esc, safeNumber } from '../../../../shared/escapeHtml';
-import { printHeaderHtml, printFooterHtml, printHeaderCss } from '../../lib/printHeader';
+import { printHeaderHtml, printFooterHtml, printHeaderCss, printDocument } from '../../lib/printHeader';
 
 export function AssetsPage() {
   const { showToast } = useToastStore();
@@ -61,8 +61,6 @@ export function AssetsPage() {
 
   const handlePrintCashStatement = () => {
     if (!statementData?.operations?.length || !statementAccount) return;
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
     const rows = statementData.operations.map((op: any) => {
       return `<tr>
         <td style="text-align:center">${esc(op.Date)}</td>
@@ -109,6 +107,7 @@ export function AssetsPage() {
       '<div><div class="label">\u0627\u0644\u0646\u0648\u0639<\/div><div class="value">' + (statementAccount.AccountType === 'safe' ? '\u062E\u0632\u0646\u0629' : '\u0628\u0646\u0643') + '<\/div><\/div>',
       '<div><div class="label">\u0631\u0642\u0645 \u0627\u0644\u062D\u0633\u0627\u0628<\/div><div class="value">' + esc(statementAccount.AccountNumber || '\u2014') + '<\/div><\/div>',
       '<div><div class="label">\u0627\u0644\u0631\u0635\u064A\u062F \u0627\u0644\u062D\u0627\u0644\u064A<\/div><div class="value">' + safeNumber(statementAccount.Balance ?? 0) + '<\/div><\/div>',
+      '<div><div class="label">\u0627\u0644\u0631\u0635\u064A\u062F \u0627\u0644\u0627\u0641\u062A\u062A\u0627\u062D\u064A<\/div><div class="value">' + safeNumber(statementData.openingBalance || 0) + '<\/div><\/div>',
       '<\/div>',
       '<table>',
       '<tr><th width="12%">\u0627\u0644\u062A\u0627\u0631\u064A\u062E<\/th><th width="15%">\u0627\u0644\u0646\u0648\u0639<\/th><th>\u0627\u0644\u0637\u0631\u0641<\/th><th width="10%">\u0627\u0644\u0645\u0631\u062C\u0639<\/th><th width="13%">\u0648\u0627\u0631\u062F<\/th><th width="13%">\u0645\u0646\u0635\u0631\u0641<\/th><th width="13%">\u0627\u0644\u0631\u0635\u064A\u062F<\/th><\/tr>',
@@ -130,11 +129,9 @@ export function AssetsPage() {
       '<\/div>',
       printFooterHtml(settings, '\u0647\u0630\u0627 \u0627\u0644\u0643\u0634\u0641 \u0645\u0639\u062A\u0645\u062F \u0648\u0645\u0639\u062A\u0628\u0631'),
       '<\/div>',
-      "<script>window.print();window.onafterprint=()=>window.close();<\/script>",
       '<\/body><\/html>',
     ];
-    printWindow.document.write(html.join('\n'));
-    printWindow.document.close();
+    printDocument(html.join('\n'));
   };
 
   return (

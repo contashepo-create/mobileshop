@@ -2,7 +2,7 @@ import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
 import { safeFailure } from '../security/errorResponse';
 import { nextDocNumber } from '../database/docNumber';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import { checkAmounts } from '../../shared/money';
 import { oneOf, requireText, optionalText, optionalId, LIMITS } from '../../shared/validate';
 
@@ -125,7 +125,8 @@ export function registerServicesHandlers() {
     };
 
     try {
-      const dateStr = businessToday();
+      const dateStr = resolveDocDate(data as any);
+      if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
       const serviceNumber = nextDocNumber(db, 'service_sales', 'ServiceNumber', 'SRV', dateStr);
 
       const remaining = data.ChargeAmount - data.PaidAmount;

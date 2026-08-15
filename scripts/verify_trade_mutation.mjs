@@ -379,11 +379,11 @@ const MUTANTS = [
     why: 'the account exists, fills a seat, and can never sign in',
   },
   {
-    name: 'two fiscal years can be open at once',
+    name: 'two fiscal years can be open over the same dates',
     file: FY,
-    find: '    if (stillOpen) {',
+    find: '    if (overlapping) {',
     replace: '    if (false) {',
-    why: 'getActive picks one arbitrarily, so postings land in the wrong year',
+    why: 'two open years covering the same day make the posting year ambiguous',
   },
   {
     name: 'a negative money transfer runs the movement backwards',

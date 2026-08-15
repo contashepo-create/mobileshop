@@ -40,10 +40,13 @@ const MUTANTS = [
       if (closedYear) return closedYear;`,
     '',
   ]],
-  ['the guard never refuses anything', GUARD, [
-    `  if (!row || row.Status !== 'closed') return null;`,
-    `  if (!row || row.Status !== 'closed') return null;
-  return null;`,
+  ['the guard never refuses a closed year (no date)', GUARD, [
+    `  if (row.Status === 'closed') return refuseClosed(row, id);`,
+    `  if (row.Status === 'closed') return null;`,
+  ]],
+  ['the guard never refuses a closed year (explicit date)', GUARD, [
+    `    if (row.Status === 'closed') return refuseClosed(row, row.FiscalYearID ?? 0);`,
+    `    if (row.Status === 'closed') return null;`,
   ]],
   ['the guard stops recognising the FiscalYearID spelling', GUARD, [
     `    if (o.FiscalYearID !== undefined) { yearId = o.FiscalYearID; break; }`,
@@ -63,28 +66,31 @@ const MUTANTS = [
     `  if (!/:(create|update|delete|pay|unpay|issue|cancel|return|deliver|apply|settle|add)/i.test(channel)) {`,
     `  if (!/:(create)/i.test(channel)) {`,
   ]],
-  ['the guard refuses an unknown year id as well (over-reach)', GUARD, [
-    `  if (!row || row.Status !== 'closed') return null;`,
-    `  if (!row) return { success: false, code: 'FISCAL_YEAR_CLOSED', message: 'السنة المالية مغلقة' };
-  if (row.Status !== 'closed') return null;`,
+  ['the guard stops rewriting the payload to the date\'s year', GUARD, [
+    `    payload.fiscalYearId = row.FiscalYearID;
+    payload.FiscalYearID = row.FiscalYearID;`,
+    `    void row;`,
   ]],
-  // NOT A MUTANT — removing the `Number.isInteger` line is EQUIVALENT.
-  //
-  // It was tried and it SURVIVED, and the reason is worth recording rather
-  // than hiding behind a weakened assertion. Every value the line rejects is
-  // one that `Number()` turns into NaN, a negative, a zero or a fraction, and
-  // none of those can match a `FiscalYearID` — the lookup returns undefined
-  // and the guard passes the call through on the next line anyway. Verified
-  // for 'BANANA', {}, -1, 0 and 1.5.
-  //
-  // The line is therefore defence in depth, not behaviour: it keeps a hostile
-  // value away from the database instead of relying on the query to be
-  // harmless. Writing a test that fails when it is removed would mean
-  // asserting something the program does not actually do differently, which is
-  // the kind of check that makes a suite look strong and prove nothing.
-  //
-  //   ['the guard accepts a non-integer year id and refuses on it', GUARD, [
-  //     `  if (!Number.isInteger(id) || id <= 0) return null;`, '' ]],
+  ['the guard stops refusing future dates', GUARD, [
+    `  if (effectiveDate > limitStr) {`,
+    `  if (false) {`,
+  ]],
+  ['the guard stops refusing dates no year covers', GUARD, [
+    `    if (!row) {
+      return {
+        success: false,
+        code: 'FISCAL_YEAR_MISSING',
+        message: \`لا توجد سنة مالية تغطي تاريخ`,
+    `    if (false) {
+      return {
+        success: false,
+        code: 'FISCAL_YEAR_MISSING',
+        message: \`لا توجد سنة مالية تغطي تاريخ`,
+  ]],
+  ['the guard stops checking that today lies inside the addressed year', GUARD, [
+    `  if (today < (row.StartDate ?? '') || today > (row.EndDate ?? '')) {`,
+    `  if (false) {`,
+  ]],
   ['the refusal loses its machine-readable code', GUARD, [
     `    code: 'FISCAL_YEAR_CLOSED',`,
     `    code: 'HANDLER_ERROR',`,
@@ -123,13 +129,20 @@ for (const [label, file, [find, replace]] of MUTANTS) {
   const backup = file + '.mutbak';
   copyFileSync(file, backup);
   const src = readFileSync(file, 'utf8');
-  if (!src.includes(find)) {
+  // Windows checkouts hold CRLF line endings; the find/replace pairs below are
+  // written with LF. A multi-line mutant silently went stale ("target text
+  // absent") on a CRLF file while the same text matched on an LF file — so
+  // the patterns are adapted to the file's own ending before matching.
+  const adapt = (text) =>
+    src.includes('\r\n') ? text.replace(/\r?\n/g, '\r\n') : text.replace(/\r?\n/g, '\n');
+  const findText = adapt(find);
+  if (!src.includes(findText)) {
     console.log(`SKIP     ${label}\n         (target text absent — the mutant is stale)`);
     unlinkSync(backup);
     survived.push(label + '  [STALE MUTANT]');
     continue;
   }
-  writeFileSync(file, src.replace(find, replace), 'utf8');
+  writeFileSync(file, src.replace(findText, adapt(replace)), 'utf8');
   const passed = runSuite();
   copyFileSync(backup, file);
   unlinkSync(backup);

@@ -687,7 +687,6 @@ export function registerPurchasesHandlers() {
              settlement.transferCost, settlement.transferCostBearer);
 
       const returnId = result.lastInsertRowid;
-      let freightWrittenOff = 0;
 
       for (const item of verified) {
         // `LandedUnitCost` is what left the warehouse; `UnitCost` is what the

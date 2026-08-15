@@ -168,7 +168,7 @@ export function OpeningBalancePage() {
 
       {/* Edit table */}
       <div className="bg-white dark:bg-slate-800 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
-        <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">عدّل القيمة في عمود "الرصيد الجديد" ثم اضغط "حفظ التعديلات"</p>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">عدّل القيمة في عمود &quot;الرصيد الجديد&quot; ثم اضغط &quot;حفظ التعديلات&quot;</p>
 
         <DataTable
           columns={[

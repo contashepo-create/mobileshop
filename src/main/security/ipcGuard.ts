@@ -594,7 +594,7 @@ function refuseClosedYear(channel: string, args: unknown[]): { success: false; m
   try {
     // Synchronous require: this runs on the hot path of every write, and an
     // await here would leave the check racing the handler it is meant to gate.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     db = require('../database/connection').getDb();
   } catch {
     return null;   // no database yet (first run) — nothing to protect

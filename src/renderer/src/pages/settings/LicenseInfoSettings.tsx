@@ -134,10 +134,10 @@ export function LicenseInfoSettings() {
         <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-3">التواصل مع المطور</h3>
         <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">للتجديد أو الدعم الفني أو الحصول على كود تفعيل جديد:</p>
         <div className="flex gap-2 flex-wrap">
-          <a href={`https://wa.me/2${devPhone}`} target="_blank" className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 text-sm hover:bg-green-100 dark:hover:bg-green-900/30 transition-colors">
+          <a href={`https://wa.me/2${devPhone}`} target="_blank" className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 text-sm hover:bg-green-100 dark:hover:bg-green-900/30 transition-colors" rel="noreferrer">
             <Phone size={16} /> واتساب
           </a>
-          <a href={`https://t.me/+2${devPhone}`} target="_blank" className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-sm hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors">
+          <a href={`https://t.me/+2${devPhone}`} target="_blank" className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-sm hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors" rel="noreferrer">
             <Phone size={16} /> تليجرام
           </a>
           <a href={`mailto:${devEmail}`} className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 text-sm hover:bg-purple-100 dark:hover:bg-purple-900/30 transition-colors">

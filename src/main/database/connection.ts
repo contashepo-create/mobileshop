@@ -175,6 +175,7 @@ function escapeLoneBackslashes(text: string): string {
   try {
     const settings = JSON.parse(text);
     const p = (settings as { dbPath?: unknown } | null)?.dbPath;
+    // eslint-disable-next-line no-control-regex
     if (typeof p !== 'string' || !/[\u0000-\u001f]/.test(p)) return text;
   } catch {
     // Not valid JSON — treat every backslash as a literal separator below.

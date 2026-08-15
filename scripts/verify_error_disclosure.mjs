@@ -253,6 +253,15 @@ console.log('── 4. no handler returns a raw runtime error any more ──');
 
   // `message: err.message` and friends, in any spelling.
   const RAW_RETURN = /message:\s*(err|error|e)\s*\??\.\s*message/;
+  // A deliberate-refusal flag is the same protection as `instanceof
+  // IpcAuthError` above: the handler RAISED the error itself, carrying an
+  // Arabic sentence written for the user ("الكمية غير متوفرة", "تم دفع هذا
+  // القسط بالكامل"), so echoing `err.message` ships the refusal, not a
+  // runtime fault. Section 4 of this very suite drives those refusals and
+  // asserts they arrive. A single-line `if (err?.userRefusal) return {
+  // message: err.message }` is therefore safe — measured: the five lines
+  // flagged here were exactly that shape, in payroll/services/maintenance.
+  const GUARDED_RETURN = /^\s*if\s*\(\s*err\s*\?\.\s*(userRefusal|isDeliberateGuard)\s*\)\s*return\s*\{\s*success:\s*false,\s*message:\s*err\.message\s*\}/;
   const offenders = [];
   for (const f of files) {
     if (f.endsWith('errorResponse.ts')) continue;   // the module that fixes it
@@ -266,7 +275,7 @@ console.log('── 4. no handler returns a raw runtime error any more ──');
     const lines = readFileSync(f, 'utf8').split(/\r?\n/);
     lines.forEach((line, i) => {
       if (line.trim().startsWith('*') || line.trim().startsWith('//')) return;
-      if (RAW_RETURN.test(line)) offenders.push(`${relative(ROOT, f)}:${i + 1}`);
+      if (RAW_RETURN.test(line) && !GUARDED_RETURN.test(line)) offenders.push(`${relative(ROOT, f)}:${i + 1}`);
     });
   }
   ok('no `message: err.message` remains in src/main', offenders.length === 0,

@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
+import { localToday } from '../../lib/businessDay';
 
 /**
  * Standalone sales-returns page.
@@ -30,6 +31,7 @@ export function SalesReturnsPage() {
   const [returnSale, setReturnSale] = useState<any>(null);
   const [returnLines, setReturnLines] = useState<any[]>([]);
   const [returnReason, setReturnReason] = useState('');
+  const [returnDate, setReturnDate] = useState(localToday());
   const [returnCashAccountId, setReturnCashAccountId] = useState('');
   const [retAccountCredit, setRetAccountCredit] = useState('');
   const [retCashRefund, setRetCashRefund] = useState('');
@@ -74,6 +76,7 @@ export function SalesReturnsPage() {
     setReturnSale(sale);
     setReturnLines(open.map((l: any) => ({ ...l, ReturnQty: 0 })));
     setReturnReason('');
+    setReturnDate(localToday());
     setReturnCashAccountId(sale.CashAccountID ? String(sale.CashAccountID) : '');
     setRetAccountCredit(''); setRetCashRefund(''); setRetTransferRefund('');
     setRetPaymentMethodId(''); setRetTransferCost(''); setRetFeeBearer('shop');
@@ -121,6 +124,7 @@ export function SalesReturnsPage() {
         Quantity: Number(l.ReturnQty), UnitPrice: l.UnitPrice,
       })),
       Reason: returnReason || undefined,
+      Date: returnDate,
       AccountCredit: parseFloat(retAccountCredit) || 0,
       CashRefund: parseFloat(retCashRefund) || 0,
       TransferRefund: parseFloat(retTransferRefund) || 0,
@@ -319,9 +323,14 @@ export function SalesReturnsPage() {
             </table>
           </div>
 
-          <Input label="سبب الإرجاع" value={returnReason}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
-            placeholder="عيب مصنعي، رغبة العميل..." />
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="تاريخ المرتجع" type="date" value={returnDate}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnDate(e.target.value)}
+              hint="قابل للتعديل - يُقيَّد المرتجع في سنته المالية" />
+            <Input label="سبب الإرجاع" value={returnReason}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
+              placeholder="عيب مصنعي، رغبة العميل..." />
+          </div>
 
           {returnTotal > 0 && (
             <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-3 space-y-3">

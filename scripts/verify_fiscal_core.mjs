@@ -173,8 +173,23 @@ try {
     const cashOpen = q(db, 'SELECT Balance v FROM fiscal_year_openings WHERE FiscalYearID = ? AND AccountType = \'cash_account\' AND AccountID = 1', nxt.FiscalYearID);
     t('the cash balance was carried as the new year\'s opening', near(cashOpen?.v, 100000), JSON.stringify(cashOpen));
     const count = q(db, 'SELECT COUNT(*) v FROM fiscal_year_openings WHERE FiscalYearID = ?', nxt.FiscalYearID);
-    t('the opening snapshot covers every ACTIVE account (only the seeded cash account is active here)',
-      count.v === 1, `rows ${count.v}`);
+    t('the opening snapshot covers every family with a position (cash + the two equity rows here)',
+      count.v === 3, `rows ${count.v}`);
+    const retained = q(db, "SELECT Balance v FROM fiscal_year_openings WHERE FiscalYearID = ? AND AccountType = 'equity_retained'", nxt.FiscalYearID);
+    t('retained earnings are derived from the books (100000 - 0 - 0 here)',
+      near(retained?.v, 100000), JSON.stringify(retained));
+    const assets = q(db, `
+      SELECT COALESCE(SUM(Balance),0) v FROM fiscal_year_openings
+      WHERE FiscalYearID = ? AND AccountType IN ('cash_account','payment_method','customer','inventory','advance','supplier_credit','rent_advance_held')`, nxt.FiscalYearID);
+    const liabilities = q(db, `
+      SELECT COALESCE(SUM(Balance),0) v FROM fiscal_year_openings
+      WHERE FiscalYearID = ? AND AccountType IN ('supplier','employee','customer_credit','commission','rent_advance_collected')`, nxt.FiscalYearID);
+    const equity = q(db, `
+      SELECT COALESCE(SUM(Balance),0) v FROM fiscal_year_openings
+      WHERE FiscalYearID = ? AND AccountType IN ('equity_capital','equity_retained')`, nxt.FiscalYearID);
+    t('the closing document balances by construction (assets = liabilities + equity)',
+      near(assets.v, (liabilities.v ?? 0) + (equity.v ?? 0)),
+      `assets ${assets.v} / liab ${liabilities.v} / equity ${equity.v}`);
     const activeOpen = await call('fiscalYear:getActive');
     t('getActive exposes the opening balances', Array.isArray(activeOpen?.openingBalances) && activeOpen.openingBalances.length > 0,
       JSON.stringify(activeOpen?.openingBalances));

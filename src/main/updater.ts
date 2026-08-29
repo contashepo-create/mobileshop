@@ -29,6 +29,8 @@
 import { app, dialog, BrowserWindow, ipcMain, webContents } from 'electron';
 import electronUpdater from 'electron-updater';
 import { getDeviceId } from './security/deviceId';
+import { getDb } from './database/connection';
+import { snapshotBeforeUpdate } from './database/schemaVersion';
 import { checkForCodeUpdatesNow, applyStagedCode, isCodeUpdateStaged } from './codeUpdate';
 
 /** Base URL of the developer's Cloudflare Worker (licensed updates). */
@@ -205,6 +207,23 @@ export function startUpdater(): void {
   autoUpdater.on('update-downloaded', (info) => {
     downloaded = true;
     console.log('[Updater] a newer version is ready and will install on restart');
+
+    // The database lives outside the install directory, so the reinstall never
+    // touches a byte of it. But the NEW build runs its schema migrations on the
+    // file at first launch, and the owner has not asked for any backup. Take
+    // one now, silently, even though we are not forced to: "restore later if
+    // the update fails" is only possible if there is something to restore from.
+    //
+    // Best-effort by design — a full disk must not block the notification that
+    // an update is ready. `migrateWithSafetyNet` takes its own `pre_upgrade_v*`
+    // snapshot before migrating anyway; this is the second, independent copy.
+    try {
+      const snap = snapshotBeforeUpdate(getDb(), app.getPath('userData'), app.getVersion());
+      if (snap) console.log('[Updater] pre-update database snapshot:', snap);
+    } catch (err) {
+      console.log('[Updater] pre-update snapshot skipped:', (err as Error).message);
+    }
+
     broadcast({ state: 'downloaded', version: info?.version });
     if (notified) return;         // tell them once, not every six hours
     notified = true;

@@ -449,8 +449,9 @@ console.log('── 5b. services and payroll — the party must exist ──');
 // ===========================================================================
 {
   const svcBase = {
-    Provider: 'vodafone', TargetPhone: '01000000000', Amount: 50, ServiceCost: 0,
+    Provider: 'vodafone', TargetPhone: '01000000000', PaidToProvider: 50,
     ChargeAmount: 55, PaymentMethod: 'cash', PaidAmount: 55, CashAccountID: 1,
+    ReceiveAccountType: 'cash_account', ReceiveAccountID: 1,
     userId: 1, fiscalYearId: 1,
   };
   // The type is printed on the list screen through `typeLabels[type] || type`

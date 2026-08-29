@@ -14,7 +14,7 @@ export function registerFiscalYearHandlers() {
     const active = db.prepare("SELECT * FROM fiscal_years WHERE Status = 'open' ORDER BY StartDate DESC LIMIT 1").get() as any;
     if (!active) return null;
     const openingBalances = db.prepare(
-      'SELECT AccountType, AccountID, Balance FROM fiscal_year_openings WHERE FiscalYearID = ? ORDER BY AccountType, AccountID'
+      'SELECT OpeningID, AccountType, AccountID, Name, Balance FROM fiscal_year_openings WHERE FiscalYearID = ? ORDER BY AccountType, AccountID'
     ).all(active.FiscalYearID);
     return { ...active, openingBalances };
   });
@@ -141,47 +141,157 @@ export function registerFiscalYearHandlers() {
       );
       const newFyId = Number(inserted.lastInsertRowid);
 
-      // Carry the current balances into the new year as its OPENING BALANCES.
+      // Carry the current balances into the new year as its OPENING BALANCES
+      // — the CLOSING DOCUMENT.
       //
       // The balances are stored, cumulative columns, so they already continue
       // across the boundary — this is the written snapshot of what the new
       // year started with, account by account, taken inside the same
       // transaction that closed the old year. The statements recompute the
       // true opening from movements (a late entry in a reopened year must
-      // still reach the year that follows), but the document the owner asked
-      // for — "the balances are carried over as the new year's opening" — is
-      // this: one row per cash account, payment method, customer and supplier.
+      // still reach the year that follows); these rows are the record the
+      // owner asked for, nothing the reports ever read.
+      //
+      // Every family mirrors the SAME query the balance sheet uses
+      // (`reports:financialPosition`), so the document equals the report, and
+      // the closing figure for retained earnings is derived — assets minus
+      // liabilities minus capital — which makes the written document balance
+      // by construction, exactly as the report asserts with `isBalanced`.
+      const totalAssetsWritten = () => db.prepare(`
+        SELECT COALESCE(SUM(Balance),0) as total FROM fiscal_year_openings
+        WHERE FiscalYearID = ? AND AccountType IN
+          ('cash_account','payment_method','customer','inventory','advance','supplier_credit','rent_advance_held')
+      `).get(newFyId) as any;
+      const totalLiabilitiesWritten = () => db.prepare(`
+        SELECT COALESCE(SUM(Balance),0) as total FROM fiscal_year_openings
+        WHERE FiscalYearID = ? AND AccountType IN
+          ('supplier','employee','customer_credit','commission','rent_advance_collected')
+      `).get(newFyId) as any;
+
+      // 1. Liquid assets — every active vault/bank and wallet/terminal.
       db.prepare(`
-        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Balance)
-        SELECT ?, 'cash_account', CashAccountID, Balance FROM cash_accounts WHERE IsActive = 1
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'cash_account', CashAccountID, AccountName, Balance FROM cash_accounts WHERE IsActive = 1
       `).run(newFyId);
       db.prepare(`
-        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Balance)
-        SELECT ?, 'payment_method', PaymentMethodID, Balance FROM payment_methods WHERE IsActive = 1
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'payment_method', PaymentMethodID, MethodName, Balance FROM payment_methods WHERE IsActive = 1
+      `).run(newFyId);
+
+      // 2. Customers and suppliers, split by direction. Money owed to us is an
+      //    asset, money we owe is a liability — the same split the balance
+      //    sheet makes (`Balance > 0` asset on the customer side, `Balance < 0`
+      //    credit owed back to the customer as a liability, and the supplier
+      //    side mirrored).
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'customer', CustomerID, Name, Balance FROM customers WHERE Balance > 0
       `).run(newFyId);
       db.prepare(`
-        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Balance)
-        SELECT ?, 'customer', CustomerID, Balance FROM customers
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'customer_credit', CustomerID, Name, ABS(Balance) FROM customers WHERE Balance < 0
       `).run(newFyId);
       db.prepare(`
-        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Balance)
-        SELECT ?, 'supplier', SupplierID, Balance FROM suppliers
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'supplier', SupplierID, Name, Balance FROM suppliers WHERE Balance > 0
       `).run(newFyId);
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'supplier_credit', SupplierID, Name, ABS(Balance) FROM suppliers WHERE Balance < 0
+      `).run(newFyId);
+
+      // 3. Inventory valued at cost. Serialised items are valued at the sum of
+      //    the devices' OWN costs, ordinary items at Quantity × CostPrice, and
+      //    a serialised item received without an IMEI falls back to the
+      //    warehouse valuation — the only complete figure. Mirrors `valueOf`
+      //    in reports:financialPosition exactly.
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'inventory', i.ItemID, i.ItemName,
+               CASE WHEN i.IsSerialized = 1
+                      AND NOT EXISTS (SELECT 1 FROM purchase_details pd
+                                      WHERE pd.ItemID = i.ItemID AND (pd.IMEI IS NULL OR pd.IMEI = ''))
+                    THEN (SELECT COALESCE(SUM(CostPrice),0) FROM item_serials
+                          WHERE ItemID = i.ItemID AND Status = 'available')
+                    ELSE (SELECT COALESCE(SUM(CostPrice * Quantity),0) FROM stock_quantities
+                          WHERE ItemID = i.ItemID)
+               END
+        FROM items i
+        WHERE i.IsActive = 1
+          AND ((SELECT COALESCE(SUM(Quantity),0) FROM stock_quantities WHERE ItemID = i.ItemID) > 0
+               OR (SELECT COUNT(*) FROM item_serials WHERE ItemID = i.ItemID AND Status = 'available') > 0)
+      `).run(newFyId);
+
+      // 4. Employee money. Cash advanced and not yet recovered is an ASSET;
+      //    commissions earned but not yet paid are a LIABILITY; the net salary
+      //    the shop owes its staff (positive `employees.Balance`) is a
+      //    liability. Each is written per employee.
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'advance', a.EmployeeID, e.Name, SUM(a.Amount)
+        FROM employee_advances a JOIN employees e ON a.EmployeeID = e.EmployeeID
+        WHERE a.IsDeducted = 0 GROUP BY a.EmployeeID
+      `).run(newFyId);
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'commission', c.EmployeeID, e.Name, SUM(c.Amount)
+        FROM commissions c JOIN employees e ON c.EmployeeID = e.EmployeeID
+        WHERE c.IsPaid = 0 GROUP BY c.EmployeeID
+      `).run(newFyId);
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'employee', EmployeeID, Name, Balance
+        FROM employees WHERE IsActive = 1 AND Balance > 0
+      `).run(newFyId);
+
+      // 5. Rent advances. Money advanced on an expense contract is still an
+      //    asset until applied to an instalment; money collected on an income
+      //    contract is still owed until applied — the mirror.
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'rent_advance_held', RentID, RentName, AdvanceBalance
+        FROM rents WHERE RentType = 'expense' AND COALESCE(AdvanceBalance,0) > 0
+      `).run(newFyId);
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        SELECT ?, 'rent_advance_collected', RentID, RentName, AdvanceBalance
+        FROM rents WHERE RentType = 'income' AND COALESCE(AdvanceBalance,0) > 0
+      `).run(newFyId);
+
+      // 6. Equity, frozen as a record. Capital is the owner's paid-in figure;
+      //    retained earnings are whatever the books above it account for —
+      //    assets minus liabilities minus capital. Derived like this, the
+      //    written document satisfies the accounting identity by construction,
+      //    the same identity `reports:financialPosition` asserts live. These
+      //    rows are documentation only: the report keeps computing equity from
+      //    movements, never from this snapshot.
+      const capitalSetting = db.prepare("SELECT Value FROM settings WHERE Key = 'owner_capital'").get() as any;
+      const explicitCapital = capitalSetting ? (parseFloat(capitalSetting.Value) || 0) : 0;
+      const retainedEarnings = totalAssetsWritten().total - totalLiabilitiesWritten().total - explicitCapital;
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        VALUES (?, 'equity_capital', 1, 'رأس المال', ?)
+      `).run(newFyId, explicitCapital);
+      db.prepare(`
+        INSERT INTO fiscal_year_openings (FiscalYearID, AccountType, AccountID, Name, Balance)
+        VALUES (?, 'equity_retained', 1, 'الأرباح المحتجزة', ?)
+      `).run(newFyId, retainedEarnings);
     })();
 
     return { success: true };
   });
 
-  // The opening-balance snapshot a year started with (one row per cash
-  // account, payment method, customer and supplier, taken when it was created
-  // by closing the year before it).
+  // The opening-balance snapshot a year started with (the closing document
+  // written when it was created by closing the year before it — liquid assets,
+  // customers and suppliers, inventory, employee advances and commissions,
+  // rent advances, and the equity position).
   ipcMain.handle('fiscalYear:openings', async (_event, fiscalYearId: number) => {
     if (!Number.isInteger(fiscalYearId)) {
       return { success: false, message: 'معرف السنة المالية غير صالح' };
     }
     const db = getDb();
     const openings = db.prepare(
-      'SELECT AccountType, AccountID, Balance FROM fiscal_year_openings WHERE FiscalYearID = ? ORDER BY AccountType, AccountID'
+      'SELECT OpeningID, AccountType, AccountID, Name, Balance FROM fiscal_year_openings WHERE FiscalYearID = ? ORDER BY AccountType, AccountID'
     ).all(fiscalYearId);
     return { success: true, openings };
   });

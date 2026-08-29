@@ -7,6 +7,7 @@ import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
+import { localToday } from '../../lib/businessDay';
 
 interface CartItem {
   uid: string; // unique per cart entry, stable across add/remove
@@ -37,6 +38,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
   const [returnSale, setReturnSale] = useState<any>(null);
   const [returnLines, setReturnLines] = useState<any[]>([]);
   const [returnReason, setReturnReason] = useState('');
+  const [returnDate, setReturnDate] = useState(localToday());
   const [returnCashAccountId, setReturnCashAccountId] = useState('');
   // How the return value is settled: on account / cash / transfer.
   const [retAccountCredit, setRetAccountCredit] = useState('');
@@ -66,6 +68,14 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
   const [cashAccountId, setCashAccountId] = useState('');
   const [paymentMethodId, setPaymentMethodId] = useState('');
   const [notes, setNotes] = useState('');
+  // The document date, editable on every save: a shop can enter yesterday's
+  // invoice, or a batch of past-dated invoices, and each one lands in the
+  // fiscal year its date belongs to.
+  const [saleDate, setSaleDate] = useState(localToday());
+  // Kept so an EDIT that leaves the date untouched does not redeclare the
+  // document: an unchanged date is omitted from the payload, which keeps
+  // closed-year invoices editable exactly as before.
+  const [editingOriginalDate, setEditingOriginalDate] = useState<string | null>(null);
 
   const [selectedItem, setSelectedItem] = useState('');
   const [selectedSerial, setSelectedSerial] = useState('');
@@ -232,6 +242,10 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
       const channel = editingSaleId ? 'sales:update' : 'sales:create';
       const result = await window.api.invoke(channel, {
         ...(editingSaleId ? { SaleID: editingSaleId } : {}),
+        // An edit that keeps the original date sends no Date at all, so a
+        // closed-year invoice stays editable; only a genuine date change is
+        // declared (and must land in an open year — enforced server-side).
+        Date: editingSaleId && editingOriginalDate === saleDate ? undefined : saleDate,
         CustomerID: selectedCustomer ? parseInt(selectedCustomer) : undefined,
         CustomerName: customer?.Name || customerName || undefined,
         CustomerPhone: customer?.Phone || customerPhone || undefined,
@@ -286,6 +300,8 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
     setDiscount(''); setPaidAmount(''); setCashAccountId(''); setPaymentMethodId(''); setNotes('');
     setTransferCost('');
     setFeeBearer('shop');
+    setSaleDate(localToday());
+    setEditingOriginalDate(null);
     setEditingSaleId(null);
   };
 
@@ -391,6 +407,8 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
     if (!res?.sale) { showToast('error', 'تعذّر تحميل الفاتورة'); return; }
     const { sale, details } = res;
     setEditingSaleId(saleId);
+    setSaleDate(sale.Date || localToday());
+    setEditingOriginalDate(sale.Date || null);
     setSelectedCustomer(sale.CustomerID ? String(sale.CustomerID) : '');
     setCustomerName(sale.CustomerName || '');
     setCustomerPhone(sale.CustomerPhone || '');
@@ -478,6 +496,7 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
         Quantity: Number(l.ReturnQty), UnitPrice: l.UnitPrice,
       })),
       Reason: returnReason || undefined,
+      Date: returnDate,
       // The settlement the user chose. The server validates that the three
       // parts add up to the return value before touching any balance.
       AccountCredit: parseFloat(retAccountCredit) || 0,
@@ -659,6 +678,10 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
         </>}
       >
         <div className="space-y-4">
+          <div className="grid grid-cols-3 gap-3">
+            <Input label="تاريخ الفاتورة" type="date" value={saleDate} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSaleDate(e.target.value)} hint="قابل للتعديل - تُوثَّق الفاتورة بهذا التاريخ" />
+          </div>
+
           {/* Customer */}
           <div className="grid grid-cols-3 gap-3">
             <Select label="العميل" value={selectedCustomer} onChange={(e) => setSelectedCustomer(e.target.value)}>
@@ -952,9 +975,15 @@ export function SalesPage({ mode }: { mode?: 'sales' | 'returns' } = {}) {
             </table>
           </div>
 
-          <Input label="سبب الإرجاع" value={returnReason}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
-            placeholder="عيب مصنعي، رغبة العميل..." />
+          <div className="grid grid-cols-3 gap-3">
+            <Input label="تاريخ المرتجع" type="date" value={returnDate}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnDate(e.target.value)} />
+            <div className="col-span-2">
+              <Input label="سبب الإرجاع" value={returnReason}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
+                placeholder="عيب مصنعي، رغبة العميل..." />
+            </div>
+          </div>
 
           {/* --- How the value is settled. Chosen, not computed. --- */}
           {returnTotal > 0 && (

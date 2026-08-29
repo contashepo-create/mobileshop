@@ -66,6 +66,9 @@ export const CURRENT_SCHEMA_VERSION = 2;
 /** How many pre-upgrade snapshots to keep before pruning the oldest. */
 const KEEP_SNAPSHOTS = 5;
 
+/** How many pre-update snapshots to keep before pruning the oldest. */
+const KEEP_UPDATE_SNAPSHOTS = 3;
+
 export function readSchemaVersion(db: Database.Database): number {
   try {
     const row = db.pragma('user_version', { simple: true });
@@ -122,6 +125,68 @@ function pruneSnapshots(dir: string): void {
       try { fs.unlinkSync(path.join(dir, old.f)); } catch { /* ignore */ }
     }
   } catch { /* pruning is best-effort and must never block an upgrade */ }
+}
+
+/**
+ * Keeps the most recent pre-update snapshots and removes the rest.
+ *
+ * Same exact-pattern language as `pruneSnapshots`, on its own prefix so the
+ * two lifecycles never delete each other.
+ */
+function pruneUpdateSnapshots(dir: string): void {
+  try {
+    const mine = fs.readdirSync(dir)
+      .filter(f => /^pre_update_[\d.]+_\d{8}T\d{6}\.db$/.test(f))
+      .map(f => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.t - a.t);
+    for (const old of mine.slice(KEEP_UPDATE_SNAPSHOTS)) {
+      try { fs.unlinkSync(path.join(dir, old.f)); } catch { /* ignore */ }
+    }
+  } catch { /* pruning is best-effort */ }
+}
+
+/**
+ * Takes a timestamped snapshot of the database — synchronously, WAL-safely —
+ * into the userData backups folder, BEFORE an application update is applied.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The application update itself never touches the database file: the database
+ * lives OUTSIDE the install directory (userData), so reinstalling or swapping
+ * app.asar does not move a byte of it. The danger is the NEXT LAUNCH, when the
+ * new build runs its schema migrations on that file. `migrateWithSafetyNet`
+ * already snaps a `pre_upgrade_v*` copy before migrating and restores it on
+ * failure — but only when the schema version actually changed. This function
+ * gives the owner a second, independent copy taken from the OLD build, before
+ * the update is applied, whatever the new build's schema does. "Restore if the
+ * original is lost" does not have to be discovered in a panic: the file is
+ * already there, in the same backups folder the app already watches.
+ *
+ * BEST-EFFORT ON PURPOSE: an update must not be blocked (or even shown as
+ * failed) because a snapshot could not be written. The caller decides whether
+ * a pre-update copy is a requirement of that particular operation.
+ *
+ * Synchronous `VACUUM INTO`, for the same reason `migrateWithSafetyNet` uses
+ * it: the file is complete when this function returns, and the guarantee is
+ * that the copy exists BEFORE the update is applied.
+ */
+export function snapshotBeforeUpdate(
+  db: Database.Database,
+  userDataDir: string,
+  appVersion: string,
+): string | null {
+  const dir = snapshotDir(userDataDir);
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '');
+  const safeVersion = String(appVersion || '0').replace(/[^\w.-]/g, '_');
+  const target = path.join(dir, `pre_update_${safeVersion}_${stamp}.db`);
+  try {
+    db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+  } catch (err) {
+    console.error('[DB] could not take a pre-update snapshot:', err);
+    return null;
+  }
+  pruneUpdateSnapshots(dir);
+  return target;
 }
 
 export interface UpgradeReport {

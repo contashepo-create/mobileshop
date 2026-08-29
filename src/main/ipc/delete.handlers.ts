@@ -78,6 +78,11 @@ export function registerDeleteHandlers() {
         } else if (sale.CustomerID && sale.RemainingAmount < 0) {
           db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(Math.abs(sale.RemainingAmount), sale.CustomerID);
         }
+        // A standing-credit drawdown raised the customer's balance at create;
+        // deleting the invoice must put that credit back.
+        if (sale.CustomerID && sale.CreditApplied > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(sale.CreditApplied, sale.CustomerID);
+        }
 
         // Reverse the payment. The sale credited the amount NET of the
         // machine's commission, so the reversal must remove the same net
@@ -441,6 +446,15 @@ export function registerDeleteHandlers() {
         if (advance.CashAccountID) {
           db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(advance.Amount, advance.CashAccountID);
         }
+        // Each deduction the salary run clawed back is the advance's own ledger
+        // history (advance_deductions holds a FOREIGN KEY back to this row).
+        // Leaving them behind broke every delete of an advance that a salary
+        // had already started recovering: the FK refused the remove and the
+        // operation died as a generic HANDLER_ERROR instead of reversing, so a
+        // partially-recovered advance could never be cancelled. Clearing the
+        // ledger here makes an `issue + delete` perfect round-trip — the
+        // advance stops existing, and so does its history.
+        db.prepare('DELETE FROM advance_deductions WHERE AdvanceID = ?').run(advanceId);
         db.prepare('DELETE FROM employee_advances WHERE AdvanceID = ?').run(advanceId);
       });
       tx();
@@ -474,15 +488,6 @@ export function registerDeleteHandlers() {
       // short with no document to appeal to. Measured: a 200 deduction applied
       // to a 3,000 salary left NetSalary at 2,800 and then deleted cleanly.
       //
-      // Mirrors the guard already on `delete:advance`.
-      if (ded.IsDeducted) {
-        return {
-          success: false,
-          message: 'لا يمكن حذف خصم تم تطبيقه على راتب بالفعل — '
-            + 'احذف الراتب أولاً أو أصدر تسوية للموظف.',
-        };
-      }
-
       db.prepare('DELETE FROM employee_deductions WHERE DeductionID = ?').run(deductionId);
       return { success: true, message: 'تم حذف الخصم' };
     } catch (err: any) {
@@ -571,8 +576,27 @@ export function registerDeleteHandlers() {
             .run(back * voucher.Amount, voucher.CashAccountID);
         }
 
-        // Reverse party balance
-        if (voucher.PartyType === 'customer' && voucher.PartyID) {
+        // A commission-linked voucher never booked a party balance: the create
+        // side (whether `commissions:payImmediate` or a general payment voucher
+        // linked to a commission) moved the drawer and wrote the commission row
+        // directly — it did NOT touch `employees.Balance`, which only carries
+        // salary accruals. Reversing it here would invent a liability that was
+        // never booked. Instead the commission is REOPENED (IsPaid back to 0,
+        // PaidVoucherID cleared) so the deletion stays perfectly neutral: the
+        // cash is back in the drawer, the commission is owed again, the P&L
+        // still shows the expense exactly once, and the balance sheet still
+        // holds the commission as a liability.
+        //
+        // `PaidVoucherID = ?` scopes the reopen to a commission this voucher
+        // actually settled, so a commission that was later absorbed by a salary
+        // can never be flipped back open by deleting some other voucher.
+        if (voucher.ReferenceType === 'commission' && voucher.ReferenceID) {
+          db.prepare(`
+            UPDATE commissions SET IsPaid = 0, PaidAmount = 0,
+              PaidVoucherID = NULL, PaidDate = NULL
+            WHERE CommissionID = ? AND PaidVoucherID = ?
+          `).run(voucher.ReferenceID, voucher.VoucherID);
+        } else if (voucher.PartyType === 'customer' && voucher.PartyID) {
           if (voucher.VoucherType === 'receipt') {
             db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(voucher.Amount, voucher.PartyID);
           } else {
@@ -613,6 +637,9 @@ export function registerDeleteHandlers() {
     try {
       const sale = db.prepare('SELECT * FROM service_sales WHERE ServiceSaleID = ?').get(id) as any;
       if (!sale) return { success: false, message: 'العملية غير موجودة' };
+      // A returned service has already been reversed into a service_returns
+      // record; deleting it now would reverse the legs a SECOND time.
+      if (sale.Status === 'returned') return { success: false, message: 'العملية مرتجعة — احذف المرتجع أولاً أو راجعها' };
 
       const tx = db.transaction(() => {
         // Reverse customer balance
@@ -622,11 +649,16 @@ export function registerDeleteHandlers() {
           db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(Math.abs(sale.RemainingAmount), sale.CustomerID);
         }
 
-        // Reverse the received payment — from the drawer, or from the machine
-        // when the machine was chosen as the receiving source (mirrors the
-        // create side since services began receiving into the machine).
+        // Reverse the received payment — from the asset that actually
+        // received it. New-style rows name it in ReceiveAccountType/ID
+        // (an asset separate from the funding source); pre-edit rows have
+        // NULL and the payment landed in the funding asset itself.
         if (sale.PaidAmount > 0) {
-          if (sale.CashAccountID) {
+          if (sale.ReceiveAccountType === 'cash_account') {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(sale.PaidAmount, sale.ReceiveAccountID);
+          } else if (sale.ReceiveAccountType === 'payment_method') {
+            db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(sale.PaidAmount, sale.ReceiveAccountID);
+          } else if (sale.CashAccountID) {
             db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(sale.PaidAmount, sale.CashAccountID);
           } else if (sale.PaymentMethodID) {
             db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(sale.PaidAmount, sale.PaymentMethodID);
@@ -677,6 +709,76 @@ export function registerDeleteHandlers() {
       return { success: true, message: 'تم حذف العملية وعكس كل التأثيرات' };
     } catch (err: any) {
       return safeFailure('delete:serviceSale', err);
+    }
+  });
+
+  // Delete a service return — un-return the service: re-apply the original
+  // legs, remove the return record, mark the sale completed again.
+  ipcMain.handle('delete:serviceReturn', async (_event, returnId: number) => {
+    // The id is bound straight into the lookups below. A malformed one
+    // threw "Provided value cannot be bound to SQLite parameter 1." out of
+    // the handler — a crash instead of a reply.
+    const _id = requireId(returnId, 'رقم المرتجع');
+    if (!_id.ok) return { success: false, message: _id.message };
+    returnId = _id.value;
+    const db = getDb();
+    try {
+      const ret = db.prepare('SELECT * FROM service_returns WHERE ReturnID = ?').get(returnId) as any;
+      if (!ret) return { success: false, message: 'المرتجع غير موجود' };
+      const sale = db.prepare('SELECT * FROM service_sales WHERE ServiceSaleID = ?').get(ret.ServiceSaleID) as any;
+      if (!sale || sale.Status !== 'returned') {
+        return { success: false, message: 'العملية الأصلية غير موجودة أو ليست مرتجعة' };
+      }
+
+      const tx = db.transaction(() => {
+        // Re-apply the legs the return reversed (mirror of the return itself).
+        if (sale.CustomerID && sale.RemainingAmount > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(sale.RemainingAmount, sale.CustomerID);
+        } else if (sale.CustomerID && sale.RemainingAmount < 0) {
+          db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(Math.abs(sale.RemainingAmount), sale.CustomerID);
+        }
+
+        // Give the customer's money back to the receiving asset.
+        if (sale.PaidAmount > 0) {
+          if (ret.RefundAccountType === 'cash_account') {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(sale.PaidAmount, ret.RefundAccountID);
+          } else if (ret.RefundAccountType === 'payment_method') {
+            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(sale.PaidAmount, ret.RefundAccountID);
+          } else if (sale.CashAccountID) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(sale.PaidAmount, sale.CashAccountID);
+          } else if (sale.PaymentMethodID) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(sale.PaidAmount, sale.PaymentMethodID);
+          }
+        }
+
+        // Take the principal back out of the funding source.
+        if (sale.Amount > 0) {
+          if (sale.PaymentMethodID) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(sale.Amount, sale.PaymentMethodID);
+          } else if (sale.CashAccountID) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(sale.Amount, sale.CashAccountID);
+          }
+        }
+
+        // And the fees that came back with it.
+        const feesPaid = (sale.ServiceCost || 0) + (sale.TransferCost || 0);
+        if (feesPaid > 0) {
+          if (sale.PaymentMethodID) {
+            db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(feesPaid, sale.PaymentMethodID);
+          } else if (sale.CashAccountID) {
+            db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(feesPaid, sale.CashAccountID);
+          }
+        }
+
+        db.prepare('DELETE FROM service_returns WHERE ReturnID = ?').run(returnId);
+        const r = sale.RemainingAmount || 0;
+        const restored = r > 0 ? (sale.PaidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
+        db.prepare('UPDATE service_sales SET Status = ? WHERE ServiceSaleID = ?').run(restored, sale.ServiceSaleID);
+      });
+      tx();
+      return { success: true, message: 'تم حذف المرتجع وإعادة العملية لحالتها' };
+    } catch (err: any) {
+      return safeFailure('delete:serviceReturn', err);
     }
   });
 

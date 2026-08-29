@@ -66,7 +66,7 @@ const r2 = (n: unknown): number => Math.round((Number(n) || 0) * 100) / 100;
 const GUARDED_PREFIXES = [
   'sales:', 'saleReturns:', 'purchases:', 'purchaseReturns:',
   'maintenance:', 'delete:', 'vouchers:', 'transfers:', 'warehouseTransfers:',
-  'services:', 'payroll:', 'salaries:', 'advances:', 'deductions:',
+  'services:', 'payroll:', 'salaries:', 'advances:', 'deductions:', 'commissions:',
   'settlements:', 'openingBalances:', 'stock:', 'items:',
   // 'rent:' was listed here and matched NOTHING: every channel in
   // rent.handlers.ts is 'rents:' or 'rentPayments:'. One missing letter

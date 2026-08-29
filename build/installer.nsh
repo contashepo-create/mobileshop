@@ -34,6 +34,7 @@
 var DbDataDir          ; the chosen data directory ('' = let the app default)
 var DbDataDirHwnd      ; directory textbox control handle
 var DbDataDirBrowse    ; Browse button control handle
+var DbDataDirTouched   ; 1 once the owner edited/browsed the directory in THIS install
 
 ; ---------------------------------------------------------------------------
 ; customPageAfterChangeDir — one page: "أين تحفظ بيانات المحل؟"
@@ -66,6 +67,7 @@ FunctionEnd
 
 ; Remembers the text the user typed, so it survives a browse round-trip.
 Function DbDataDir_OnChange
+  StrCpy $DbDataDirTouched 1
   ${NSD_GetText} $DbDataDirHwnd $DbDataDir
 FunctionEnd
 
@@ -74,6 +76,7 @@ Function DbDataDir_OnBrowse
   nsDialogs::SelectFolderDialog "اختر مجلد بيانات النظام" "$DbDataDir"
   Pop $0
   ${If} $0 != "error"
+    StrCpy $DbDataDirTouched 1
     StrCpy $DbDataDir "$0"
     ; Update both the stored value and the text on screen.
     ${NSD_SetText} $DbDataDirHwnd "$0"
@@ -95,6 +98,19 @@ FunctionEnd
 ; decodes it as UTF-16LE (FileWriteUTF16LE) — the installer is a Unicode NSIS
 ; build, and the app's reader is BOM-aware to accept either encoding.
 ;
+; PRESERVATION (upgrade safety): an existing <INSTDIR>\db_settings.json was
+; written by a previous build with the folder the shop actually uses — the
+; real database lives there. Overwriting it with this page's default
+; ($APPDATA) on an upgrade would silently move the app's data path and ORPHAN
+; the shop's database (it would look "missing" while still sitting intact in
+; the old folder). So:
+;   * file exists AND owner did NOT touch the folder this run -> never rewrite
+;     (keep the old path verbatim);
+;   * file exists AND owner actively chose a folder -> rewrite (intent);
+;   * no file (fresh install, page shown) -> write the chosen folder;
+;   * no file and $DbDataDir was never set (silent install) -> write nothing,
+;     the app falls back to its own writable default.
+;
 ; BACKSLASH ESCAPING: JSON requires backslashes in string values to be
 ; doubled (\\). The NSIS FileWriteUTF16LE writes the string literally, so
 ; we must replace every \ with \\ before embedding the path in the JSON.
@@ -102,34 +118,51 @@ FunctionEnd
 ; the configured path.
 ; ---------------------------------------------------------------------------
 !macro customInstall
-  ${If} $DbDataDir != ""
-    CreateDirectory "$DbDataDir"
-    ; Escape backslashes for valid JSON
-    StrCpy $1 "$DbDataDir"
-    StrCpy $2 ""
-    StrCpy $3 0
-    loop_start:
-      StrCpy $4 $1 1 $3
-      ${If} $4 == ""
-        Goto loop_end
-      ${EndIf}
-      ${If} $4 == "\"
-        StrCpy $2 "$2\\"
-      ${Else}
-        StrCpy $2 "$2$4"
-      ${EndIf}
-      IntOp $3 $3 + 1
-      Goto loop_start
-    loop_end:
-    ClearErrors
-    FileOpen $0 "$INSTDIR\db_settings.json" w
-    FileWriteUTF16LE $0 '{"dbPath":"$2\\mobile_shop.db"}'
-    FileClose $0
+  ${If} ${FileExists} "$INSTDIR\db_settings.json"
+    ; Upgrade over an existing install. The old file is authoritative unless
+    ; the owner edited the directory in THIS installer run.
+    ${If} $DbDataDirTouched != 0
+      Call DbDataDir_WriteSettings
+    ${EndIf}
+  ${Else}
+    ; Fresh install. Write the page's folder when the owner typed one; silent
+    ; installs keep '' so the first launch falls back to the app default.
+    ${If} $DbDataDir != ""
+      Call DbDataDir_WriteSettings
+    ${EndIf}
   ${EndIf}
 
   ; Force-create desktop shortcut (electron-builder sometimes skips it
   ; on per-user installs without elevation)
   CreateShortCut "$DESKTOP\MobileShopERP.lnk" "$INSTDIR\MobileShopERP.exe" "" "" 0
 !macroend
+
+Function DbDataDir_WriteSettings
+  ${If} $DbDataDir == ""
+    Return
+  ${EndIf}
+  CreateDirectory "$DbDataDir"
+  ; Escape backslashes for valid JSON
+  StrCpy $1 "$DbDataDir"
+  StrCpy $2 ""
+  StrCpy $3 0
+  loop_start:
+    StrCpy $4 $1 1 $3
+    ${If} $4 == ""
+      Goto loop_end
+    ${EndIf}
+    ${If} $4 == "\"
+      StrCpy $2 "$2\\"
+    ${Else}
+      StrCpy $2 "$2$4"
+    ${EndIf}
+    IntOp $3 $3 + 1
+    Goto loop_start
+  loop_end:
+  ClearErrors
+  FileOpen $0 "$INSTDIR\db_settings.json" w
+  FileWriteUTF16LE $0 '{"dbPath":"$2\\mobile_shop.db"}'
+  FileClose $0
+FunctionEnd
 
 !endif ; !ifndef BUILD_UNINSTALLER

@@ -138,18 +138,21 @@ console.log('\n[2] The rules are enforced where they cannot be bypassed');
 }
 
 // ---------------------------------------------------------------- 3
-console.log('\n[3] Personal data leaves the machine only with consent');
+console.log('\n[3] A new shop is always reported to the developer (no consent step)');
 {
   const s = code('src/main/ipc/settings.handlers.ts');
   const n = code('src/main/security/resetNotify.ts');
   const w = code('src/renderer/src/pages/setup/FirstRunWizard.tsx');
 
-  t('the consent choice is stored', /'registration_consent':/.test(s));
-  t('nothing is sent unless it was given',
-    /if \(company\.shareWithDeveloper\)[\s\S]{0,300}notifyDeveloperOfRegistration/.test(s));
-  t('the wizard asks for it explicitly', /shareWithDeveloper/.test(w));
-  t('and states that no business data is ever sent',
-    /لا تُرسل أي بيانات عن عملائك/.test(w));
+  // The consent checkbox was REMOVED by design: the developer needs to know
+  // which shops exist to support them, the message is profile-only (never
+  // customers, balances or invoices), and an offline shop is simply not
+  // registered until a later launch. The registration key is still stored for
+  // the privacy list and the devices screen.
+  t('the registration flag is still recorded', /'registration_consent':/.test(s));
+  t('the send is unconditional — no consent branch',
+    /notifyDeveloperOfRegistration\(/.test(s) && !/if \(company\.shareWithDeveloper\)/.test(s));
+  t('the wizard no longer asks for consent', !/shareWithDeveloper/.test(w));
 
   // Sending must never be able to break or delay a completed setup.
   t('the send is fire-and-forget', /void notifyDeveloperOfRegistration/.test(s));

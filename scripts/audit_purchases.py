@@ -232,7 +232,7 @@ report("nextDocNumber(db, 'purchases'" in PUR,
        'purchase numbers come from a monotonic sequence')
 report('blockIfReferenced' in DEL and 'purchase_returns WHERE PurchaseID' in DEL,
        'a purchase with returns or vouchers cannot be deleted')
-report('businessToday()' in PUR,
+report('resolveDocDate(' in PUR or 'businessToday()' in PUR,
        "dates use the shop's local calendar")
 report('catch (err: any)' in PUR,
        'failures return a message rather than an opaque throw')

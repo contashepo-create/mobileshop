@@ -290,7 +290,7 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
     sale: 'فاتورة مبيعات', purchase: 'فاتورة مشتريات',
     maintenance: 'فاتورة صيانة', voucher_receipt: 'سند قبض',
     voucher_payment: 'سند صرف', statement: 'كشف حساب',
-    sale_return: 'مرتجع مبيعات',
+    sale_return: 'مرتجع مبيعات', service: 'إيصال خدمة',
   };
 
   const showCustomer = companyInfo.invoice_show_customer !== '0';
@@ -371,6 +371,23 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
         <div class="total-row grand"><span>الرصيد:</span><span>${num(invoiceData.netBalance)} ${esc(companyInfo.currency || 'ج.م')}</span></div>
       </div>
     `;
+  } else if (type === 'service' && invoiceData) {
+    // A service receipt is a money case, not an item list. The customer's copy
+    // shows only what the shop charges them, the provider and the destination
+    // number — never the profit or any internal figures.
+    itemsHTML = `
+      <div class="voucher-box">
+        ${invoiceData.serviceType ? `<div class="voucher-desc">النوع: ${esc(invoiceData.serviceType)}</div>` : ''}
+        ${invoiceData.provider ? `<div class="voucher-desc">المزوّد: ${esc(invoiceData.provider)}</div>` : ''}
+        ${invoiceData.targetPhone ? `<div class="voucher-desc">رقم الوجهة: ${esc(invoiceData.targetPhone)}</div>` : ''}
+        <div class="voucher-amount">المحصَّل من العميل: <strong>${num(invoiceData.chargeAmount ?? invoiceData.amount ?? 0)} ${esc(companyInfo.currency || 'ج.م')}</strong></div>
+        <div class="voucher-desc">المدفوع من العميل: ${num(invoiceData.paidAmount || 0)}</div>
+        ${(Number(invoiceData.remainingAmount) || 0) > 0
+          ? `<div class="voucher-desc">المتبقي على العميل: ${num(invoiceData.remainingAmount)}</div>` : ''}
+        ${invoiceData.returned ? `<div class="invoice-notes">عملية مرتجعة</div>` : ''}
+      </div>
+    `;
+    totalsHTML = '';
   }
 
   const partyInfo = showCustomer && invoiceData ? `
@@ -449,7 +466,7 @@ function generateInvoiceHTML(data: any, autoPrint: boolean): string {
       */ ''}
       ${profile.headerText ? `<div class="doc-header-text">${esc(profile.headerText)}</div>` : ''}
       <div class="invoice-meta">
-        <span>رقم: ${esc(invoiceData?.saleNumber || invoiceData?.purchaseNumber || invoiceData?.ticketNumber || invoiceData?.voucherNumber || invoiceData?.returnNumber || '—')}</span>
+        <span>رقم: ${esc(invoiceData?.saleNumber || invoiceData?.purchaseNumber || invoiceData?.ticketNumber || invoiceData?.voucherNumber || invoiceData?.returnNumber || invoiceData?.serviceNumber || '—')}</span>
         <span>التاريخ: ${esc(invoiceData?.date || invoiceData?.Date || businessToday())}</span>
       </div>
       ${partyInfo}

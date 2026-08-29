@@ -10,9 +10,29 @@ import { useToastStore } from '../../components/ui/Toast';
 const accountTypeLabels: Record<string, string> = {
   cash_account: 'خزينة/بنك',
   payment_method: 'ماكينة/محفظة',
-  customer: 'عميل',
-  supplier: 'مورد',
+  customer: 'عميل مدين',
+  customer_credit: 'ائتمان عميل',
+  supplier: 'التزام مورد',
+  supplier_credit: 'رصيد مورد علينا',
+  inventory: 'المخزون',
+  advance: 'سلفة موظف',
+  commission: 'عمولة غير مسددة',
+  employee: 'رواتب مستحقة',
+  rent_advance_held: 'سلفة إيجار مدفوعة',
+  rent_advance_collected: 'سلفة إيجار محصلة',
+  equity_capital: 'رأس المال',
+  equity_retained: 'الأرباح المحتجزة',
 };
+
+// The same families the closing document writes — used to total the opening
+// balances the way a balance sheet reads: assets must equal liabilities plus
+// equity, and the difference shown is that self-check.
+const ASSET_TYPES = new Set(['cash_account', 'payment_method', 'customer', 'inventory', 'advance', 'supplier_credit', 'rent_advance_held']);
+const LIABILITY_TYPES = new Set(['supplier', 'employee', 'customer_credit', 'commission', 'rent_advance_collected']);
+const EQUITY_TYPES = new Set(['equity_capital', 'equity_retained']);
+
+const sumBy = (rows: any[], types: Set<string>) =>
+  rows.filter((r) => types.has(r.AccountType)).reduce((s, r) => s + Number(r.Balance || 0), 0);
 
 export function FiscalYearPage() {
   const { showToast } = useToastStore();
@@ -162,16 +182,38 @@ export function FiscalYearPage() {
           {openings.length === 0 ? (
             <p className="text-center text-slate-500 py-6">لا توجد أرصدة افتتاحية مسجلة لهذه السنة (تُلتقط عند إقفال السنة السابقة)</p>
           ) : (
-            <DataTable
-              columns={[
-                { key: 'AccountType', title: 'النوع', render: (r) => <Badge variant="blue">{accountTypeLabels[r.AccountType] || r.AccountType}</Badge> },
-                { key: 'AccountID', title: 'المعرف', render: (r) => <span className="font-mono text-xs">{r.AccountID}</span> },
-                { key: 'Balance', title: 'الرصيد الافتتاحي', render: (r) => <span className="font-bold">{Number(r.Balance || 0).toFixed(2)}</span> },
-              ]}
-              data={openings}
-              keyField="AccountID"
-              emptyMessage="لا توجد بيانات"
-            />
+            <>
+              {(() => {
+                const sumAssets = sumBy(openings, ASSET_TYPES);
+                const sumLiabilities = sumBy(openings, LIABILITY_TYPES);
+                const sumEquity = sumBy(openings, EQUITY_TYPES);
+                const difference = sumAssets - sumLiabilities - sumEquity;
+                const balanced = Math.abs(difference) < 0.01;
+                return (
+                  <div className="mb-3 grid grid-cols-2 gap-2 rounded-xl border border-slate-200 dark:border-slate-700 p-3 bg-slate-50 dark:bg-slate-800/40">
+                    <div className="text-sm"><span className="text-slate-500 dark:text-slate-400">الأصول:</span> <b>{sumAssets.toFixed(2)}</b></div>
+                    <div className="text-sm"><span className="text-slate-500 dark:text-slate-400">الالتزامات:</span> <b>{sumLiabilities.toFixed(2)}</b></div>
+                    <div className="text-sm"><span className="text-slate-500 dark:text-slate-400">حقوق الملكية:</span> <b>{sumEquity.toFixed(2)}</b></div>
+                    <div className="text-sm">
+                      <span className="text-slate-500 dark:text-slate-400">الفرق:</span>{' '}
+                      <Badge variant={balanced ? 'green' : 'red'}>{difference.toFixed(2)}</Badge>{' '}
+                      <span className="text-slate-400 text-xs">{balanced ? 'متوازنة' : 'غير متوازن'}</span>
+                    </div>
+                  </div>
+                );
+              })()}
+              <DataTable
+                columns={[
+                  { key: 'AccountType', title: 'النوع', render: (r) => <Badge variant="blue">{accountTypeLabels[r.AccountType] || r.AccountType}</Badge> },
+                  { key: 'Name', title: 'الاسم', render: (r) => <span className="font-medium">{r.Name || '—'}</span> },
+                  { key: 'AccountID', title: 'المعرف', render: (r) => <span className="font-mono text-xs">{r.AccountID}</span> },
+                  { key: 'Balance', title: 'الرصيد الافتتاحي', render: (r) => <span className="font-bold">{Number(r.Balance || 0).toFixed(2)}</span> },
+                ]}
+                data={openings}
+                keyField="OpeningID"
+                emptyMessage="لا توجد بيانات"
+              />
+            </>
           )}
         </div>
       </Modal>

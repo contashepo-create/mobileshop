@@ -3,7 +3,7 @@ import { getDb } from '../database/connection';
 import { requireId } from '../../shared/validate';
 import { checkAmount } from '../../shared/money';
 import { getCallerUserId } from '../security/ipcGuard';
-import { businessToday } from '../../shared/businessDate';
+import { businessToday, resolveDocDate } from '../../shared/businessDate';
 import { applyToInstalment, moveCash, checkFunds, remainingOn } from './rentSettle';
 
 /**
@@ -262,7 +262,7 @@ export function registerRentHandlers() {
    */
   ipcMain.handle('rentPayments:pay', async (_event, data: {
     RentPaymentID: number; CashAccountID?: number; PaymentMethodID?: number;
-    Amount?: number; userId: number; fiscalYearId: number; Notes?: string;
+    Amount?: number; userId: number; fiscalYearId: number; Notes?: string; Date?: string;
   }) => {
     const db = getDb();
     // The id is bound straight into the lookup below; an absent or
@@ -299,7 +299,7 @@ export function registerRentHandlers() {
         db,
         rentPaymentId: data.RentPaymentID,
         amount,
-        txnDate: businessToday(),
+        txnDate: resolveDocDate(data as any) ?? businessToday(),
         cashAccountId: data.CashAccountID ?? null,
         paymentMethodId: data.PaymentMethodID ?? null,
         sourceType: 'rent',
@@ -385,7 +385,7 @@ export function registerRentHandlers() {
   ipcMain.handle('rents:addAdvance', async (_event, data: {
     RentID: number; Amount: number;
     CashAccountID?: number; PaymentMethodID?: number;
-    userId?: number; fiscalYearId?: number; Notes?: string;
+    userId?: number; fiscalYearId?: number; Notes?: string; Date?: string;
   }) => {
     const db = getDb();
     // The id is bound straight into the lookup below; an absent or
@@ -406,7 +406,7 @@ export function registerRentHandlers() {
     const shortfall = checkFunds(db, rent.RentType, data.Amount, data.CashAccountID, data.PaymentMethodID);
     if (shortfall) return { success: false, message: shortfall };
 
-    const now = businessToday();
+    const now = resolveDocDate(data as any) ?? businessToday();
     db.transaction(() => {
       db.prepare('UPDATE rents SET AdvanceBalance = COALESCE(AdvanceBalance,0) + ? WHERE RentID = ?')
         .run(data.Amount, data.RentID);

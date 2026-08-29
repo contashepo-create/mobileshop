@@ -358,7 +358,7 @@ console.log('── 5. real handlers, driven to failure ──');
     ['transfers:create bogus type', () => call('transfers:create',
       { FromType: {}, FromID: 1, ToType: 'cash_account', ToID: 2, Amount: 10, TransferCost: 0, TransferCostSource: 'separate', userId: 1, fiscalYearId: 1 })],
     ['serviceSales:create bogus amount', () => call('serviceSales:create',
-      { ServiceType: 'balance_transfer', Provider: 'vodafone', TargetPhone: '0100', Amount: {}, ServiceCost: 0, ChargeAmount: 1, PaymentMethod: 'cash', PaidAmount: 1, CashAccountID: 1, userId: 1, fiscalYearId: 1 })],
+      { ServiceType: 'balance_transfer', Provider: 'vodafone', TargetPhone: '0100', PaidToProvider: {}, ChargeAmount: 1, PaymentMethod: 'cash', PaidAmount: 1, CashAccountID: 1, userId: 1, fiscalYearId: 1 })],
     ['vouchers:create bogus party', () => call('vouchers:create',
       { VoucherType: 'receipt', PartyType: 'customer', PartyID: {}, Description: 'x', CashAccountID: 1, Amount: 1, userId: 1, fiscalYearId: 1 })],
     ['maintenance:receive bogus customer', () => call('maintenance:receive',

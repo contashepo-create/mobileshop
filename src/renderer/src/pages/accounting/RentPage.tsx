@@ -8,6 +8,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage } from '../../lib/ipc';
 import { currentUserId } from '../../stores/auth.store';
+import { localToday } from '../../lib/businessDay';
 import { AssetPicker, splitAssetValue, useAssets } from '../../components/shared/AssetPicker';
 
 /**
@@ -43,8 +44,10 @@ export function RentPage() {
   const [selectedRent, setSelectedRent] = useState<any>(null);
   const [payAsset, setPayAsset] = useState('');
   const [payAmount, setPayAmount] = useState('');
+  const [payDate, setPayDate] = useState(localToday());
   const [advAsset, setAdvAsset] = useState('');
   const [advAmount, setAdvAmount] = useState('');
+  const [advDate, setAdvDate] = useState(localToday());
   const [showAdvModal, setShowAdvModal] = useState(false);
   const { assets, reload: reloadAssets } = useAssets();
   const [genCount, setGenCount] = useState('12');
@@ -140,6 +143,7 @@ export function RentPage() {
       RentPaymentID: selectedPayment.RentPaymentID,
       ...splitAssetValue(payAsset),
       Amount: amount,
+      Date: payDate,
       userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
@@ -150,7 +154,7 @@ export function RentPage() {
       : 'تم دفع القسط بالكامل');
     setShowPayModal(false);
     setSelectedPayment(null);
-    setPayAsset(''); setPayAmount('');
+    setPayAsset(''); setPayAmount(''); setPayDate(localToday());
     reloadAssets();
     fetchData();
   };
@@ -165,6 +169,7 @@ export function RentPage() {
       RentID: selectedRent.RentID,
       Amount: amount,
       ...splitAssetValue(advAsset),
+      Date: advDate,
       userId: currentUserId(),
       fiscalYearId: activeFy?.FiscalYearID,
     });
@@ -172,7 +177,7 @@ export function RentPage() {
     if (isFailure(reply)) { showToast('error', failureMessage(reply)); return; }
     showToast('success', reply?.message || 'تم تسجيل المقدم');
     setShowAdvModal(false);
-    setAdvAsset(''); setAdvAmount('');
+    setAdvAsset(''); setAdvAmount(''); setAdvDate(localToday());
     reloadAssets();
     fetchData();
   };
@@ -540,6 +545,9 @@ export function RentPage() {
             </div>
             <Input label="مبلغ المقدم" type="number" value={advAmount}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAdvAmount(e.target.value)} />
+            <Input label="تاريخ المقدم" type="date" value={advDate}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAdvDate(e.target.value)}
+              hint="قابل للتعديل - يُقيَّد في سنته المالية" />
             <AssetPicker
               label={selectedRent.RentType === 'income' ? 'المبلغ يدخل إلى' : 'المبلغ يخرج من'}
               assets={assets} value={advAsset} onChange={setAdvAsset} />
@@ -567,6 +575,9 @@ export function RentPage() {
                 (selectedPayment.Amount || 0) - (selectedPayment.PaidAmount || 0))})`}
               type="number" value={payAmount}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPayAmount(e.target.value)} />
+            <Input label="تاريخ الدفع" type="date" value={payDate}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPayDate(e.target.value)}
+              hint="قابل للتعديل - يُقيَّد الدفع في سنته المالية" />
             <AssetPicker
               label={selectedPayment.RentType === 'income' ? 'المبلغ يدخل إلى' : 'المبلغ يخرج من'}
               assets={assets} value={payAsset} onChange={setPayAsset} />

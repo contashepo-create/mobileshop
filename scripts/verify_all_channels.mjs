@@ -182,7 +182,7 @@ const P = {
   'advances:create': [{ EmployeeID: 1, Amount: 100, CashAccountID: 1, Reason: 'سلفة', userId: 1, fiscalYearId: 1 }],
   'deductions:create': [{ EmployeeID: 1, Amount: 50, Reason: 'absence', userId: 1, fiscalYearId: 1 }],
   'serviceSales:list': [{}], 'serviceSales:get': [1],
-  'serviceSales:create': [{ ServiceType: 'balance_transfer', Provider: 'vodafone', TargetPhone: '0100', Amount: 50, ServiceCost: 0, ChargeAmount: 55, PaymentMethod: 'cash', PaidAmount: 55, CashAccountID: 1, userId: 1, fiscalYearId: 1 }],
+  'serviceSales:create': [{ ServiceType: 'balance_transfer', Provider: 'vodafone', TargetPhone: '0100', PaidToProvider: 50, ChargeAmount: 55, PaymentMethod: 'cash', PaidAmount: 55, CashAccountID: 1, ReceiveAccountType: 'cash_account', ReceiveAccountID: 1, userId: 1, fiscalYearId: 1 }],
   'transfers:list': [{}],
   'transfers:create': [{ FromType: 'cash_account', FromID: 1, ToType: 'payment_method', ToID: 1, Amount: 100, TransferCost: 0, TransferCostSource: 'separate', userId: 1, fiscalYearId: 1 }],
   'settlements:list': [{}], 'settlements:apply': [{ items: [], userId: 1, fiscalYearId: 1 }],
@@ -212,7 +212,8 @@ const SKIP = new Set([
   'remote:sync', 'remote:checkNow', 'license:activate', 'license:deactivate',
   'phone:verify', 'recovery:requestCode', 'recovery:resetPassword',
   'users:resetByDev', 'users:adminResetPassword', 'print:invoice', 'print:preview',
-  'setup:initialize', 'setup:complete', 'update:check', 'update:install',
+  'setup:initialize', 'setup:complete', 'setup:importDatabase',
+  'update:check', 'update:install',
   'dev:login', 'dev:loginSigned', 'dev:challenge', 'dev:logout',
   'app:restart', 'app:quit',
 ]);

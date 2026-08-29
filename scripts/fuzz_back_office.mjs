@@ -104,14 +104,16 @@ async function opDeleteVoucher() {
 }
 async function opService() {
   const amount = between(50, 2000);
+  const paid = rnd() < 0.7 ? r2(amount + between(5, 30)) : 0;
   await call('serviceSales:create', {
     ServiceType: 'balance_transfer', Provider: 'vodafone', TargetPhone: '0100',
     CustomerID: pick([1, 2]), CustomerName: 'A', CustomerPhone: '0100',
-    PaymentMethod: 'cash', Notes: '', Amount: amount,
-    ServiceCost: between(0, 10), TransferCost: between(0, 10),
+    PaymentMethod: paid ? 'cash' : 'credit', Notes: '', PaidToProvider: amount,
     ChargeAmount: r2(amount + between(5, 30)), Date: '2026-07-30',
-    PaidAmount: rnd() < 0.7 ? r2(amount + between(5, 30)) : 0,
+    PaidAmount: paid,
     CashAccountID: 1, PaymentMethodID: rnd() < 0.4 ? 1 : undefined,
+    ReceiveAccountType: paid ? 'cash_account' : undefined,
+    ReceiveAccountID: paid ? 1 : undefined,
     fiscalYearId: 1, userId: 1,
   });
 }
@@ -338,14 +340,18 @@ async function checkInvariants(opening) {
     }
   }
 
-  // Document arithmetic: paid + remaining must equal the total.
+  // Document arithmetic: paid + remaining must equal the total. A sale can
+  // additionally settle part of it from the customer's STANDING CREDIT — money
+  // they had deposited earlier and are now spending down — so that portion is
+  // its own column and counts toward the total exactly like a payment.
   for (const [table, total, paid, rem] of [
     ['sales', 'TotalAmount', 'PaidAmount', 'RemainingAmount'],
     ['purchases', 'TotalAmount', 'PaidAmount', 'RemainingAmount'],
     ['service_sales', 'ChargeAmount', 'PaidAmount', 'RemainingAmount'],
   ]) {
+    const credit = table === 'sales' ? ' + COALESCE(CreditApplied,0)' : '';
     const n = one(
-      `SELECT COUNT(*) v FROM ${table} WHERE ABS(COALESCE(${paid},0) + COALESCE(${rem},0) - COALESCE(${total},0)) > 0.011`,
+      `SELECT COUNT(*) v FROM ${table} WHERE ABS(COALESCE(${paid},0)${credit} + COALESCE(${rem},0) - COALESCE(${total},0)) > 0.011`,
     ).v;
     if (n) bad.push(`${table}: paid + remaining != total on ${n} rows`);
   }

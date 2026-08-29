@@ -74,6 +74,7 @@ export function registerSalesHandlers() {
     TransferCostBearer?: 'shop' | 'customer';
     CashAccountID?: number; PaymentMethodID?: number;
     Notes?: string; userId: number; fiscalYearId: number;
+    Date?: string;
   }) => {
     const db = getDb();
 
@@ -253,10 +254,11 @@ export function registerSalesHandlers() {
         const cust = db.prepare('SELECT Balance FROM customers WHERE CustomerID = ?').get(data.CustomerID) as any;
         const custBalance = Number(cust?.Balance) || 0;
         if (custBalance < 0) {
-          // Customer has a credit — apply it to this invoice
+          // Customer has a credit — apply it to this invoice. The balance is
+          // written where it can roll back with the rest of the sale, not here:
+          // applied OUTSIDE the transaction it survived a later stock refusal
+          // and permanently erased money the shop still owed.
           creditApplied = Math.min(Math.abs(custBalance), totalAmount);
-          // Reduce the customer's credit by the applied amount
-          db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(creditApplied, data.CustomerID);
         }
       }
 
@@ -272,8 +274,7 @@ export function registerSalesHandlers() {
       const rawRemaining = money(effectiveTotal - paidAmount);
       const remaining = Math.abs(rawRemaining) < 0.01 ? 0 : rawRemaining;
 
-      const dateStr = resolveDocDate(data as any);
-      if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
+const dateStr = resolveDocDate(data as any) ?? businessToday();
       const saleNumber = nextDocNumber(db, 'sales', 'SaleNumber', 'SAL', dateStr);
 
       const status = remaining > 0 ? (paidAmount > 0 ? 'partial' : 'unpaid') : 'completed';
@@ -330,6 +331,12 @@ export function registerSalesHandlers() {
       };
 
       const tx = db.transaction(() => {
+        // Reduce the customer's credit by what was applied to this invoice,
+        // INSIDE the transaction so a refusal below rolls it back too.
+        if (creditApplied > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(creditApplied, data.CustomerID);
+        }
+
         // === RE-CHECK STOCK, NOW THAT THE WRITE LOCK IS HELD ===
         //
         // The validation above ran BEFORE this transaction opened, so nothing
@@ -368,14 +375,17 @@ export function registerSalesHandlers() {
         const result = db.prepare(`
           INSERT INTO sales (SaleNumber, FiscalYearID, Date, CustomerID, CustomerName, CustomerPhone,
             Subtotal, Discount, TaxRate, TaxAmount, TotalAmount, PaidAmount, RemainingAmount,
+            CreditApplied,
             PaymentMethod, CashAccountID, PaymentMethodID, Status, UserID, Notes,
             TransferCost, TransferCostBearer)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           saleNumber, data.fiscalYearId, dateStr,
           data.CustomerID ?? null, data.CustomerName ?? null, data.CustomerPhone ?? null,
           subtotal, data.Discount, data.TaxRate, data.TaxAmount, totalAmount,
-          paidAmount, remaining, data.PaymentMethod,
+          paidAmount, remaining,
+          creditApplied,
+          data.PaymentMethod,
           cashAccountId, paymentMethodId,
           // Stored as a NUMBER in its own column so the P&L can charge it as a
           // cost. `Notes` keeps only what the user actually typed.
@@ -482,7 +492,7 @@ export function registerSalesHandlers() {
       });
 
       tx();
-      return { success: true, saleNumber, totalAmount, paidAmount, remaining, status };
+      return { success: true, saleNumber, totalAmount: effectiveTotal, paidAmount, remaining, status };
     } catch (err: any) {
       // A refusal is a normal outcome, not a fault: the transaction rolled back
       // and nothing was written.
@@ -943,6 +953,7 @@ export function registerSalesHandlers() {
     TransferCost?: number; TransferCostBearer?: 'shop' | 'customer';
     CashAccountID?: number; PaymentMethodID?: number;
     Notes?: string; userId: number;
+    Date?: string;
   }) => {
     const _sid = requireId(data?.SaleID, 'رقم الفاتورة');
     if (!_sid.ok) return { success: false, message: _sid.message };
@@ -954,6 +965,18 @@ export function registerSalesHandlers() {
       if (original.IsVoided) return { success: false, message: 'الفاتورة ملغاة - لا يمكن تعديلها' };
       if ((original.Source ?? 'direct') === 'maintenance') {
         return { success: false, message: 'فاتورة صيانة - عدّلها من شاشة الصيانة' };
+      }
+
+      // The update keeps the ORIGINAL date unless the caller deliberately
+      // declares a new one — `Date` is present only when it genuinely changed,
+      // so an edit that leaves the date alone cannot drift it to today, and a
+      // closed-year invoice stays editable. A declared date must be well-formed
+      // and land in an open year (the fiscal guard enforces the latter).
+      const dateStr = data.Date
+        ? resolveDocDate(data as any)
+        : (original.Date ? String(original.Date) : null);
+      if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        return { success: false, message: 'تاريخ المستند غير صالح' };
       }
 
       const linked = [
@@ -1039,7 +1062,20 @@ export function registerSalesHandlers() {
       // residue under one piastre is settled, not owed.
       const subtotal = money(rawSubtotal);
       const totalAmount = money(subtotal - discountIn + taxIn + customerBorneFee);
-      const rawRemaining = money(totalAmount - paidIn);
+
+      // Mirror of `sales:create`'s credit drawdown: a customer with a standing
+      // credit (negative balance) settles part of the invoice from it. Without
+      // this the edit dropped the credit and silently re-invoiced at full price.
+      let creditApplied = 0;
+      if (data.CustomerID) {
+        const cust = db.prepare('SELECT Balance FROM customers WHERE CustomerID = ?').get(data.CustomerID) as any;
+        const custBalance = Number(cust?.Balance) || 0;
+        if (custBalance < 0) {
+          creditApplied = Math.min(Math.abs(custBalance), totalAmount);
+        }
+      }
+      const effectiveTotal = money(totalAmount - creditApplied);
+      const rawRemaining = money(effectiveTotal - paidIn);
       const remaining = Math.abs(rawRemaining) < 0.01 ? 0 : rawRemaining;
       const status = remaining > 0 ? (paidIn > 0 ? 'partial' : 'unpaid') : 'completed';
 
@@ -1084,12 +1120,18 @@ export function registerSalesHandlers() {
             if (wh) restoreStockAtCost(db, line.ItemID, wh, line.Quantity, line.UnitCost || 0);
           }
         }
+        // Reverse the ORIGINAL's full effect on the customer's balance,
+        // including any standing-credit drawdown that settled part of it.
         if (original.CustomerID && original.RemainingAmount > 0) {
           db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?')
             .run(original.RemainingAmount, original.CustomerID);
         } else if (original.CustomerID && original.RemainingAmount < 0) {
           db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?')
             .run(Math.abs(original.RemainingAmount), original.CustomerID);
+        }
+        if (original.CustomerID && original.CreditApplied > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?')
+            .run(original.CreditApplied, original.CustomerID);
         }
         // The amount that reached the account was net of the machine's
         // commission for BOTH bearers: a customer-paid fee arrived inside the
@@ -1110,15 +1152,17 @@ export function registerSalesHandlers() {
         db.prepare(`
           UPDATE sales SET
             CustomerID = ?, CustomerName = ?, CustomerPhone = ?,
+            Date = ?,
             Subtotal = ?, Discount = ?, TaxRate = ?, TaxAmount = ?, TotalAmount = ?,
-            PaidAmount = ?, RemainingAmount = ?, PaymentMethod = ?,
+            PaidAmount = ?, RemainingAmount = ?, CreditApplied = ?, PaymentMethod = ?,
             CashAccountID = ?, PaymentMethodID = ?, Status = ?, Notes = ?,
             TransferCost = ?, TransferCostBearer = ?
           WHERE SaleID = ?
         `).run(
           data.CustomerID ?? null, data.CustomerName ?? null, data.CustomerPhone ?? null,
+          dateStr,
           subtotal, discountIn, data.TaxRate ?? 0, taxIn, totalAmount,
-          paidIn, remaining, data.PaymentMethod,
+          paidIn, remaining, creditApplied, data.PaymentMethod,
           newCashAccountId, newPaymentMethodId, status, data.Notes ?? null,
           transferCost, feeBearer, data.SaleID,
         );
@@ -1192,6 +1236,9 @@ export function registerSalesHandlers() {
           } else {
             db.prepare('UPDATE customers SET Balance = Balance - ? WHERE CustomerID = ?').run(Math.abs(remaining), data.CustomerID);
           }
+        }
+        if (creditApplied > 0) {
+          db.prepare('UPDATE customers SET Balance = Balance + ? WHERE CustomerID = ?').run(creditApplied, data.CustomerID);
         }
 
         if (paidIn > 0) {

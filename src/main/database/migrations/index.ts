@@ -149,6 +149,8 @@ function rebuildServiceSalesIfNeeded(db: Database.Database) {
       CashAccountID    INTEGER,
       PaymentMethodID  INTEGER,
       TransferCost     REAL DEFAULT 0,
+      ReceiveAccountType TEXT,
+      ReceiveAccountID   INTEGER,
       Status           TEXT DEFAULT 'completed',
       Notes            TEXT,
       UserID           INTEGER NOT NULL,
@@ -182,11 +184,22 @@ export function runMigrations(db: Database.Database) {
     -- still flow into the year that follows), but this row is the written
     -- record of "what was carried over" the owner asked for, and it is what
     -- the fiscal-year screen shows.
+    --
+    -- Families (mirror reports:financialPosition, so the document always
+    -- equals the report and balances by construction):
+    --   assets     — cash_account, payment_method, customer, inventory,
+    --                advance, supplier_credit, rent_advance_held
+    --   liabilities— supplier, employee, customer_credit, commission,
+    --                rent_advance_collected
+    --   equity     — equity_capital, equity_retained
+    -- Name holds the account's human name next to its id, so the closing
+    -- document reads "خزنة", not a bare integer.
     CREATE TABLE IF NOT EXISTS fiscal_year_openings (
       OpeningID     INTEGER PRIMARY KEY AUTOINCREMENT,
       FiscalYearID  INTEGER NOT NULL,
-      AccountType   TEXT NOT NULL,   -- 'cash_account' | 'payment_method' | 'customer' | 'supplier'
+      AccountType   TEXT NOT NULL,
       AccountID     INTEGER NOT NULL,
+      Name          TEXT,
       Balance       REAL NOT NULL DEFAULT 0,
       CreatedAt     TEXT DEFAULT (datetime('now','localtime')),
       FOREIGN KEY (FiscalYearID) REFERENCES fiscal_years(FiscalYearID),
@@ -1093,6 +1106,8 @@ export function runMigrations(db: Database.Database) {
       CashAccountID    INTEGER,
       PaymentMethodID  INTEGER,
       TransferCost     REAL DEFAULT 0,
+      ReceiveAccountType TEXT,
+      ReceiveAccountID   INTEGER,
       Status           TEXT DEFAULT 'completed',
       Notes            TEXT,
       UserID           INTEGER NOT NULL,
@@ -1116,6 +1131,14 @@ export function runMigrations(db: Database.Database) {
   // We now only rebuild when it is actually needed, and copy columns by NAME.
   rebuildSaleDetailsIfNeeded(db);
   relaxVoucherCashAccountIfNeeded(db);
+
+  // Fiscal-year openings carry the account NAME next to its id (a readable
+  // closing document instead of bare integers), and the snapshot now also
+  // covers inventory, employee advances, commissions, rent advances and
+  // equity. Older databases were created without the column.
+  try {
+    db.exec(`ALTER TABLE fiscal_year_openings ADD COLUMN Name TEXT`);
+  } catch {}
 
   // Add Source and SourceID to sales (for maintenance invoices)
   try {
@@ -1197,6 +1220,52 @@ export function runMigrations(db: Database.Database) {
   // service_sales rebuild — see the note above. Guarded the same way so an
   // added column can never orphan the table or drop live rows.
   rebuildServiceSalesIfNeeded(db);
+
+  // The asset that RECEIVES the customer's payment is separate from the asset
+  // the transfer is funded FROM. A shop collects cash at the counter and
+  // funds the transfer from its InstaPay wallet: in one account both legs
+  // used to land, so the drawer showed the payment arriving and the wallet
+  // showed the transfer leaving — the customer's cash was booked to the
+  // wrong till and the ledger stopped agreeing with the drawers. NULL means
+  // a pre-existing row, where the payment landed in the funding asset.
+  try {
+    db.exec(`ALTER TABLE service_sales ADD COLUMN ReceiveAccountType TEXT`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE service_sales ADD COLUMN ReceiveAccountID INTEGER`);
+  } catch {}
+
+  // Service returns (a failed transfer reversed): the original row stays for
+  // history, the reversal legs live here instead of being deleted into thin
+  // air the way `delete:serviceSale` removes the whole trace.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS service_returns (
+      ReturnID          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ReturnNumber      TEXT UNIQUE NOT NULL,
+      ServiceSaleID     INTEGER NOT NULL,
+      FiscalYearID      INTEGER NOT NULL,
+      Date              TEXT NOT NULL,
+      CustomerID        INTEGER,
+      CustomerName      TEXT,
+      CustomerPhone     TEXT,
+      ServiceType       TEXT,
+      Provider          TEXT,
+      TargetPhone       TEXT,
+      Amount            REAL NOT NULL,
+      ServiceCost       REAL DEFAULT 0,
+      TransferCost      REAL DEFAULT 0,
+      ChargeAmount      REAL NOT NULL,
+      PaidAmount        REAL DEFAULT 0,
+      RemainingAmount   REAL DEFAULT 0,
+      RefundAccountType TEXT,
+      RefundAccountID   INTEGER,
+      CashAccountID     INTEGER,
+      PaymentMethodID   INTEGER,
+      Reason            TEXT,
+      UserID            INTEGER NOT NULL,
+      CreatedAt         TEXT DEFAULT (datetime('now','localtime'))
+    );
+  `);
 
   // Fix empty barcodes (convert '' to NULL to avoid UNIQUE constraint issues)
   try {
@@ -1446,6 +1515,64 @@ export function runMigrations(db: Database.Database) {
   try {
     db.exec(`ALTER TABLE sales ADD COLUMN TransferCostBearer TEXT DEFAULT 'shop'`);
   } catch {}
+
+  // HOW MUCH of an invoice was settled by drawing down a customer's standing
+  // credit (a negative `customers.Balance` they built up from overpayments or
+  // returns).
+  //
+  // The invoice keeps its FULL `TotalAmount` — the P&L books every sale at its
+  // real value and the customer's statement derives the sale debit from that
+  // same figure — while the credit that settled it is recorded here so the
+  // document is self consistent: `PaidAmount + CreditApplied + RemainingAmount
+  // = TotalAmount`. Absent this column those three books agreed but the
+  // invoice arithmetic silently stopped footing the moment a credit was used.
+  try {
+    db.exec(`ALTER TABLE sales ADD COLUMN CreditApplied REAL DEFAULT 0`);
+  } catch {}
+
+  // A commission can be DISBURSED ON THE SPOT through a 'COMM-' voucher rather
+  // than folded into a monthly salary. `PaidVoucherID` points the paid row at
+  // the voucher that moved the cash, and `PaidDate` records when — used by the
+  // P&L to keep an immediately-paid commission an expense while the balance
+  // sheet stops holding it as a liability. Salary-absorbed commissions keep
+  // `PaidInSalaryID` instead, so the two settlement routes stay distinguishable.
+  try {
+    db.exec(`ALTER TABLE commissions ADD COLUMN PaidVoucherID INTEGER`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE commissions ADD COLUMN PaidDate TEXT`);
+  } catch {}
+
+  // Per-month record of every amount clawed back from an advance.
+  //
+  // `employee_advances.Amount` is a LIVE balance: a partial deduction rewrites
+  // it and a full one flips `IsDeducted`, so the single row can only say what
+  // is LEFT — it cannot say WHICH month took HOW MUCH, whether the rest was
+  // absorbed the following month or never at all. The owner asked for a real
+  // per-advance payback schedule: partial deduction in one month, the rest in
+  // the next, or nothing at all — visible on the employee statement and on the
+  // advances tab. `salaries:issue` writes one row here for every advance it
+  // actually reduces in that same transaction, so the history is a first-class
+  // record like every other movement, not a recomputation that drifts.
+  //
+  // `RemainingAfter` freezes what the advance owed the moment the deduction
+  // landed (including 0 for a fully settled one), so a statement can show both
+  // the instalment and the balance left, and nothing later can rewrite history.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS advance_deductions (
+      DeductionRecordID INTEGER PRIMARY KEY AUTOINCREMENT,
+      AdvanceID         INTEGER NOT NULL,
+      SalaryID          INTEGER NOT NULL,
+      Month             TEXT NOT NULL,
+      Amount            REAL NOT NULL,
+      RemainingAfter    REAL NOT NULL,
+      CreatedAt         TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (AdvanceID) REFERENCES employee_advances(AdvanceID),
+      FOREIGN KEY (SalaryID) REFERENCES salaries(SalaryID)
+    );
+    CREATE INDEX IF NOT EXISTS idx_advance_deductions_advance ON advance_deductions(AdvanceID);
+    CREATE INDEX IF NOT EXISTS idx_advance_deductions_salary  ON advance_deductions(SalaryID);
+  `);
 
   // =============================================
   // FOLD THE LEGACY CUSTOMER-PAID FEE INTO THE INVOICE TOTAL

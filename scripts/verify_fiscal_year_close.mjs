@@ -170,7 +170,7 @@ console.log('\n── 1. a CLOSED year refuses every kind of document ──');
     'sales:create', 'sales:delete',
     'purchases:create', 'purchases:delete',
     'vouchers:create', 'vouchers:delete',
-    'advances:create', 'deductions:create', 'commissions:create',
+    'advances:create', 'deductions:create', 'commissions:payImmediate',
     'salaries:issue', 'salaries:pay',
     'transfers:create', 'services:create', 'settlement:create',
     'maintenance:deliver', 'maintenance:cancel',

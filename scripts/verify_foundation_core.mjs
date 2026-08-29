@@ -278,7 +278,11 @@ console.log('\n[4] db:autoBackup + db:backupInfo — retention and WAL-safe copy
 
   const r1 = await call('db:autoBackup');
   t('autoBackup creates today\'s backup', r1?.success === true, JSON.stringify(r1));
-  const today = new Date().toISOString().slice(0, 10);
+  // The app names backups with the SHOP's local calendar (businessToday), not
+  // the UTC instant — toISOString() would guess the wrong file around the
+  // UTC/local date boundary and the suite would fail on perfectly good code.
+  const loc = new Date();
+  const today = `${loc.getFullYear()}-${String(loc.getMonth() + 1).padStart(2, '0')}-${String(loc.getDate()).padStart(2, '0')}`;
   const backupPath = join(backupsDir, `auto_backup_${today}.db`);
   t('the backup file exists on disk', existsSync(backupPath));
 
@@ -493,10 +497,10 @@ console.log('\n[10] telegram handlers — validation, secrecy, clearing');
 {
   const bad1 = await call('telegram:saveSettings', { botToken: 'not-a-token', chatId: '12345' });
   t('an invalid bot token is refused', bad1?.success === false && /بوت/.test(bad1?.message), JSON.stringify(bad1));
-  const bad2 = await call('telegram:saveSettings', { botToken: '123456789:AAAbcdefghijklmnopqrstuvwxyzABCDEFGH', chatId: 'xyz' });
+  const bad2 = await call('telegram:saveSettings', { botToken: '123456789:EXAMPLEbot_abcdefghijklmnopqrstuvwxyz', chatId: 'xyz' });
   t('an invalid chat id is refused', bad2?.success === false && /معرّف/.test(bad2?.message), JSON.stringify(bad2));
   const good = await call('telegram:saveSettings', {
-    botToken: '123456789:AAAbcdefghijklmnopqrstuvwxyzABCDEFGH',
+    botToken: '123456789:EXAMPLEbot_abcdefghijklmnopqrstuvwxyz',
     chatId: '987654321',
     enabled: true,
   });
@@ -505,7 +509,7 @@ console.log('\n[10] telegram handlers — validation, secrecy, clearing');
   const g = await call('telegram:getSettings');
   t('getSettings reports the token is present', g?.hasToken === true, JSON.stringify(g));
   t('getSettings NEVER returns the full token',
-    !JSON.stringify(g).includes('123456789:AAAbcdefghijklmnopqrstuvwxyzABCDEFGH'), JSON.stringify(g));
+    !JSON.stringify(g).includes('123456789:EXAMPLEbot_abcdefghijklmnopqrstuvwxyz'), JSON.stringify(g));
   t('the token hint masks the secret half', g?.tokenHint === '123456789:***', JSON.stringify(g));
 
   // The test flow runs the real testTelegram against a stubbed API.

@@ -44,6 +44,8 @@ export function registerVouchersHandlers() {
     ReferenceType?: string; ReferenceID?: number;
     /** Settles a specific rent instalment. See the block in the transaction. */
     RentPaymentID?: number;
+    /** Closes a specific earned commission; the shop decides the payout is now. */
+    CommissionID?: number;
     userId: number; fiscalYearId: number;
   }) => {
     const db = getDb();
@@ -236,6 +238,47 @@ export function registerVouchersHandlers() {
       }
     }
 
+    // A voucher may close an earned commission.
+    //
+    // The general payment voucher is the DOCUMENT that moves the cash, and the
+    // commission is a single amount that is whole or not paid at all — so the
+    // voucher amount must match the commission being closed, and the commission
+    // is marked paid (IsPaid = 1, PaidVoucherID = the new voucher) inside the
+    // same transaction. The P&L then books the technician's expense from this
+    // voucher exactly once and the balance sheet stops holding the commission
+    // as a liability. Mirrors the rent link: checked before anything is written
+    // so a bad link can never leave a voucher recorded against a commission it
+    // did not settle.
+    if (data.CommissionID) {
+      if (data.VoucherType !== 'payment') {
+        return { success: false, message: 'ربط العمولة متاح لسندات الصرف فقط' };
+      }
+      if (data.RentPaymentID) {
+        return {
+          success: false,
+          message: 'لا يجوز ربط السند بعملية إيجار وعمولة معاً — اختر واحدة.',
+        };
+      }
+      if (data.PartyID && data.PartyType) {
+        return {
+          success: false,
+          message: 'سند العمولة لا يُقيَّد بطرف — العمولة تُصرف لصاحبها مباشرة.',
+        };
+      }
+      const com = db.prepare('SELECT * FROM commissions WHERE CommissionID = ?')
+        .get(data.CommissionID) as any;
+      if (!com) return { success: false, message: 'العمولة غير موجودة' };
+      if (com.IsPaid === 1) return { success: false, message: 'هذه العمولة مسددة بالفعل' };
+      if (!(com.Amount > 0)) return { success: false, message: 'مبلغ العمولة غير صالح' };
+      if (Math.abs(data.Amount - com.Amount) > 0.005) {
+        return {
+          success: false,
+          message: `مبلغ السند يجب أن يساوي مبلغ العمولة (${com.Amount.toFixed(2)}) لإقفالها كاملة`,
+        };
+      }
+      data = { ...data, ReferenceType: 'commission', ReferenceID: com.CommissionID };
+    }
+
     let rentResult: any = null;
     const tx = db.transaction(() => {
       const result = db.prepare(`
@@ -303,6 +346,16 @@ export function registerVouchersHandlers() {
         // Abandon the whole voucher if the instalment refused it, so a voucher
         // can never exist claiming to have paid a month that it did not.
         if (!rentResult.success) throw new Error('RENT_REJECTED');
+      }
+
+      // Close the linked commission.
+      //
+      // Marked paid by THIS voucher (PaidVoucherID) so the P&L stops counting
+      // it as an accrued liability and books the expense from the document
+      // that actually paid it; `delete:voucher` reopens it the same way.
+      if (data.CommissionID) {
+        db.prepare('UPDATE commissions SET IsPaid = 1, PaidAmount = ?, PaidVoucherID = ?, PaidDate = ? WHERE CommissionID = ?')
+          .run(data.Amount, Number(result.lastInsertRowid), dateStr, data.CommissionID);
       }
 
       // Update party balance

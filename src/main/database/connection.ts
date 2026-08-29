@@ -146,7 +146,32 @@ function configuredDbPath(): string | null {
     const fixed = escapeLoneBackslashes(text);
     const settings = JSON.parse(fixed);
     const p = settings?.dbPath;
-    return typeof p === 'string' && p.trim() ? p : null;
+    if (typeof p !== 'string' || !p.trim()) return null;
+
+    // PERSISTENCE: the installer writes db_settings.json to $INSTDIR, which is
+    // DELETED on upgrade by the uninstaller. If the user chose a custom path
+    // (e.g. D:\Data\mobile_shop.db) and never changed it from the settings UI,
+    // there is no user-scoped copy — the path is lost on the next upgrade and
+    // the shop opens an empty database as if it were new.
+    //
+    // Fix: the FIRST time we successfully read a path from the installer's
+    // copy, save it to the user-scoped location (%APPDATA%\MobileShopERP\)
+    // where it survives reinstalls. The user-scoped copy takes priority on
+    // subsequent launches (see settingsFile()), so once saved the path is
+    // permanent until the owner explicitly changes it.
+    const userFile = path.join(userDataRoot(), 'db_settings.json');
+    if (file !== userFile && !fs.existsSync(userFile)) {
+      try {
+        const dir = path.dirname(userFile);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(userFile, JSON.stringify({ dbPath: p }), 'utf-8');
+        console.log('[DB] Persisted installer path to user settings:', userFile, '->', p);
+      } catch (persistErr) {
+        console.error('[DB] Failed to persist path to user settings (non-fatal):', persistErr);
+      }
+    }
+
+    return p;
   } catch (err) {
     console.error('[DB] db_settings.json is unreadable, using the default path:', err);
     return null;

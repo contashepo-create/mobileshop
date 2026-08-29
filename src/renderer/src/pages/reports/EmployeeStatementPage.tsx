@@ -78,6 +78,11 @@ export function EmployeeStatementPage() {
       EmployeeName: 'الموظف', Amount: 'المبلغ', Date: 'التاريخ',
       Reason: 'السبب', IsDeducted: 'مخصوم',
     },
+    advance_deduction: {
+      EmployeeName: 'الموظف', Month: 'الشهر', Amount: 'المبلغ المخصوم',
+      RemainingAfter: 'المتبقي بعد الخصم', AdvanceDate: 'تاريخ السلفة',
+      OriginalAmount: 'المبلغ الأصلي', AdvanceReason: 'سبب السلفة',
+    },
     commission: {
       EmployeeName: 'الموظف', Amount: 'المبلغ', Date: 'التاريخ',
       CommissionType: 'نوع العمولة', IsPaid: 'مدفوع',
@@ -104,7 +109,7 @@ export function EmployeeStatementPage() {
   ]);
 
   const opLabels: Record<string, string> = {
-    salary: 'راتب', advance: 'سلفية', commission: 'عمولة', deduction: 'خصم',
+    salary: 'راتب', advance: 'سلفية', advance_deduction: 'خصم سلفة', commission: 'عمولة', deduction: 'خصم',
     voucher_payment: 'سند صرف', voucher_receipt: 'سند قبض',
   };
 
@@ -267,6 +272,7 @@ export function EmployeeStatementPage() {
   const opTypeLabels: Record<string, { label: string; variant: string }> = {
     salary: { label: 'راتب', variant: 'blue' },
     advance: { label: 'سلفية', variant: 'orange' },
+    advance_deduction: { label: 'خصم سلفة', variant: 'red' },
     commission: { label: 'عمولة', variant: 'green' },
     deduction: { label: 'خصم', variant: 'red' },
     voucher_payment: { label: 'سند صرف', variant: 'orange' },

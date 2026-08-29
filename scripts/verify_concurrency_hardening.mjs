@@ -320,10 +320,16 @@ console.log('\n[5] The window cannot be navigated away — but printing still wo
 
   // The renderer really does rely on blank popups — if this stops being true
   // the allowance above should be revisited rather than left as dead code.
+  // Printing was consolidated into the shared `printDocument` helper
+  // (src/renderer/src/lib/printHeader.ts), so that helper is the one place
+  // that must still open a blank popup, and the screens must go through it.
+  const helper = 'src/renderer/src/lib/printHeader.ts';
   const printers = ['src/renderer/src/pages/reports/CustomerStatementPage.tsx',
     'src/renderer/src/pages/assets/AssetsPage.tsx'];
+  t('a blank popup is actually opened, in the shared print helper',
+    /window\.open\(''/.test(raw(helper)));
   t('the print screens do open blank popups (the allowance is needed)',
-    printers.every((p) => /window\.open\(''/.test(raw(p))));
+    printers.every((p) => /printDocument\(/.test(raw(p))));
 
   // The bridge must stay minimal: exposing ipcRenderer itself would make the
   // navigation guard pointless.

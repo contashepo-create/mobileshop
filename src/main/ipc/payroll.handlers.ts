@@ -1,7 +1,8 @@
 import { ipcMain } from 'electron';
 import { getDb } from '../database/connection';
+import { nextDocNumber } from '../database/docNumber';
 import { businessToday, resolveDocDate } from '../../shared/businessDate';
-import { checkAmounts } from '../../shared/money';
+import { checkAmount, checkAmounts } from '../../shared/money';
 import { requireId, optionalText, optionalId, LIMITS } from '../../shared/validate';
 
 /**
@@ -62,9 +63,18 @@ export function registerPayrollHandlers() {
 
   // Issue salary (generate) - creates salary record WITHOUT paying
   // Calculates: base + allowances + commissions - deductions - advances
+  //
+  // An advance is settled MANUALLY: the issue form shows every open advance and
+  // a value to deduct from each (any amount, zero leaves it open). The caller
+  // sends that as `deductAmounts`; the engine validates every amount against
+  // the advance's remaining balance and refuses when the SUM exceeds what this
+  // month's pay can absorb (net >= 0). Without `deductAmounts` the historical
+  // automatic behaviour is kept — settle the oldest advances first, up to the
+  // cap — so old callers and the verification suites are unchanged.
   ipcMain.handle('salaries:issue', async (_event, data: {
     EmployeeID: number; Month: string;
     userId: number; fiscalYearId: number;
+    deductAmounts?: Array<{ AdvanceID: number; Amount: number }>;
   }) => {
     const db = getDb();
     // The id is bound straight into the lookup below; an absent or
@@ -104,7 +114,56 @@ export function registerPayrollHandlers() {
     // which is both the correct accounting and what the employee expects.
     const grossPay = emp.BaseSalary + emp.Allowances + commissionsTotal;
     const payAfterDeductions = Math.max(0, grossPay - deductionsTotal);
-    const advancesApplied = Math.min(advancesTotal, payAfterDeductions);
+
+    // `advancesTotal` is the SUM of every open advance — what the screen shows
+    // as still owed, and what the statement reports. `advancesApplied` is how
+    // much THIS salary actually settles, which is the figure that lands in the
+    // row and on the balance sheet. The two differ whenever the month cannot
+    // absorb everything, and in manual mode they are independent by design.
+    const manual = Array.isArray(data?.deductAmounts) && data.deductAmounts.length > 0;
+
+    // Each amount is checked against the LIVE advance before anything moves. A
+    // requested deduction is capped by the advance's remaining balance (never
+    // more than the employee actually owes), and the SUM is capped by this
+    // month's net — the same zero-floor guarantee the automatic path has. The
+    // amounts are validated here, then re-applied against fresh rows inside the
+    // transaction so a rival till cannot slip an already-settled advance in.
+    let advancesApplied: number;
+    const requested: Array<{ AdvanceID: number; Amount: number }> = [];
+    if (manual) {
+      const open = db.prepare(
+        'SELECT AdvanceID, Amount FROM employee_advances WHERE EmployeeID = ? AND IsDeducted = 0',
+      ).all(data.EmployeeID) as any[];
+      let sum = 0;
+      for (const entry of data.deductAmounts!) {
+        const advId = requireId(entry?.AdvanceID, 'رقم السلفة');
+        if (!advId.ok) return { success: false, message: advId.message };
+        const amt = checkAmount(entry?.Amount, 'قيمة خصم السلفة', { allowZero: true });
+        if (!amt.ok) return { success: false, message: amt.message };
+        const live = open.find(a => Number(a.AdvanceID) === advId.value);
+        if (!live) {
+          return { success: false, message: 'السلفة غير موجودة أو تم خصمها بالفعل' };
+        }
+        if (amt.value > Number(live.Amount) + 0.005) {
+          return {
+            success: false,
+            message: `قيمة الخصم تتجاوز الرصيد المتبقي للسلفة (${Number(live.Amount).toFixed(2)})`,
+          };
+        }
+        requested.push({ AdvanceID: advId.value, Amount: +amt.value.toFixed(2) });
+        sum += amt.value;
+      }
+      const totalRequested = +sum.toFixed(2);
+      if (totalRequested > payAfterDeductions + 0.005) {
+        return {
+          success: false,
+          message: `مجموع خصم السلف (${totalRequested.toFixed(2)}) يتجاوز الصافي المتاح بعد البدلات والعمولات والخصومات (${payAfterDeductions.toFixed(2)})`,
+        };
+      }
+      advancesApplied = totalRequested;
+    } else {
+      advancesApplied = Math.min(advancesTotal, payAfterDeductions);
+    }
     const netSalary = +(payAfterDeductions - advancesApplied).toFixed(2);
 
     const tx = db.transaction(() => {
@@ -134,24 +193,60 @@ export function registerPayrollHandlers() {
       if (advancesApplied > 0) {
         db.prepare('UPDATE employees SET Balance = Balance - ? WHERE EmployeeID = ?')
           .run(advancesApplied, data.EmployeeID);
-        // Settle advances oldest-first, and only up to what this month's pay
-        // could actually absorb. Marking them ALL deducted when the pay could
-        // not cover them wrote off money the employee still owes.
-        let left = advancesApplied;
-        const open = db.prepare(
-          'SELECT AdvanceID, Amount FROM employee_advances WHERE EmployeeID = ? AND IsDeducted = 0 ORDER BY AdvanceID',
-        ).all(data.EmployeeID) as any[];
-        for (const adv of open) {
-          if (left <= 0.005) break;
-          if (Number(adv.Amount) <= left + 0.005) {
-            db.prepare('UPDATE employee_advances SET IsDeducted = 1, DeductedFromSalaryID = ? WHERE AdvanceID = ?')
-              .run(salaryId, adv.AdvanceID);
-            left = +(left - Number(adv.Amount)).toFixed(2);
-          } else {
-            // Partly recovered: reduce it and leave the remainder outstanding.
-            db.prepare('UPDATE employee_advances SET Amount = ? WHERE AdvanceID = ?')
-              .run(+(Number(adv.Amount) - left).toFixed(2), adv.AdvanceID);
-            left = 0;
+        // One ledger for every actual claw-back, shared by both settle paths
+        // below: each advance reduced this month gets a row recording WHICH
+        // month, HOW MUCH and the balance left after — the monthly payback
+        // history the advances tab and the employee statement read.
+        const recordDeduction = db.prepare(`
+          INSERT INTO advance_deductions (AdvanceID, SalaryID, Month, Amount, RemainingAfter)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        if (manual) {
+          // Settle exactly what the form asked for, re-read under the write
+          // lock so a rival till cannot settle the same advance in between.
+          // An amount of zero leaves the advance OPEN, which is the point of
+          // manual deduction: the owner chooses which advance to claw back and
+          // by how much, independently of age.
+          const stillOpen = db.prepare(
+            'SELECT AdvanceID, Amount FROM employee_advances WHERE EmployeeID = ? AND IsDeducted = 0',
+          ).all(data.EmployeeID) as any[];
+          for (const req of requested) {
+            const live = stillOpen.find(a => Number(a.AdvanceID) === req.AdvanceID);
+            if (!live || req.Amount <= 0.005) continue;
+            const remaining = Number(live.Amount);
+            if (req.Amount >= remaining - 0.005) {
+              db.prepare('UPDATE employee_advances SET IsDeducted = 1, DeductedFromSalaryID = ? WHERE AdvanceID = ?')
+                .run(salaryId, req.AdvanceID);
+              recordDeduction.run(req.AdvanceID, salaryId, data.Month, +remaining.toFixed(2), 0);
+            } else {
+              // Partly recovered: reduce it and leave the remainder outstanding.
+              db.prepare('UPDATE employee_advances SET Amount = ? WHERE AdvanceID = ?')
+                .run(+(remaining - req.Amount).toFixed(2), req.AdvanceID);
+              recordDeduction.run(req.AdvanceID, salaryId, data.Month, +req.Amount.toFixed(2), +(remaining - req.Amount).toFixed(2));
+            }
+          }
+        } else {
+          // Settle advances oldest-first, and only up to what this month's pay
+          // could actually absorb. Marking them ALL deducted when the pay could
+          // not cover them wrote off money the employee still owes.
+          let left = advancesApplied;
+          const open = db.prepare(
+            'SELECT AdvanceID, Amount FROM employee_advances WHERE EmployeeID = ? AND IsDeducted = 0 ORDER BY AdvanceID',
+          ).all(data.EmployeeID) as any[];
+          for (const adv of open) {
+            if (left <= 0.005) break;
+            if (Number(adv.Amount) <= left + 0.005) {
+              db.prepare('UPDATE employee_advances SET IsDeducted = 1, DeductedFromSalaryID = ? WHERE AdvanceID = ?')
+                .run(salaryId, adv.AdvanceID);
+              recordDeduction.run(adv.AdvanceID, salaryId, data.Month, +Number(adv.Amount).toFixed(2), 0);
+              left = +(left - Number(adv.Amount)).toFixed(2);
+            } else {
+              // Partly recovered: reduce it and leave the remainder outstanding.
+              db.prepare('UPDATE employee_advances SET Amount = ? WHERE AdvanceID = ?')
+                .run(+(Number(adv.Amount) - left).toFixed(2), adv.AdvanceID);
+              recordDeduction.run(adv.AdvanceID, salaryId, data.Month, +left.toFixed(2), +(Number(adv.Amount) - left).toFixed(2));
+              left = 0;
+            }
           }
         }
       }
@@ -187,6 +282,7 @@ export function registerPayrollHandlers() {
         commissions: commissionsTotal,
         deductions: deductionsTotal,
         advances: advancesTotal,
+        advancesApplied,
         netSalary,
         commissionCount: commissions.length,
         deductionCount: deductions.length,
@@ -384,6 +480,23 @@ export function registerPayrollHandlers() {
     `).all(employeeId);
     operations.push(...advances);
 
+    // Monthly advance deductions — the payback schedule: which month clawed how
+    // much back and what the advance still owed after that month. A credit
+    // against the advance's own debit, so the statement shows the money going
+    // out (سلفية) and coming back month by month (خصم سلفة).
+    const advanceDeductions = db.prepare(`
+      SELECT ad.DeductionRecordID as RefID, 'ADD-' || ad.DeductionRecordID as RefNumber,
+             ad.Month || '-01' as Date, 0 as Debit, ad.Amount as Credit,
+             'advance_deduction' as OpType,
+             'خصم سلفة من راتب شهر ' || ad.Month as Description,
+             ad.RemainingAfter
+      FROM advance_deductions ad
+      JOIN employee_advances a ON ad.AdvanceID = a.AdvanceID
+      WHERE a.EmployeeID = ?
+      ORDER BY ad.DeductionRecordID
+    `).all(employeeId);
+    operations.push(...advanceDeductions);
+
     // Commissions
     const commissions = db.prepare(`
       SELECT CommissionID as RefID, 'COM-' || CommissionID as RefNumber, Date, Amount as Credit, 0 as Debit,
@@ -431,6 +544,7 @@ export function registerPayrollHandlers() {
     const totalSalariesPaid = operations.filter(o => o.OpType === 'salary').reduce((s, o) => s + (o.Paid || 0), 0);
     const totalSalariesRemaining = totalSalariesNet - totalSalariesPaid;
     const totalAdvances = operations.filter(o => o.OpType === 'advance').reduce((s, o) => s + (o.Debit || 0), 0);
+    const totalAdvanceRecovered = operations.filter(o => o.OpType === 'advance_deduction').reduce((s, o) => s + (o.Credit || 0), 0);
     const totalCommissions = operations.filter(o => o.OpType === 'commission').reduce((s, o) => s + (o.Credit || 0), 0);
     const totalDeductions = operations.filter(o => o.OpType === 'deduction').reduce((s, o) => s + (o.Debit || 0), 0);
 
@@ -448,6 +562,7 @@ export function registerPayrollHandlers() {
         totalSalariesPaid,
         totalSalariesRemaining,
         totalAdvances,
+        totalAdvanceRecovered,
         totalCommissions,
         totalDeductions,
         pendingCommissions: pendingCommissions.total,
@@ -469,8 +584,31 @@ export function registerPayrollHandlers() {
     `;
     const params: any[] = [];
     if (employeeId) { query += ' AND a.EmployeeID = ?'; params.push(employeeId); }
-    query += ' ORDER BY a.Date DESC';
-    return db.prepare(query).all(...params);
+    query += ' ORDER BY a.Date DESC, a.AdvanceID DESC';
+    const rows = db.prepare(query).all(...params) as any[];
+
+    // Attach each advance's monthly payback schedule. `employee_advances` only
+    // holds the LIVE balance; the actual history (which month took how much and
+    // what was left after) lives in `advance_deductions`, written by
+    // `salaries:issue` in the same transaction as the claw-back.
+    const ids = rows.map(r => r.AdvanceID);
+    const history: any[] = ids.length
+      ? db.prepare(`
+          SELECT ad.AdvanceID, ad.SalaryID, ad.Month, ad.Amount, ad.RemainingAfter,
+            s.Month as SalaryMonth
+          FROM advance_deductions ad
+          LEFT JOIN salaries s ON ad.SalaryID = s.SalaryID
+          WHERE ad.AdvanceID IN (${ids.map(() => '?').join(',')})
+          ORDER BY ad.DeductionRecordID
+        `).all(...ids)
+      : [];
+    const byAdvance = new Map<number, any[]>();
+    for (const h of history) {
+      if (!byAdvance.has(h.AdvanceID)) byAdvance.set(h.AdvanceID, []);
+      byAdvance.get(h.AdvanceID)!.push(h);
+    }
+    for (const r of rows) r.history = byAdvance.get(r.AdvanceID) ?? [];
+    return rows;
   });
 
   ipcMain.handle('advances:create', async (_event, data: {
@@ -608,5 +746,121 @@ export function registerPayrollHandlers() {
     `).run(data.EmployeeID, amount, dateStr, data.Reason, data.DamagedItemID ?? null, data.DamageCostType ?? null, data.fiscalYearId, data.userId, data.Notes ?? null);
 
     return { success: true, amount };
+  });
+
+  // ===== COMMISSIONS =====
+  //
+  // A commission is earned when the job is delivered (`IsPaid = 0`). It can be
+  // settled two ways: it is folded into a monthly salary (`PaidInSalaryID`), or
+  // it is disbursed IMMEDIATELY through `commissions:payImmediate`, which pays
+  // it out of a drawer as its own 'COMM-' voucher. Both routes must put the
+  // expense in the P&L once — the salary route inside NetSalary, the immediate
+  // route as a standing commission expense whose liability has been released.
+  ipcMain.handle('commissions:list', async (_event, filters?: { employeeId?: number; status?: 'pending' | 'paid' }) => {
+    const db = getDb();
+    let query = `
+      SELECT c.*, e.Name as EmployeeName,
+        (SELECT VoucherNumber FROM vouchers WHERE VoucherID = c.PaidVoucherID) as VoucherNumber,
+        (SELECT Month FROM salaries WHERE SalaryID = c.PaidInSalaryID) as SalaryMonth,
+        CASE WHEN c.ReferenceType = 'maintenance_delivery'
+          THEN (SELECT DeliveryNumber FROM maintenance_deliveries WHERE DeliveryID = c.ReferenceID)
+          ELSE NULL END as RefNumber
+      FROM commissions c
+      JOIN employees e ON c.EmployeeID = e.EmployeeID
+      WHERE 1=1
+    `;
+    const params: any[] = [];
+    if (filters?.employeeId) { query += ' AND c.EmployeeID = ?'; params.push(filters.employeeId); }
+    if (filters?.status === 'pending') { query += ' AND c.IsPaid = 0'; }
+    if (filters?.status === 'paid') { query += ' AND c.IsPaid = 1'; }
+    query += ' ORDER BY c.Date DESC, c.CommissionID DESC';
+    return db.prepare(query).all(...params);
+  });
+
+  // Pay a commission immediately, out of the drawer, as its own voucher.
+  //
+  // The commission is released (IsPaid = 1, PaidAmount = Amount) and tied to a
+  // 'COMM-' voucher that moved the cash. The P&L keeps the earned commission as
+  // an expense (it reads `PaidInSalaryID IS NULL`, which covers BOTH the unpaid
+  // and the immediately-paid rows), while the balance sheet drops the liability
+  // (it reads `IsPaid = 0`). The employee's account is NOT touched here: a
+  // standalone commission never carried an obligation on `employees.Balance` —
+  // that column holds salary accruals — so crediting it would create one.
+  ipcMain.handle('commissions:payImmediate', async (_event, data: {
+    CommissionID: number; CashAccountID: number;
+    userId: number; fiscalYearId: number; Date?: string;
+  }) => {
+    const db = getDb();
+    const dateStr = resolveDocDate(data as any);
+    if (!dateStr) return { success: false, message: 'تاريخ المستند غير صالح' };
+
+    // The id is bound straight into the lookup below; an absent or non-numeric
+    // value would throw out of the handler instead of returning a reply.
+    const comId = requireId(data?.CommissionID, 'رقم العمولة');
+    if (!comId.ok) return { success: false, message: comId.message };
+    const commission = db.prepare('SELECT * FROM commissions WHERE CommissionID = ?').get(comId.value) as any;
+    if (!commission) return { success: false, message: 'العمولة غير موجودة' };
+    if (commission.IsPaid === 1) return { success: false, message: 'العمولة مسددة بالفعل' };
+    if (!(commission.Amount > 0)) return { success: false, message: 'مبلغ العمولة غير صالح' };
+
+    const parties = checkPayrollParties(db, commission.EmployeeID, data.CashAccountID);
+    if (!parties.ok) return { success: false, message: parties.message };
+    if (parties.cashAccountId === null) {
+      return { success: false, message: 'اختر الخزينة التي تُصرف منها العمولة' };
+    }
+
+    // Check sufficient balance (unless negative cash allowed).
+    const allowNegCash = db.prepare("SELECT Value FROM settings WHERE Key = 'allow_negative_cash'").get() as any;
+    if (allowNegCash?.Value !== '1') {
+      const acc = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(parties.cashAccountId) as any;
+      if (!acc || (acc.Balance || 0) < commission.Amount) {
+        return {
+          success: false,
+          message: `الرصيد غير كافٍ في الخزينة لصرف العمولة: المتاح ${(acc?.Balance || 0).toFixed(2)}، المطلوب ${commission.Amount.toFixed(2)}`,
+        };
+      }
+    }
+
+    let voucherNumber = '';
+    const tx = db.transaction(() => {
+      // Same lock-time re-check as salaries:pay and advances:create: the
+      // validation above ran outside the write lock, and a rival flow can drain
+      // the drawer in that window.
+      if (allowNegCash?.Value !== '1') {
+        const accTx = db.prepare('SELECT Balance FROM cash_accounts WHERE CashAccountID = ?').get(parties.cashAccountId) as any;
+        if (!accTx || (accTx.Balance || 0) < commission.Amount) {
+          const e = new Error(`الرصيد غير كافٍ في الخزينة لصرف العمولة: المتاح ${(accTx?.Balance || 0).toFixed(2)}، المطلوب ${commission.Amount.toFixed(2)}`);
+          (e as any).userRefusal = true;
+          throw e;
+        }
+      }
+
+      const empName = (db.prepare('SELECT Name FROM employees WHERE EmployeeID = ?').get(parties.employeeId) as any)?.Name ?? '';
+      voucherNumber = nextDocNumber(db, 'vouchers', 'VoucherNumber', 'COMM', dateStr);
+      const vIns = db.prepare(`
+        INSERT INTO vouchers (VoucherNumber, VoucherType, FiscalYearID, Date, Amount,
+          PartyType, PartyID, PartyName, Description, CashAccountID, UserID,
+          ReferenceType, ReferenceID)
+        VALUES (?, 'payment', ?, ?, ?, 'employee', ?, ?, 'صرف عمولة فوري', ?, ?, 'commission', ?)
+      `).run(
+        voucherNumber, data.fiscalYearId, dateStr, commission.Amount,
+        parties.employeeId, empName, parties.cashAccountId, data.userId, commission.CommissionID,
+      );
+      const voucherId = vIns.lastInsertRowid as number;
+
+      db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?')
+        .run(commission.Amount, parties.cashAccountId);
+
+      db.prepare('UPDATE commissions SET IsPaid = 1, PaidAmount = ?, PaidVoucherID = ?, PaidDate = ? WHERE CommissionID = ?')
+        .run(commission.Amount, voucherId, dateStr, commission.CommissionID);
+    });
+
+    try {
+      tx();
+    } catch (err: any) {
+      if (err?.userRefusal) return { success: false, message: err.message };
+      throw err;
+    }
+    return { success: true, paidAmount: commission.Amount, voucherNumber };
   });
 }

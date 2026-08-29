@@ -184,7 +184,8 @@ try {
       JSON.stringify(lst).slice(0, 80));
 
     const base = { CustomerName: 'عميل أحمد', ServiceType: 'topup', Provider: 'vodafone',
-      TargetPhone: '01000000001', Amount: 100, ServiceCost: 0, ChargeAmount: 100, PaidAmount: 100, CashAccountID: 1 };
+      TargetPhone: '01000000001', PaidToProvider: 100, ChargeAmount: 100, PaidAmount: 100,
+      CashAccountID: 1, ReceiveAccountType: 'cash_account', ReceiveAccountID: 1 };
 
     const alien = await service({ ...base, ServiceType: 'ALIEN' });
     t('a junk service type is refused', alien?.success === false && /نوع الخدمة/.test(alien?.message ?? ''), alien?.message ?? JSON.stringify(alien));
@@ -199,9 +200,9 @@ try {
     const noTarget = await service({ ...base, TargetPhone: '' });
     t('a missing destination number is refused', noTarget?.success === false && noTarget?.message === 'رقم الوجهة مطلوب', noTarget?.message ?? '');
 
-    const negAmount = await service({ ...base, Amount: -500 });
+    const negAmount = await service({ ...base, PaidToProvider: -500 });
     t('a negative amount is refused', negAmount?.success === false, negAmount?.message ?? '');
-    const negCharge = await service({ ...base, ChargeAmount: -4900 });
+    const negCharge = await service({ ...base, ChargeAmount: -4900, PaidAmount: -4900 });
     t('a negative charge is refused', negCharge?.success === false, negCharge?.message ?? '');
     const negPaid = await service({ ...base, PaidAmount: -900 });
     t('a negative paid figure is refused', negPaid?.success === false, negPaid?.message ?? '');
@@ -216,6 +217,10 @@ try {
     t('a junk customer id is refused', junkCust?.success === false, JSON.stringify(junkCust).slice(0, 80));
     const ghostCust = await service({ ...base, CustomerID: 999 });
     t('a ghost customer is refused', ghostCust?.success === false && ghostCust?.message === 'العميل غير موجود', ghostCust?.message ?? '');
+    const unpaidWalk = await service({ ...base, PaidAmount: 50 });
+    t('a walk-in paying half is refused — the full amount is due at once',
+      unpaidWalk?.success === false && /العميل النقدي يدفع كامل المبلغ/.test(unpaidWalk?.message ?? ''),
+      unpaidWalk?.message ?? 'accepted');
 
     t('none of the refusals created anything', svcCount() === 0, `rows ${svcCount()}`);
     t('the drawer and the machine never moved', cash() === cashL && mach() === machL,
@@ -227,15 +232,16 @@ try {
   {
     const s1 = await service({
       CustomerName: 'عميل أحمد', ServiceType: 'balance_transfer', Provider: 'fawry',
-      TargetPhone: '01122223333', Amount: 1000, ServiceCost: 20, ChargeAmount: 1025,
-      PaidAmount: 1025, PaymentMethod: 'cash', CashAccountID: 1, PaymentMethodID: 1, TransferCost: 5,
+      TargetPhone: '01122223333', PaidToProvider: 1000, ChargeAmount: 1025,
+      PaidAmount: 1025, PaymentMethod: 'cash', CashAccountID: 1, PaymentMethodID: 1,
+      ReceiveAccountType: 'cash_account', ReceiveAccountID: 1,
     });
     t('the transfer is booked', s1?.success === true && /^SRV-\d{8}-\d{4}$/.test(s1?.serviceNumber ?? ''), s1?.serviceNumber ?? JSON.stringify(s1));
-    t('a paid-in-full transfer is completed with zero profit and zero remaining',
-      s1?.status === 'completed' && near(s1?.profit, 0) && near(s1?.remaining, 0),
+    t('a paid-in-full transfer is completed with the customer\'s margin and zero remaining',
+      s1?.status === 'completed' && near(s1?.profit, 25) && near(s1?.remaining, 0),
       JSON.stringify({ status: s1?.status, profit: s1?.profit, remaining: s1?.remaining }));
 
-    machL -= 1000 + 25; cashL += 1025;
+    machL -= 1000; cashL += 1025;
     t('the principal and the fees left the machine, the payment landed in the drawer',
       mach() === machL && cash() === cashL, `mach ${mach()} vs ${machL}, cash ${cash()} vs ${cashL}`);
     t('a paid-in-full transfer owes the customer nothing', cust(1) === 0, `${cust(1)}`);
@@ -253,8 +259,9 @@ try {
   {
     const s2 = await service({
       CustomerID: 1, ServiceType: 'bill_payment', Provider: 'vodafone',
-      TargetPhone: '01011112222', Amount: 300, ServiceCost: 0, ChargeAmount: 300,
+      TargetPhone: '01011112222', PaidToProvider: 300, ChargeAmount: 300,
       PaidAmount: 100, PaymentMethod: 'credit', CashAccountID: 1,
+      ReceiveAccountType: 'cash_account', ReceiveAccountID: 1,
     });
     t('a partially-paid service is recorded as partial', s2?.success === true && s2?.status === 'partial',
       s2?.status ?? JSON.stringify(s2));
@@ -316,8 +323,8 @@ try {
   // ---------------------------------------------------------------- 5
   console.log('\n[5] the funding sources are real, active, and chosen');
   {
-    const base = { ServiceType: 'topup', Provider: 'orange', TargetPhone: '01033334444',
-      Amount: 1000, ServiceCost: 0, ChargeAmount: 1000, PaidAmount: 0 };
+    const base = { CustomerID: 1, ServiceType: 'topup', Provider: 'orange', TargetPhone: '01033334444',
+      PaidToProvider: 1000, ChargeAmount: 1000, PaidAmount: 0 };
 
     const ghostMach = await service({ ...base, PaymentMethodID: 9999 });
     t('a ghost machine is refused as missing, not as broke',
@@ -329,29 +336,29 @@ try {
       deadMach?.success === false && deadMach?.message === 'ماكينة الدفع المختارة غير مفعّلة',
       deadMach?.message ?? 'accepted');
 
-    const ghostCash = await service({ ...base, ServiceCost: 10, CashAccountID: 9999 });
+    const ghostCash = await service({ ...base, CashAccountID: 9999 });
     t('a ghost drawer is refused as missing, not as broke',
       ghostCash?.success === false && ghostCash?.message === 'الخزنة المختارة غير موجودة',
       ghostCash?.message ?? 'accepted');
 
-    const deadCash = await service({ ...base, ServiceCost: 10, CashAccountID: 2 });
+    const deadCash = await service({ ...base, CashAccountID: 2 });
     t('a deactivated drawer is refused',
       deadCash?.success === false && deadCash?.message === 'الخزنة المختارة غير مفعّلة',
       deadCash?.message ?? 'accepted');
 
     const orphan = await service({ ...base, PaidAmount: 500, CashAccountID: undefined, PaymentMethodID: undefined });
     t('a payment with no destination is refused, not booked into thin air',
-      orphan?.success === false && orphan?.message === 'اختر مصدر استلام المبلغ (خزنة أو ماكينة)',
+      orphan?.success === false && orphan?.message === 'اختر مصدر استلام المبلغ من العميل (خزنة أو ماكينة)',
       orphan?.message ?? `accepted — ${svcCount()} rows`);
 
-    const brokeMach = await service({ ...base, Amount: 5200, PaidAmount: 5200, CashAccountID: 1, PaymentMethodID: 1 });
+    const brokeMach = await service({ ...base, PaidToProvider: 5200, ChargeAmount: 5200, PaidAmount: 5200, CashAccountID: 1, PaymentMethodID: 1, ReceiveAccountType: 'cash_account', ReceiveAccountID: 1 });
     t('an underfunded machine refuses with its numbers',
       brokeMach?.success === false && /الرصيد غير كافٍ في طريقة الدفع: المتاح 5000\.00، المطلوب 5200\.00/.test(brokeMach?.message ?? ''),
       brokeMach?.message ?? 'accepted');
 
-    const brokeCash = await service({ ...base, ServiceCost: 100005, PaidAmount: 0, CashAccountID: 1 });
+    const brokeCash = await service({ ...base, PaidToProvider: 100005, ChargeAmount: 100000, PaidAmount: 0, CashAccountID: 1 });
     t('an underfunded drawer refuses with its numbers',
-      brokeCash?.success === false && /الرصيد غير كافٍ في الخزينة: المتاح 100000\.00، المطلوب 101005\.00/.test(brokeCash?.message ?? ''),
+      brokeCash?.success === false && /الرصيد غير كافٍ في الخزينة: المتاح 100000\.00، المطلوب 100005\.00/.test(brokeCash?.message ?? ''),
       brokeCash?.message ?? 'accepted');
 
     t('none of the refusals moved a single pound', cash() === 100000 && mach() === 5000 && svcCount() === 0,
@@ -364,18 +371,18 @@ try {
     // POS terminal cannot be overdrawn, so its floor ignores the setting and
     // the machine guard below runs no matter what.
     run("UPDATE settings SET Value = '1' WHERE Key = 'allow_negative_cash'");
-    const neg1 = await service({ ...base, Amount: 100005, ChargeAmount: 100000, ServiceCost: 5, PaidAmount: 0, CashAccountID: 1 });
+    const neg1 = await service({ ...base, PaidToProvider: 100005, ChargeAmount: 100000, PaidAmount: 0, CashAccountID: 1 });
     t('a shop that allows negative cash may overspend its drawer',
-      neg1?.success === true && cash() === 100000 - (100005 + 5) && svcCount() === 1,
+      neg1?.success === true && cash() === 100000 - 100005 && svcCount() === 1,
       `${neg1?.message ?? 'rejected'} — cash ${cash()}`);
-    const neg2 = await service({ ...base, Amount: 5200, PaidAmount: 0, PaymentMethodID: 1 });
+    const neg2 = await service({ ...base, PaidToProvider: 5200, ChargeAmount: 5200, PaidAmount: 0, PaymentMethodID: 1 });
     t('the machine refuses with its numbers regardless of the setting',
       neg2?.success === false && /الرصيد غير كافٍ في طريقة الدفع: المتاح 5000\.00، المطلوب 5200\.00/.test(neg2?.message ?? ''),
       neg2?.message ?? 'accepted');
     run("UPDATE settings SET Value = '0' WHERE Key = 'allow_negative_cash'");
-    const neg3 = await service({ ...base, Amount: 100, ServiceCost: 0, PaidAmount: 0, CashAccountID: 1 });
+    const neg3 = await service({ ...base, PaidToProvider: 100, ChargeAmount: 100, PaidAmount: 0, CashAccountID: 1 });
     t('switching the setting off restores the floor at once',
-      neg3?.success === false && cash() === 100000 - (100005 + 5) && svcCount() === 1,
+      neg3?.success === false && cash() === 100000 - 100005 && svcCount() === 1,
       `${neg3?.message ?? 'accepted'} — cash ${cash()}`);
     // Undo the overdraw through the deletion path so the sections that follow
     // open with the seeded books.
@@ -391,11 +398,12 @@ try {
     raceProbe(drainMachine, restoreMachine);
     const raced = await service({
       ServiceType: 'balance_transfer', Provider: 'fawry', TargetPhone: '01044445555',
-      Amount: 1000, ServiceCost: 20, ChargeAmount: 1025, PaidAmount: 1025,
-      PaymentMethod: 'cash', CashAccountID: 1, PaymentMethodID: 1, TransferCost: 5,
+      PaidToProvider: 1000, ChargeAmount: 1025, PaidAmount: 1025,
+      PaymentMethod: 'cash', CashAccountID: 1, PaymentMethodID: 1,
+      ReceiveAccountType: 'cash_account', ReceiveAccountID: 1,
     });
     t('the drained machine refuses the transfer instead of overdrawing',
-      raced?.success === false && /الرصيد غير كافٍ في طريقة الدفع: المتاح 0\.00، المطلوب 1025\.00/.test(raced?.message ?? ''),
+      raced?.success === false && /الرصيد غير كافٍ في طريقة الدفع: المتاح 0\.00، المطلوب 1000\.00/.test(raced?.message ?? ''),
       raced?.message ?? `accepted — machine now ${mach()}`);
     t('the books are untouched by the race', cash() === 100000 && mach() === 5000 && cust(1) === 0 && svcCount() === 0,
       `cash ${cash()}, mach ${mach()}, rows ${svcCount()}`);
@@ -452,18 +460,20 @@ try {
 
     // A partial counter service funded from the drawer.
     const sp = await service({ CustomerID: 1, ServiceType: 'bill_payment', Provider: 'vodafone',
-      TargetPhone: '01055556666', Amount: 300, ServiceCost: 0, ChargeAmount: 300,
-      PaidAmount: 100, PaymentMethod: 'credit', CashAccountID: 1 });
+      TargetPhone: '01055556666', PaidToProvider: 300, ChargeAmount: 300,
+      PaidAmount: 100, PaymentMethod: 'credit', CashAccountID: 1,
+      ReceiveAccountType: 'cash_account', ReceiveAccountID: 1 });
     t('a partial service is booked', sp?.success === true, JSON.stringify(sp).slice(0, 100));
     cashL -= 200; cust1L += 200; sync('partial service');
     const spId = q('SELECT ServiceSaleID v FROM service_sales WHERE ServiceNumber = ?', sp.serviceNumber).v;
 
     // A full machine-funded transfer, paid at the counter.
     const pm = await service({ ServiceType: 'balance_transfer', Provider: 'fawry',
-      TargetPhone: '01066667777', Amount: 1000, ServiceCost: 20, ChargeAmount: 1025,
-      PaidAmount: 1025, PaymentMethod: 'cash', CashAccountID: 1, PaymentMethodID: 1, TransferCost: 5 });
+      TargetPhone: '01066667777', PaidToProvider: 1000, ChargeAmount: 1025,
+      PaidAmount: 1025, PaymentMethod: 'cash', CashAccountID: 1, PaymentMethodID: 1,
+      ReceiveAccountType: 'cash_account', ReceiveAccountID: 1 });
     t('a machine-funded service is booked', pm?.success === true, JSON.stringify(pm).slice(0, 100));
-    machL -= 1025; cashL += 1025; sync('machine service');
+    machL -= 1000; cashL += 1025; sync('machine service');
     const pmId = q('SELECT ServiceSaleID v FROM service_sales WHERE ServiceNumber = ?', pm.serviceNumber).v;
 
     // An advance, and a salary that swallows it.
@@ -542,7 +552,7 @@ try {
       near(mByType('sale')[0].InAmount, 125) && near(mByType('return')[0].OutAmount, 135) && near(mByType('purchase_return')[0].InAmount, 80),
       JSON.stringify(machOps.map(o => [o.OpType, o.InAmount, o.OutAmount])).slice(0, 200));
     t('the machine-funded service shows its whole outflow',
-      mByType('service_sale')[0] && near(mByType('service_sale')[0].OutAmount, 1025), JSON.stringify(mByType('service_sale')[0]).slice(0, 140));
+      mByType('service_sale')[0] && near(mByType('service_sale')[0].OutAmount, 1000), JSON.stringify(mByType('service_sale')[0]).slice(0, 140));
     t('the whole machine statement foots to the tracked machine',
       near((ms.totalIn ?? 0) - (ms.totalOut ?? 0), machL - 5000),
       `net ${(ms.totalIn ?? 0) - (ms.totalOut ?? 0)} vs change ${machL - 5000}`);
@@ -685,7 +695,7 @@ try {
     t('P&L and the balance sheet compute the SAME profit',
       near(p?.netProfit ?? NaN, fp?.capital?.netProfit ?? NaN), `${p?.netProfit} vs ${fp?.capital?.netProfit}`);
     t('the service profit is netted honestly (revenue minus principal minus costs)',
-      near(p?.revenue?.services, 25) && near(p?.costs?.serviceCosts, 25),
+      near(p?.revenue?.services, 25) && near(p?.costs?.serviceCosts, 0),
       `revenue ${p?.revenue?.services}, costs ${p?.costs?.serviceCosts}`);
   }
 

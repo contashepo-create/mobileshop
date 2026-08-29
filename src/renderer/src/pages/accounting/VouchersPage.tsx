@@ -9,6 +9,7 @@ import { useToastStore } from '../../components/ui/Toast';
 import { isFailure, failureMessage } from '../../lib/ipc';
 import { AssetPicker, splitAssetValue, useAssets } from '../../components/shared/AssetPicker';
 import { currentUserId } from '../../stores/auth.store';
+import { localToday } from '../../lib/businessDay';
 
 /**
  * `mode` splits receipts from payments into two sidebar entries.
@@ -37,14 +38,21 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
   const [customers, setCustomers] = useState<any[]>([]);
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [employees, setEmployees] = useState<any[]>([]);
+  const [commissions, setCommissions] = useState<any[]>([]);
 
   const [form, setForm] = useState({
     VoucherType: mode ?? 'receipt',
     Amount: '',
+    VoucherDate: localToday(),
     PartyType: 'general',
     PartyID: '',
     PartyName: '',
     Description: '',
+    // A pending commission this (payment) voucher closes. Setting it makes the
+    // handler stamp the voucher `ReferenceType='commission'` and mark the
+    // commission paid inside the same transaction — the whole point of the
+    // general-voucher route.
+    CommissionID: '',
     // One field replacing CashAccountID + PaymentMethodID. Holding a single
     // value makes it impossible for the form to name two assets at once.
     AssetValue: '',
@@ -53,13 +61,14 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
   const { assets, reload: reloadAssets } = useAssets();
 
   const fetchData = async () => {
-    const [v, ca, pm, cu, su, em] = await Promise.all([
+    const [v, ca, pm, cu, su, em, co] = await Promise.all([
       window.api.invoke('vouchers:list', { type: typeFilter }),
       window.api.invoke('cashAccounts:list'),
       window.api.invoke('paymentMethods:list'),
       window.api.invoke('customers:list'),
       window.api.invoke('suppliers:list'),
       window.api.invoke('employees:list', { isActive: 1 }),
+      window.api.invoke('commissions:list', { status: 'pending' }),
     ]);
     setVouchers(v);
     setCashAccounts(ca);
@@ -67,6 +76,7 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
     setCustomers(cu);
     setSuppliers(su);
     setEmployees(em);
+    setCommissions(co);
   };
 
   useEffect(() => { fetchData(); }, [typeFilter]);
@@ -83,11 +93,13 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
     }
     // The picker's single value becomes exactly one of the two ids the
     // handler expects, so no handler signature had to change.
-    const { AssetValue, ...rest } = form;
+    const { AssetValue, VoucherDate, ...rest } = form;
     const data = {
       ...rest,
       Amount: parseFloat(form.Amount),
+      Date: form.VoucherDate,
       PartyID: form.PartyID ? parseInt(form.PartyID) : null,
+      CommissionID: form.CommissionID ? parseInt(form.CommissionID) : undefined,
       ...splitAssetValue(AssetValue),
       userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
@@ -102,7 +114,7 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
     }
     showToast('success', `تم إنشاء السند - رقم: ${result.voucherNumber}`);
     setShowModal(false);
-    setForm({ VoucherType: mode ?? 'receipt', Amount: '', PartyType: 'general', PartyID: '', PartyName: '', Description: '', AssetValue: '' });
+    setForm({ VoucherType: mode ?? 'receipt', Amount: '', VoucherDate: localToday(), PartyType: 'general', PartyID: '', PartyName: '', Description: '', CommissionID: '', AssetValue: '' });
     reloadAssets();
     fetchData();
   };
@@ -190,6 +202,9 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
             <option value="payment">سند صرف</option>
           </Select>
           <Input label="المبلغ" type="number" value={form.Amount} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, Amount: e.target.value })} />
+          <Input label="تاريخ السند" type="date" value={form.VoucherDate}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, VoucherDate: e.target.value })}
+            hint="قابل للتعديل - يُقيَّد السند في سنته المالية" />
           <Select label="نوع الطرف" value={form.PartyType} onChange={(e) => setForm({ ...form, PartyType: e.target.value, PartyID: '' })}>
             {partyTypeOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </Select>
@@ -213,6 +228,26 @@ export function VouchersPage({ mode }: { mode?: 'receipt' | 'payment' } = {}) {
           )}
           {form.PartyType === 'general' && (
             <Input label="اسم الطرف (اختياري)" value={form.PartyName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, PartyName: e.target.value })} />
+          )}
+          {/* Closing an earned commission with this payment voucher. Choosing one
+              makes the handler mark it paid (IsPaid=1) and stamps the voucher
+              so the P&L books the technician's commission from THIS document,
+              exactly once, instead of as an accrued liability. */}
+          {form.VoucherType === 'payment' && (
+            <Select label="إقفال عمولة (اختياري)" value={form.CommissionID}
+              onChange={(e) => {
+                const c = commissions.find((x: any) => x.CommissionID === parseInt(e.target.value));
+                setForm({
+                  ...form,
+                  CommissionID: e.target.value,
+                  // The handler closes the commission whole, so the amount must
+                  // match it — prefill to spare the owner the arithmetic.
+                  Amount: c ? c.Amount.toString() : form.Amount,
+                });
+              }}>
+              <option value="">— لا شيء —</option>
+              {commissions.map((c: any) => <option key={c.CommissionID} value={c.CommissionID}>{c.EmployeeName} - {c.Amount?.toFixed(2)} {c.CommissionType === 'maintenance' ? '(صيانة)' : '(مبيعات)'}</option>)}
+            </Select>
           )}
           {/* ONE question, not two. The old form offered a safe AND a separate
               "payment method (optional)", but both name an asset with a

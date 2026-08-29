@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { validateRegistration, EGYPT_GOVERNORATES } from '../../../../shared/registration';
 import { useNavigate } from 'react-router-dom';
-import { Building2, User, Phone, Mail, MapPin, Save, ArrowRight, Shield, Store } from 'lucide-react';
+import { Building2, User, Phone, Mail, MapPin, Save, ArrowRight, Shield, Store, DatabaseBackup, Upload } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input, Select } from '../../components/ui/Input';
 import { useToastStore } from '../../components/ui/Toast';
@@ -22,7 +22,6 @@ export function FirstRunWizard() {
     governorate: '',
     city: '',
     birthDate: '',
-    shareWithDeveloper: true,
   });
   // Per-field messages from the shared validator, so the owner sees every
   // problem at once instead of discovering them one submit at a time.
@@ -31,13 +30,6 @@ export function FirstRunWizard() {
   // no bot configured must still be able to finish setting up.
   const [phoneVerified, setPhoneVerified] = useState(false);
   const [phoneBusy, setPhoneBusy] = useState(false);
-
-  const [customer, setCustomer] = useState({
-    name: '',
-    phone: '',
-    email: '',
-    address: '',
-  });
 
   const [admin, setAdmin] = useState({
     username: 'admin',
@@ -90,7 +82,6 @@ export function FirstRunWizard() {
     try {
       const result = await window.api.invoke('setup:initialize', {
         company,
-        customer,
         admin,
       });
       if (result?.success) {
@@ -104,6 +95,30 @@ export function FirstRunWizard() {
     } catch (err: any) {
       console.error('[Setup] Error:', err);
       showToast('error', 'حدث خطأ أثناء الإعداد: ' + (err?.message || err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /**
+   * The Windows-reinstall path: this machine was installed fresh, but the shop
+   * already exists on an older copy of the database the owner kept. Adopt it
+   * directly instead of typing everything in again — all customers, invoices
+   * and balances come back whole.
+   */
+  const handleImportDatabase = async () => {
+    setLoading(true);
+    try {
+      const result = await window.api.invoke('setup:importDatabase');
+      if (result?.success) {
+        showToast('success', result.message || 'تم الاستيراد');
+        setTimeout(() => window.location.reload(), 1000);
+      } else {
+        showToast('error', result?.message || 'تعذّر الاستيراد');
+      }
+    } catch (err: any) {
+      console.error('[Setup] Import error:', err);
+      showToast('error', 'حدث خطأ أثناء الاستيراد: ' + (err?.message || err));
     } finally {
       setLoading(false);
     }
@@ -136,6 +151,37 @@ export function FirstRunWizard() {
         </div>
 
         <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl p-6 border border-slate-200 dark:border-slate-700">
+          {/* Windows-reinstall import: offer it before the company form, on
+              every step, so the owner can adopt an old database at any moment
+              of the wizard instead of re-entering everything by hand. The card
+              is visually prominent (gradient + strong border) so an owner who
+              reinstalled Windows or bought a new machine sees it immediately. */}
+          <div className="mb-5 rounded-xl overflow-hidden border-2 border-primary-500 dark:border-primary-600 shadow-lg shadow-primary-500/20">
+            <div className="flex items-center gap-3 bg-gradient-to-l from-primary-600 to-primary-500 px-4 py-3">
+              <div className="p-2 rounded-lg bg-white/20">
+                <DatabaseBackup size={20} className="text-white" />
+              </div>
+              <div className="flex-1 text-white">
+                <h4 className="text-sm font-bold">غيّرت ويندوز أو اشتريت جهازاً جديداً؟ لا تفقد بياناتك</h4>
+                <p className="text-[11px] text-primary-100 mt-0.5">
+                  استبدل هذا الإعداد النظيف بقاعدتك القديمة — عملاؤك وفواتيرك وأرصدتك ستعود كما كانت،
+                  بلا إعادة كتابة أي شيء.
+                </p>
+              </div>
+            </div>
+            <div className="bg-white dark:bg-slate-800 flex items-center justify-between gap-3 p-3">
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 flex-1">
+                اختر ملف <code className="bg-slate-100 dark:bg-slate-700 px-1 rounded">mobile_shop.db</code> —
+                يُفحص ويُرحَّب به بأمان تام.
+              </p>
+              <button type="button" disabled={loading}
+                onClick={handleImportDatabase}
+                className="shrink-0 text-xs font-bold text-white bg-primary-600 hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-600 disabled:opacity-50 px-4 py-2 rounded-lg flex items-center gap-1.5 shadow-sm">
+                <Upload size={14} /> استيراد قاعدة البيانات
+              </button>
+            </div>
+          </div>
+
           {step === 1 && (
             <div className="space-y-4">
               <h3 className="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
@@ -196,31 +242,6 @@ export function FirstRunWizard() {
                  {fieldErrors.birthDate && <p className="text-[11px] text-red-600 mt-1">{fieldErrors.birthDate}</p>}
                </div>
                <Input label="الرقم الضريبي" value={company.taxNumber} onChange={(e) => setCompany({...company, taxNumber: e.target.value})} />
-
-               {/* Consent, not a pre-ticked trap: personal data must not leave
-                   the machine on a default the owner never read. Stated plainly
-                   so the choice is informed. */}
-               <label className="flex items-start gap-2 p-3 rounded-lg bg-slate-50 dark:bg-slate-700/40 cursor-pointer">
-                 <input type="checkbox" checked={company.shareWithDeveloper}
-                   onChange={(e) => setCompany({...company, shareWithDeveloper: e.target.checked})}
-                   className="mt-1 rounded" />
-                 <span className="text-xs text-slate-600 dark:text-slate-300">
-                   أوافق على إرسال بيانات المحل (الاسم، الهاتف، البريد، العنوان) إلى مطوّر البرنامج
-                   لأغراض الدعم الفني وتفعيل الترخيص.
-                   <span className="block mt-1 text-slate-500 dark:text-slate-400">
-                     لا تُرسل أي بيانات عن عملائك أو مبيعاتك أو أرصدتك — أبداً.
-                   </span>
-                 </span>
-               </label>
-
-               <div className="border-t border-slate-200 dark:border-slate-700 my-4" />
-               <h3 className="text-sm font-semibold text-slate-600 dark:text-slate-400">بيانات العميل الأول (اختياري)</h3>
-               <Input label="اسم العميل" value={customer.name} onChange={(e) => setCustomer({...customer, name: e.target.value})} />
-               <div className="grid grid-cols-2 gap-3">
-                 <Input label="هاتف العميل" value={customer.phone} onChange={(e) => setCustomer({...customer, phone: e.target.value})} />
-                 <Input label="بريد العميل" type="email" value={customer.email} onChange={(e) => setCustomer({...customer, email: e.target.value})} />
-               </div>
-               <Input label="عنوان العميل" value={customer.address} onChange={(e) => setCustomer({...customer, address: e.target.value})} />
             </div>
           )}
 
@@ -247,7 +268,6 @@ export function FirstRunWizard() {
                <div className="flex justify-between"><span className="text-slate-500">اسم المحل</span><span className="font-medium">{company.companyName}</span></div>
                  <div className="flex justify-between"><span className="text-slate-500">المالك</span><span className="font-medium">{company.ownerName}</span></div>
                  <div className="flex justify-between"><span className="text-slate-500">هاتف المحل</span><span className="font-medium">{company.phone}</span></div>
-                 {customer.name && <div className="flex justify-between"><span className="text-slate-500">العميل الأول</span><span className="font-medium">{customer.name}</span></div>}
                  <div className="flex justify-between"><span className="text-slate-500">حساب المدير</span><span className="font-medium text-primary-600">{admin.username}</span></div>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">هل أنت متأكد من أن هذه البيانات صحيحة؟ يمكن تعديلها لاحقاً من الإعدادات.</p>

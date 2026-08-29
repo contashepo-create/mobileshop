@@ -46,6 +46,7 @@ const PUBLIC_CHANNELS = new Set<string>([
   'setup:isComplete',
   'setup:initialize',
   'setup:complete',
+  'setup:importDatabase',
   'settings:getAll', // needed to render the login screen / branding
   'settings:get',
   'dev:login',
@@ -94,6 +95,8 @@ const PUBLIC_CHANNELS = new Set<string>([
 const AUTHENTICATED_ONLY = new Set<string>([
   'fiscalYear:getActive',
   'fiscalYear:list',
+  'fiscalYear:forDate',
+  'fiscalYear:openings',
   'notes:list',
   'notes:add',
   'notifications:smart',
@@ -211,7 +214,11 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'serviceSales:list': 'sales.view',
   'serviceSales:get': 'sales.view',
   'serviceSales:create': 'sales.create',
+  'serviceSales:update': 'sales.delete',
+  'serviceSales:return': 'sales.returns',
+  'serviceReturns:list': 'sales.returns',
   'delete:serviceSale': 'sales.delete',
+  'delete:serviceReturn': 'sales.delete',
 
   // ---- Vouchers
   'vouchers:list': 'vouchers.view',
@@ -229,6 +236,8 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   'advances:list': 'payroll.view',
   'advances:create': 'payroll.create',
   'delete:advance': 'payroll.edit',
+  'commissions:list': 'payroll.view',
+  'commissions:payImmediate': 'payroll.create',
   'deductions:list': 'deductions.view',
   'deductions:create': 'deductions.create',
   'delete:deduction': 'payroll.edit',
@@ -266,6 +275,7 @@ const CHANNEL_PERMISSIONS: Record<string, string> = {
   // ---- Fiscal year
   'fiscalYear:create': 'fiscal_year.manage',
   'fiscalYear:close': 'fiscal_year.manage',
+  'fiscalYear:reopen': 'fiscal_year.manage',
 
   // ---- Inventory
   'items:create': 'inventory.create',

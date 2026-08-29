@@ -6,6 +6,7 @@ import { Modal } from '../../components/ui/Modal';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
+import { localToday } from '../../lib/businessDay';
 
 interface PurchaseItem { ItemID: number; ItemName: string; IMEI?: string; Quantity: number; UnitCost: number; WarehouseID: number; }
 
@@ -44,6 +45,8 @@ export function PurchasesPage({ mode }: { mode?: 'purchases' | 'returns' } = {})
   const [paymentSourceType, setPaymentSourceType] = useState<'cash_account' | 'payment_method'>('cash_account');
   const [paymentSourceId, setPaymentSourceId] = useState('');
   const [notes, setNotes] = useState('');
+  const [purchaseDate, setPurchaseDate] = useState(localToday());
+  const [returnDate, setReturnDate] = useState(localToday());
 
   const [selectedItem, setSelectedItem] = useState('');
   const [imei, setImei] = useState('');
@@ -98,6 +101,7 @@ export function PurchasesPage({ mode }: { mode?: 'purchases' | 'returns' } = {})
     try {
       const result = await window.api.invoke('purchases:create', {
         SupplierID: parseInt(supplierId),
+        Date: purchaseDate,
         items: cart,
         Discount: discAmt,
         TaxAmount: 0,
@@ -182,6 +186,7 @@ export function PurchasesPage({ mode }: { mode?: 'purchases' | 'returns' } = {})
         UnitCost: l.UnitCost, WarehouseID: l.WarehouseID,
       })),
       Reason: returnReason || undefined,
+      Date: returnDate,
       AccountCredit: parseFloat(retAccountCredit) || 0,
       CashRefund: parseFloat(retCashRefund) || 0,
       TransferRefund: parseFloat(retTransferRefund) || 0,
@@ -280,7 +285,7 @@ export function PurchasesPage({ mode }: { mode?: 'purchases' | 'returns' } = {})
       >
         <div className="space-y-4">
           {/* Supplier & Warehouse */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             <Select label="المورد" value={supplierId} onChange={(e) => setSupplierId(e.target.value)}>
               <option value="">— اختر —</option>
               {suppliers.map((s: any) => <option key={s.SupplierID} value={s.SupplierID}>{s.Name} (رصيد: {s.Balance?.toFixed(2)})</option>)}
@@ -288,6 +293,7 @@ export function PurchasesPage({ mode }: { mode?: 'purchases' | 'returns' } = {})
             <Select label="المخزن المستلم" value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
               {warehouses.map((w: any) => <option key={w.WarehouseID} value={w.WarehouseID}>{w.WarehouseName}</option>)}
             </Select>
+            <Input label="تاريخ الفاتورة" type="date" value={purchaseDate} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPurchaseDate(e.target.value)} hint="قابل للتعديل - تُوثَّق الفاتورة بهذا التاريخ" />
           </div>
 
           {/* Add items */}
@@ -424,9 +430,15 @@ export function PurchasesPage({ mode }: { mode?: 'purchases' | 'returns' } = {})
             </table>
           </div>
 
-          <Input label="سبب الإرجاع" value={returnReason}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
-            placeholder="بضاعة تالفة، مخالفة للمواصفات..." />
+          <div className="grid grid-cols-3 gap-3">
+            <Input label="تاريخ المرتجع" type="date" value={returnDate}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnDate(e.target.value)} />
+            <div className="col-span-2">
+              <Input label="سبب الإرجاع" value={returnReason}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReturnReason(e.target.value)}
+                placeholder="بضاعة تالفة، مخالفة للمواصفات..." />
+            </div>
+          </div>
 
           {returnTotal > 0 && (
             <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-3 space-y-3">

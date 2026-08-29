@@ -8,6 +8,7 @@ import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { useAuthStore } from '../../stores/auth.store';
 import { isFailure, failureMessage, asRows } from '../../lib/ipc';
+import { localToday } from '../../lib/businessDay';
 
 const statusLabels: Record<string, string> = {
   received: 'مستلم', inspecting: 'فحص', in_progress: 'قيد العمل',
@@ -43,7 +44,7 @@ export function MaintenancePage() {
 
   // Receive modal
   const [showReceive, setShowReceive] = useState(false);
-  const [recvForm, setRecvForm] = useState({ CustomerID: '', CustomerName: '', CustomerPhone: '', DeviceModel: '', DeviceIMEI: '', ProblemDesc: '', Accessories: '', DevicePassword: '', AgreedDeliveryDate: '', AgreedCost: '', TechnicianID: '', MaintenanceType: 'normal', ReferenceTicketID: '' });
+  const [recvForm, setRecvForm] = useState({ CustomerID: '', CustomerName: '', CustomerPhone: '', DeviceModel: '', DeviceIMEI: '', ProblemDesc: '', Accessories: '', DevicePassword: '', AgreedDeliveryDate: '', AgreedCost: '', TechnicianID: '', MaintenanceType: 'normal', ReferenceTicketID: '', ReceiveDate: localToday() });
 
   // Workbench state
   const [workbenchTicketId, setWorkbenchTicketId] = useState<number | null>(null);
@@ -67,7 +68,7 @@ export function MaintenancePage() {
 
   // Delivery
   const [showDeliver, setShowDeliver] = useState(false);
-  const [deliverForm, setDeliverForm] = useState({ LaborCost: '', PaidAmount: '', CashAccountID: '', PaymentMethodID: '', Discount: '', FinalPrice: '', FinalNotes: '' });
+  const [deliverForm, setDeliverForm] = useState({ LaborCost: '', PaidAmount: '', CashAccountID: '', PaymentMethodID: '', Discount: '', FinalPrice: '', FinalNotes: '', DeliverDate: localToday() });
 
   // Cancel
   const [showCancel, setShowCancel] = useState(false);
@@ -286,7 +287,7 @@ export function MaintenancePage() {
       LaborCost: t?.AgreedCost?.toString() || '',
       PaidAmount: _total.toFixed(2),
       CashAccountID: '', PaymentMethodID: '', Discount: '', FinalPrice: '',
-      FinalNotes: '',
+      FinalNotes: '', DeliverDate: localToday(),
     });
     setShowDeliver(true);
   };
@@ -325,6 +326,7 @@ export function MaintenancePage() {
       Discount: discount,
       FinalPrice: finalPrice || undefined,
       FinalNotes: deliverForm.FinalNotes,
+      Date: deliverForm.DeliverDate,
       userId,
       fiscalYearId: activeFy.FiscalYearID,
     });
@@ -400,12 +402,13 @@ export function MaintenancePage() {
        ProblemDesc: '',
        Accessories: '',
        DevicePassword: t.DevicePassword || '',
-       AgreedDeliveryDate: '',
+AgreedDeliveryDate: '',
        AgreedCost: '0',
        TechnicianID: t.TechnicianID?.toString() || '',
        MaintenanceType: 'warranty',
        ReferenceTicketID: String(t.TicketID),
-     });
+       ReceiveDate: localToday(),
+      });
      // Close the current workbench and open the receive form
      setWorkbenchTicketId(null);
      setShowReceive(true);
@@ -812,7 +815,10 @@ export function MaintenancePage() {
               <Input label="السعر النهائي" type="number" value={deliverForm.FinalPrice} onChange={(e: any) => setDeliverForm({...deliverForm, FinalPrice: e.target.value})} hint={`تلقائي: ${(deliveryTotal - deliveryDiscount).toFixed(2)}`} />
             </div>
 
-            <Textarea label="ملاحظات الفاتورة (تظهر للعميل)" value={deliverForm.FinalNotes} onChange={(e: any) => setDeliverForm({...deliverForm, FinalNotes: e.target.value})} rows={2} placeholder="ملاحظات إضافية على الفاتورة..." />
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="تاريخ التسليم" type="date" value={deliverForm.DeliverDate} onChange={(e: any) => setDeliverForm({...deliverForm, DeliverDate: e.target.value})} hint="قابل للتعديل - تُقيَّد فاتورة التسليم في سنتها المالية" />
+              <Textarea label="ملاحظات الفاتورة (تظهر للعميل)" value={deliverForm.FinalNotes} onChange={(e: any) => setDeliverForm({...deliverForm, FinalNotes: e.target.value})} rows={2} placeholder="ملاحظات إضافية على الفاتورة..." />
+            </div>
 
             <Input label="المبلغ المحصّل من العميل" type="number" value={deliverForm.PaidAmount} onChange={(e: any) => setDeliverForm({...deliverForm, PaidAmount: e.target.value})}
               hint={`الإجمالي المستحق: ${deliveryFinalPrice.toFixed(2)}`}
@@ -945,6 +951,7 @@ export function MaintenancePage() {
           <Input label="نوع الجهاز" value={recvForm.DeviceModel} onChange={(e: any) => setRecvForm({ ...recvForm, DeviceModel: e.target.value })} />
           <Input label="رقم IMEI" value={recvForm.DeviceIMEI} onChange={(e: any) => setRecvForm({ ...recvForm, DeviceIMEI: e.target.value })} />
           <Input label="الموعد المتفق للتسليم" type="date" value={recvForm.AgreedDeliveryDate} onChange={(e: any) => setRecvForm({ ...recvForm, AgreedDeliveryDate: e.target.value })} />
+          <Input label="تاريخ الاستلام" type="date" value={recvForm.ReceiveDate} onChange={(e: any) => setRecvForm({ ...recvForm, ReceiveDate: e.target.value })} hint="قابل للتعديل - يُقيَّد الاستلام في سنته المالية" />
           <Input label="المبلغ المتفق عليه" type="number" value={recvForm.AgreedCost} onChange={(e: any) => setRecvForm({ ...recvForm, AgreedCost: e.target.value })} />
           <Select label="الفني" value={recvForm.TechnicianID} onChange={(e) => setRecvForm({ ...recvForm, TechnicianID: e.target.value })}>
             <option value="">— بدون —</option>
@@ -1053,6 +1060,7 @@ export function MaintenancePage() {
       DevicePassword: recvForm.DevicePassword || undefined,
       AgreedDeliveryDate: recvForm.AgreedDeliveryDate || undefined,
       AgreedCost: recvForm.AgreedCost ? parseFloat(recvForm.AgreedCost) : undefined,
+      Date: recvForm.ReceiveDate,
       TechnicianID: recvForm.TechnicianID ? parseInt(recvForm.TechnicianID) : undefined,
       MaintenanceType: recvForm.MaintenanceType,
       ReferenceTicketID: recvForm.ReferenceTicketID ? parseInt(recvForm.ReferenceTicketID) : undefined,
@@ -1061,7 +1069,7 @@ export function MaintenancePage() {
     if (result.success) {
       showToast('success', `تم استلام الجهاز - رقم: ${result.ticketNumber}`);
       setShowReceive(false);
-      setRecvForm({ CustomerID: '', CustomerName: '', CustomerPhone: '', DeviceModel: '', DeviceIMEI: '', ProblemDesc: '', Accessories: '', DevicePassword: '', AgreedDeliveryDate: '', AgreedCost: '', TechnicianID: '', MaintenanceType: 'normal', ReferenceTicketID: '' });
+      setRecvForm({ CustomerID: '', CustomerName: '', CustomerPhone: '', DeviceModel: '', DeviceIMEI: '', ProblemDesc: '', Accessories: '', DevicePassword: '', AgreedDeliveryDate: '', AgreedCost: '', TechnicianID: '', MaintenanceType: 'normal', ReferenceTicketID: '', ReceiveDate: localToday() });
       fetchData();
     }
   }

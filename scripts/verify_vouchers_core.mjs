@@ -529,6 +529,62 @@ try {
     t('the books balance after sixty moves', balanced(f), JSON.stringify(f?.capital ?? {}).slice(0, 260));
   });
 
+  // ---------------------------------------------------------------- 16
+  console.log('\n[16] A payment voucher closes a commission exactly once — and deletion reopens it');
+  await scenario(async ({ db, call }) => {
+    seed(db);
+    db.prepare(`
+      INSERT INTO commissions (EmployeeID, CommissionType, Amount, Date, ReferenceType,
+        ReferenceID, IsPaid, PaidAmount, PaidInSalaryID, FiscalYearID, UserID)
+      VALUES (1, 'maintenance', 250, ?, 'maintenance', 1, 0, 0, NULL, 1, 1)
+    `).run(fmt(new Date()));
+    const cid = q(db, 'SELECT CommissionID v FROM commissions').v;
+
+    const reject = await voucher(call, { Amount: 250, Description: 'لا', CommissionID: cid });
+    t('a receipt cannot close a commission', reject?.success === false, reject?.message ?? '');
+    const ghost = await voucher(call, { VoucherType: 'payment', Amount: 250, Description: 'x', CommissionID: 99999 });
+    t('a ghost commission link is refused', ghost?.success === false, ghost?.message ?? '');
+    const misAmt = await voucher(call, { VoucherType: 'payment', Amount: 100, Description: 'x', CommissionID: cid });
+    t('a mismatched amount is refused', misAmt?.success === false, misAmt?.message ?? '');
+    const bothLink = await voucher(call, { VoucherType: 'payment', Amount: 250, Description: 'x', CommissionID: cid, RentPaymentID: 1 });
+    t('a rent AND commission link is refused', bothLink?.success === false, bothLink?.message ?? '');
+    const withParty = await voucher(call, { VoucherType: 'payment', Amount: 250, Description: 'x', CommissionID: cid, PartyType: 'employee', PartyID: 1, PartyName: 'موظف' });
+    t('a party cannot ride a commission voucher', withParty?.success === false, withParty?.message ?? '');
+
+    const paid = await voucher(call, { VoucherType: 'payment', Amount: 250, Description: 'صرف عمولة فني', CommissionID: cid });
+    t('the linked payment is accepted', paid?.success === true, paid?.message ?? '');
+    const vrow = q(db, "SELECT * FROM vouchers WHERE ReferenceType = 'commission'");
+    const com = q(db, 'SELECT * FROM commissions WHERE CommissionID = ?', cid);
+    t('the voucher is stamped as a commission', vrow?.ReferenceID === cid, JSON.stringify(vrow ?? {}).slice(0, 140));
+    t('the commission is closed by this voucher', com?.IsPaid === 1 && com?.PaidVoucherID === vrow?.VoucherID && near(com?.PaidAmount, 250) && !!com?.PaidDate,
+      JSON.stringify(com ?? {}).slice(0, 140));
+    t('the drawer paid it once', near(cash(db), 99750), `cash ${cash(db)}`);
+    t('the employee ledger was not touched', near(employee(db), 1000), `employee ${employee(db)}`);
+
+    const p = await pl(call);
+    t('the P&L books the commission from the VOUCHER, once', near(p?.expenses?.general ?? 0, 250) && near(p?.expenses?.commissions ?? 0, 0),
+      `general ${p?.expenses?.general}, commissions ${p?.expenses?.commissions}`);
+    t('the net profit wears it once', near(p?.netProfit ?? 0, -250), `profit ${p?.netProfit}`);
+
+    const again = await voucher(call, { VoucherType: 'payment', Amount: 250, Description: 'مرة أخرى', CommissionID: cid });
+    t('closing a closed commission again is refused', again?.success === false, again?.message ?? '');
+
+    const f0 = await fp(call);
+    t('the books balance with the commission inside the voucher expense', balanced(f0), JSON.stringify(f0?.capital ?? {}).slice(0, 240));
+
+    const del = await call('delete:voucher', vrow.VoucherID);
+    t('deleting the commission voucher is accepted', del?.success === true, del?.message ?? '');
+    const reopened = q(db, 'SELECT * FROM commissions WHERE CommissionID = ?', cid);
+    t('the commission is owed again', reopened?.IsPaid === 0 && reopened?.PaidVoucherID === null,
+      JSON.stringify(reopened ?? {}).slice(0, 140));
+    t('the drawer got the cash back', near(cash(db), 100000), `cash ${cash(db)}`);
+    const p2 = await pl(call);
+    t('the P&L holds the accrual again', near(p2?.expenses?.general ?? 0, 0) && near(p2?.expenses?.commissions ?? 0, 250),
+      `general ${p2?.expenses?.general}, commissions ${p2?.expenses?.commissions}`);
+    const f = await fp(call);
+    t('the books balance with the commission held as a liability', balanced(f), JSON.stringify(f?.capital ?? {}).slice(0, 240));
+  });
+
   console.log(`\nSECTION 10 RESULT: ${PASS.length} passed, ${FAIL.length} failed`);
   if (FAIL.length) {
     console.log('\nFAILED:');

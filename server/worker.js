@@ -1068,6 +1068,15 @@ async function handleReleaseCode(request, env) {
   }
 
   await tg(env, `⚡ <b>تحديث سريع (كود) منشور</b>\nالإصدار: <b>${version}</b>\nالمنصة: ${platform}\nيتطلب نسخة أساس: ${minApp}`);
+  // A code push changes only app.asar — the shop installs it automatically. A
+  // NEW customer still needs the latest full installer, so the same public
+  // download link is part of the notice.
+  const fullRel = await currentRelease(env, platform);
+  if (fullRel?.filename) {
+    const downloadUrl = `${new URL(request.url).origin}/download-nsis/${platform}/${fullRel.filename}`;
+    await tg(env,
+      `📥 أحدث نسخة كاملة للتحميل (${fullRel.version}):\n${downloadUrl}`);
+  }
   return json({ ok: true, version, platform });
 }
 
@@ -1369,7 +1378,19 @@ async function handleRelease(request, env) {
     ON CONFLICT(key, target) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
   `).bind(version, new Date().toISOString()).run();
 
-  await tg(env, `🚀 <b>إصدار جديد منشور</b>\nالإصدار: <b>${version}</b>\nالمنصة: ${platform}\nالحجم: ${(size / 1048576).toFixed(1)} MB`);
+  // Announce on Telegram with a customer-ready download link. The public
+  // `/download-nsis/<platform>/<file>` route needs no client key, so the link
+  // can be handed straight to a customer. Built from this request's own origin
+  // so it stays correct no matter the deployed domain. Delivered as TEXT — the
+  // admin forwards it to the customer; a URL button would download the 110 MB
+  // file on the admin's own phone, which is never what a release notice is for.
+  const downloadUrl = `${new URL(request.url).origin}/download-nsis/${platform}/${filename}`;
+  await tg(env,
+    `🚀 <b>إصدار جديد منشور</b>\n`
+    + `الإصدار: <b>${version}</b>\n`
+    + `المنصة: ${platform}\n`
+    + `الحجم: ${(size / 1048576).toFixed(1)} MB\n`
+    + `\n📥 رابط التحميل — انسخه وارسله للعميل:\n${downloadUrl}`);
   return json({ ok: true, version, platform });
 }
 
@@ -1466,7 +1487,8 @@ const MAIN_MENU = [
    { text: '📨 الرسائل', callback_data: 'msgs' }],
   [{ text: '⚙️ إعداد عام', callback_data: 'setall' },
    { text: '📊 إحصائيات', callback_data: 'stats' }],
-  [{ text: '❓ مساعدة', callback_data: 'help' }],
+  [{ text: '📥 أحدث نسخة', callback_data: 'dl' },
+   { text: '❓ مساعدة', callback_data: 'help' }],
 ];
 
 const backTo = target => [[{ text: '⬅️ رجوع', callback_data: target }]];
@@ -1738,7 +1760,7 @@ async function screenExpiring(env, messageId) {
 
 // ---------------------------------------------------------------- dispatch
 
-async function handleCallback(env, cb) {
+async function handleCallback(env, cb, origin) {
   const data = String(cb.data || '');
   const messageId = cb.message?.message_id;
   await answer(env, cb.id);           // dismiss the spinner first
@@ -1746,6 +1768,23 @@ async function handleCallback(env, cb) {
   if (data === 'main') { await clearPending(env); return screenMain(env, messageId); }
   if (data === 'stats') return screenStats(env, messageId);
   if (data === 'exp') return screenExpiring(env, messageId);
+
+  // ---- latest full release download link, as TEXT for the admin to forward
+  // ---- to a customer. A URL button would start downloading the ~110 MB file
+  // ---- on the admin's own phone — the opposite of "give me the link".
+  if (data === 'dl') {
+    const rel = await currentRelease(env, 'win32-x64');
+    if (!rel?.filename) {
+      return edit(env, messageId, 'لا يوجد إصدار كامل منشور بعد.', backTo('main'));
+    }
+    const downloadUrl = `${origin}/download-nsis/win32-x64/${rel.filename}`;
+    return edit(env, messageId,
+      `<b>📥 أحدث نسخة كاملة</b>\n\n`
+      + `الإصدار: <b>${rel.version}</b>\n`
+      + `الحجم: ${(rel.size / 1048576).toFixed(1)} MB\n`
+      + `\nانسخ الرابط وأرسله للعميل:\n${downloadUrl}`,
+      [[{ text: '⬅️ رجوع', callback_data: 'main' }]]);
+  }
 
   if (data === 'help') {
     return edit(env, messageId,
@@ -2027,7 +2066,7 @@ async function handleTelegram(request, env) {
   env.__actingChat = chatId;
 
   try {
-    if (cb) await handleCallback(env, cb);
+    if (cb) await handleCallback(env, cb, new URL(request.url).origin);
     else if (msg?.text) await handleText(env, String(msg.text));
   } catch (err) {
     await send(env, `⚠️ خطأ: ${err.message}`);

@@ -90,9 +90,10 @@ const voucher = o => call('vouchers:create', {
 const service = o => call('serviceSales:create', {
   ServiceType: 'balance_transfer', Provider: 'vodafone', TargetPhone: '0100',
   CustomerID: 1, CustomerName: 'Ahmed', CustomerPhone: '0100',
-  PaymentMethod: 'cash', Notes: '', Amount: 1000, ServiceCost: 0,
-  TransferCost: 5, ChargeAmount: 1020, Date: '2026-07-30', PaidAmount: 1020,
-  CashAccountID: 1, fiscalYearId: 1, userId: 1, ...o,
+  PaymentMethod: 'cash', Notes: '', PaidToProvider: 1000,
+  ChargeAmount: 1020, Date: '2026-07-30', PaidAmount: 1020,
+  CashAccountID: 1, ReceiveAccountType: 'cash_account', ReceiveAccountID: 1,
+  fiscalYearId: 1, userId: 1, ...o,
 });
 
 console.log('BACK OFFICE — round-trip, sign abuse, aggregate-vs-row, idempotence\n');
@@ -173,10 +174,20 @@ console.log('\n[2] A negative amount must be refused, never run backwards');
 }
 {
   seed();
-  const res = await service({ Amount: -5000, ChargeAmount: -4900, PaidAmount: -4900, TransferCost: 0 });
+  const res = await service({ PaidToProvider: -5000, ChargeAmount: -4900, PaidAmount: -4900 });
   // This one balanced out in cash, so nothing looked wrong — but the row was
   // stored and reported a phantom profit in the income statement.
   t('a negative service is refused before it can be stored',
+    !res?.success && (q('SELECT COUNT(*) v FROM service_sales').v === 0),
+    JSON.stringify(res));
+}
+{
+  seed();
+  // A negative PAYMENT with a real customer is the case only `checkAmounts`
+  // sees: the principal is positive, so no earlier gate trips. Dropping that
+  // guard must not let the row through and report a phantom profit.
+  const res = await service({ PaidToProvider: 100, ChargeAmount: 100, PaidAmount: -900 });
+  t('a negative payment on a credit service is refused before it can be stored',
     !res?.success && (q('SELECT COUNT(*) v FROM service_sales').v === 0),
     JSON.stringify(res));
 }

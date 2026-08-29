@@ -47,7 +47,7 @@
 /** The document kinds that can be printed. */
 export const DOCUMENT_TYPES = [
   'sale', 'purchase', 'maintenance', 'voucher_receipt', 'voucher_payment', 'statement',
-  'sale_return',
+  'sale_return', 'service',
 ] as const;
 
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
@@ -61,6 +61,7 @@ export const DOCUMENT_LABELS: Record<DocumentType, string> = {
   voucher_payment: 'سند صرف',
   statement: 'كشف حساب',
   sale_return: 'مرتجع مبيعات',
+  service: 'إيصال خدمة',
 };
 
 /** The item-table columns a shop can show or hide, IN PRINT ORDER. */
@@ -203,6 +204,17 @@ export const DOCUMENT_DEFAULTS: Record<DocumentType, DocumentDefaults> = {
     order: ['index', 'name', 'qty', 'price', 'total', 'imei'],
     hiddenColumns: [],
     showThanks: false,
+    showSignature: false,
+    copies: 1,
+    footerText: '',
+  },
+  // An operation receipt: a money case with no line items. Handed to the
+  // customer at the counter, like a sale — thermal, thanks note, no signature.
+  service: {
+    paper: '80mm',
+    order: ['name', 'total'],
+    hiddenColumns: ['index', 'qty', 'price', 'imei'],
+    showThanks: true,
     showSignature: false,
     copies: 1,
     footerText: '',

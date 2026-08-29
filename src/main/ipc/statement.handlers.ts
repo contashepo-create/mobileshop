@@ -88,6 +88,17 @@ export function registerStatementHandlers() {
         `).get(refId);
         return { primary: advance, items: [], title: 'سلفية' };
       }
+      case 'advance_deduction': {
+        const row = db.prepare(`
+          SELECT ad.*, a.Date as AdvanceDate, a.Amount as OriginalAmount,
+            a.Reason as AdvanceReason, e.Name as EmployeeName
+          FROM advance_deductions ad
+          JOIN employee_advances a ON ad.AdvanceID = a.AdvanceID
+          JOIN employees e ON a.EmployeeID = e.EmployeeID
+          WHERE ad.DeductionRecordID = ?
+        `).get(refId);
+        return { primary: row, items: [], title: 'خصم سلفة من راتب' };
+      }
       case 'commission': {
         const commission = db.prepare(`
           SELECT c.*, e.Name as EmployeeName
@@ -109,6 +120,19 @@ export function registerStatementHandlers() {
           WHERE ss.ServiceSaleID = ?
         `).get(refId);
         return { primary: svc, items: [], title: 'خدمة' };
+      }
+      case 'service_return': {
+        const ret = db.prepare(`
+          SELECT r.*, ss.ServiceNumber, u.Username,
+            COALESCE(c.Name, r.CustomerName) as CustomerName,
+            COALESCE(c.Phone, r.CustomerPhone) as CustomerPhone
+          FROM service_returns r
+          JOIN service_sales ss ON r.ServiceSaleID = ss.ServiceSaleID
+          LEFT JOIN customers c ON r.CustomerID = c.CustomerID
+          JOIN users u ON r.UserID = u.UserID
+          WHERE r.ReturnID = ?
+        `).get(refId);
+        return { primary: ret, items: [], title: 'مرتجع خدمة' };
       }
       case 'deduction': {
         const deduction = db.prepare(`
@@ -294,21 +318,61 @@ export function registerStatementHandlers() {
     // showed +100). Measured: a drawer-funded 300 transfer paid 100 showed
     // In 100 / Out 0 where the books moved In 100 / Out 300.
     //
-    // The drawdown is Amount + ServiceCost + TransferCost — but only when the
-    // drawer funded it (no machine). When a machine funded the operation the
-    // drawer only received, so its statement must show the receipt alone.
-    const services = qq((f) => `
-      SELECT Date, ServiceNumber as RefNumber, COALESCE(CustomerName,'') as Party, PaidAmount as InAmount,
+    // Service sales do TWO things to a drawer: the customer's payment may
+    // land HERE (the receiving asset — `ReceiveAccountType='cash_account'`),
+    // and the shop may fund the transfer from HERE (`PaymentMethodID IS
+    // NULL` — the drawer is the funding source). A drawer that only receives
+    // shows the payment alone; one that also funds shows the drawdown too.
+    // Pre-edit rows (`ReceiveAccountType` NULL) received into whatever also
+    // funded them. The accountId is bound four times (two CASE lookups plus
+    // the two WHERE tests), so these queries run through their own binder.
+    const svcRun = (sql: (f: { sql: string; vals: string[] }) => string, field: string) => ({
+      range: db.prepare(sql(df(field))).all(accountId, accountId, accountId, accountId, ...df(field).vals) as any[],
+      before: db.prepare(sql(df(field, 'before'))).all(accountId, accountId, accountId, accountId, ...df(field, 'before').vals) as any[],
+    });
+    const services = svcRun((f) => `
+      SELECT Date, ServiceNumber as RefNumber, COALESCE(CustomerName,'') as Party,
+        CASE WHEN ReceiveAccountType = 'cash_account' AND ReceiveAccountID = ?
+             THEN PaidAmount
+             WHEN ReceiveAccountType IS NULL AND PaymentMethodID IS NULL AND CashAccountID = ?
+             THEN PaidAmount
+             ELSE 0 END as InAmount,
         CASE WHEN PaymentMethodID IS NULL
              THEN COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)
              ELSE 0 END as OutAmount,
         'service_sale' as OpType, 'خدمة' as OpLabel, ServiceSaleID as RefID
       FROM service_sales
       WHERE CashAccountID = ?
-        AND (PaidAmount > 0
-             OR (PaymentMethodID IS NULL
-                 AND (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) > 0))
+        AND ( (PaidAmount > 0 AND ((ReceiveAccountType = 'cash_account' AND ReceiveAccountID = ?)
+                                   OR (ReceiveAccountType IS NULL AND PaymentMethodID IS NULL)))
+              OR (PaymentMethodID IS NULL
+                  AND (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) > 0) )
         ${f.sql}
+    `, 'Date');
+
+    // A returned service refunds the customer OUT of the receiving drawer and
+    // the provider reimburses principal + fee back INTO the funding drawer.
+    // Both legs appear, so a drawer that was on both sides nets to zero over
+    // a full return — exactly as the money did.
+    const svcRetRun = (sql: (f: { sql: string; vals: string[] }) => string, field: string) => ({
+      range: db.prepare(sql(df(field))).all(accountId, ...df(field).vals) as any[],
+      before: db.prepare(sql(df(field, 'before'))).all(accountId, ...df(field, 'before').vals) as any[],
+    });
+    const svcRetRefunds = svcRetRun((f) => `
+      SELECT Date, ReturnNumber as RefNumber, COALESCE(CustomerName,'') as Party,
+        0 as InAmount, PaidAmount as OutAmount,
+        'service_return' as OpType, 'مرتجع خدمة' as OpLabel, ReturnID as RefID
+      FROM service_returns
+      WHERE RefundAccountType = 'cash_account' AND RefundAccountID = ? AND PaidAmount > 0 ${f.sql}
+    `, 'Date');
+    const svcRetReimburse = svcRetRun((f) => `
+      SELECT Date, ReturnNumber as RefNumber, COALESCE(CustomerName,'') as Party,
+        (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) as InAmount,
+        0 as OutAmount,
+        'service_return' as OpType, 'استرداد مزوّد' as OpLabel, ReturnID as RefID
+      FROM service_returns
+      WHERE CashAccountID = ? AND PaymentMethodID IS NULL
+        AND (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) > 0 ${f.sql}
     `, 'Date');
 
     // Asset transfers (IN or OUT depending on direction)
@@ -337,7 +401,8 @@ export function registerStatementHandlers() {
     operations.push(
       ...sales.range, ...rets.range, ...vReceipts.range, ...vPayments.range, ...purchases.range,
       ...purRets.range, ...salaries.range, ...advances.range, ...maintDel.range, ...maintRets.range,
-      ...rents.range, ...services.range, ...transfersIn.range, ...transfersOut.range
+      ...rents.range, ...services.range, ...svcRetRefunds.range, ...svcRetReimburse.range,
+      ...transfersIn.range, ...transfersOut.range
     );
 
     // Sort by date (NULL-safe)
@@ -352,6 +417,7 @@ export function registerStatementHandlers() {
       ...sales.before, ...rets.before, ...vReceipts.before, ...vPayments.before,
       ...purchases.before, ...purRets.before, ...salaries.before, ...advances.before,
       ...maintDel.before, ...maintRets.before, ...rents.before, ...services.before,
+      ...svcRetRefunds.before, ...svcRetReimburse.before,
       ...transfersIn.before, ...transfersOut.before,
     ].reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0) : 0;
 
@@ -462,14 +528,52 @@ export function registerStatementHandlers() {
       WHERE r.PaymentMethodID = ? AND COALESCE(r.TransferRefund,0) > 0 ${f.sql}
     `, 'r.Date');
 
-    // Service sales funded from this machine (money OUT): the principal pushed
-    // out to the target line plus the service and network costs.
-    const services = qq((f) => `
-      SELECT Date, ServiceNumber as RefNumber, COALESCE(CustomerName,'') as Party, 0 as InAmount,
+    // Service sales touch a machine on either side: the transfer may be funded
+    // from it (`PaymentMethodID`, money OUT — the principal plus fees), and
+    // the customer's payment may be received INTO it (`ReceiveAccountType =
+    // 'payment_method'`, money IN). A machine that only funded shows the
+    // drawdown alone; pre-edit rows (`ReceiveAccountType` NULL) received
+    // into whatever also funded them. The methodId is bound three times, so
+    // this query runs through its own binder.
+    const svcRun = (sql: (f: { sql: string; vals: string[] }) => string, field: string) => ({
+      range: db.prepare(sql(df(field))).all(methodId, methodId, methodId, ...df(field).vals) as any[],
+      before: db.prepare(sql(df(field, 'before'))).all(methodId, methodId, methodId, ...df(field, 'before').vals) as any[],
+    });
+    const services = svcRun((f) => `
+      SELECT Date, ServiceNumber as RefNumber, COALESCE(CustomerName,'') as Party,
+        CASE WHEN ReceiveAccountType = 'payment_method' AND ReceiveAccountID = ?
+             THEN PaidAmount
+             WHEN ReceiveAccountType IS NULL AND PaymentMethodID = ?
+             THEN PaidAmount
+             ELSE 0 END as InAmount,
         (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) as OutAmount,
         'service_sale' as OpType, COALESCE(ServiceType,'خدمة') as OpLabel, ServiceSaleID as RefID
       FROM service_sales
-      WHERE PaymentMethodID = ? AND COALESCE(Amount,0) > 0 ${f.sql}
+      WHERE PaymentMethodID = ?
+        AND (PaidAmount > 0 OR COALESCE(Amount,0) > 0) ${f.sql}
+    `, 'Date');
+
+    // A returned service refunds the customer OUT of the receiving machine
+    // and the provider reimburses principal + fee back into the funding one.
+    const svcRetRun = (sql: (f: { sql: string; vals: string[] }) => string, field: string) => ({
+      range: db.prepare(sql(df(field))).all(methodId, ...df(field).vals) as any[],
+      before: db.prepare(sql(df(field, 'before'))).all(methodId, ...df(field, 'before').vals) as any[],
+    });
+    const svcRetRefunds = svcRetRun((f) => `
+      SELECT Date, ReturnNumber as RefNumber, COALESCE(CustomerName,'') as Party,
+        0 as InAmount, PaidAmount as OutAmount,
+        'service_return' as OpType, 'مرتجع خدمة' as OpLabel, ReturnID as RefID
+      FROM service_returns
+      WHERE RefundAccountType = 'payment_method' AND RefundAccountID = ? AND PaidAmount > 0 ${f.sql}
+    `, 'Date');
+    const svcRetReimburse = svcRetRun((f) => `
+      SELECT Date, ReturnNumber as RefNumber, COALESCE(CustomerName,'') as Party,
+        (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) as InAmount,
+        0 as OutAmount,
+        'service_return' as OpType, 'استرداد مزوّد' as OpLabel, ReturnID as RefID
+      FROM service_returns
+      WHERE PaymentMethodID = ?
+        AND (COALESCE(Amount,0) + COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)) > 0 ${f.sql}
     `, 'Date');
 
     // Vouchers (receipt = IN, payment = OUT)
@@ -535,6 +639,7 @@ export function registerStatementHandlers() {
 
     operations.push(
       ...sales.range, ...rets.range, ...purchases.range, ...purRets.range, ...services.range,
+      ...svcRetRefunds.range, ...svcRetReimburse.range,
       ...vReceipts.range, ...vPayments.range, ...maintDel.range, ...maintRets.range, ...rents.range,
       ...transfersIn.range, ...transfersOut.range
     );
@@ -547,6 +652,7 @@ export function registerStatementHandlers() {
     // wallet's stored balance. With no from date it opens at 0.
     const openingBalance = from ? [
       ...sales.before, ...rets.before, ...purchases.before, ...purRets.before, ...services.before,
+      ...svcRetRefunds.before, ...svcRetReimburse.before,
       ...vReceipts.before, ...vPayments.before, ...maintDel.before, ...maintRets.before, ...rents.before,
       ...transfersIn.before, ...transfersOut.before,
     ].reduce((s, o) => s + (o.InAmount || 0) - (o.OutAmount || 0), 0) : 0;
@@ -670,6 +776,22 @@ export function registerCustomerStatementHandlers() {
     `, 'ss.Date');
     operations.push(...services.range);
 
+    // Service returns cancel the unpaid remainder the returned operation
+    // left on the ledger — a customer who owed for a service that never
+    // happened stops owing it, and the statement still foots to
+    // customers.Balance. The cash refund part left the RECEIVING asset
+    // instead and never touched the customer's balance, so it belongs in
+    // the cash/machine statement.
+    const serviceReturns = qq((f) => `
+      SELECT r.ReturnID as RefID, r.ReturnNumber as RefNumber, r.Date, 0 as Debit,
+             r.RemainingAmount as Credit,
+             'service_return' as OpType, 'مرتجع خدمة' as Description,
+             NULL as PaymentMethod, NULL as PaidAmount, NULL as RemainingAmount, 'returned' as Status
+      FROM service_returns r
+      WHERE r.CustomerID = ? AND r.RemainingAmount != 0 ${f.sql}
+    `, 'r.Date');
+    operations.push(...serviceReturns.range);
+
     // Receipt vouchers (credit - customer pays, reduces balance)
     const receipts = qq((f) => `
       SELECT v.VoucherID as RefID, v.VoucherNumber as RefNumber, v.Date, 0 as Debit, v.Amount as Credit,
@@ -702,6 +824,7 @@ export function registerCustomerStatementHandlers() {
     // With no from date the statement opens at 0 (everything is shown).
     const openingBalance = from ? [
       ...sales.before, ...returns.before, ...deliveries.before, ...services.before,
+      ...serviceReturns.before,
       ...receipts.before, ...payments.before,
     ].reduce((s, o) => s + (o.Debit || 0) - (o.Credit || 0), 0) : 0;
 

@@ -344,12 +344,16 @@ export function registerReportsHandlers() {
     // push 100 out of the machine. Only the 5 is our revenue (agent, not
     // principal). Reporting the full 105 inflated turnover enormously for shops
     // that move large transfer volumes.
+    // Returned services (Status='returned') are reversed wholesale into
+    // service_returns and must not earn an operating figure either.
     const serviceRevenue = db.prepare(`
-      SELECT COALESCE(SUM(ChargeAmount - COALESCE(Amount,0)),0) as total FROM service_sales WHERE 1=1 ${dateFilter}
+      SELECT COALESCE(SUM(ChargeAmount - COALESCE(Amount,0)),0) as total
+      FROM service_sales WHERE Status <> 'returned' AND 1=1 ${dateFilter}
     `).get(...params) as any;
     // Kept for display so the UI can still show gross turnover if desired.
     const serviceGross = db.prepare(`
-      SELECT COALESCE(SUM(ChargeAmount),0) as total FROM service_sales WHERE 1=1 ${dateFilter}
+      SELECT COALESCE(SUM(ChargeAmount),0) as total
+      FROM service_sales WHERE Status <> 'returned' AND 1=1 ${dateFilter}
     `).get(...params) as any;
 
     // 5. Other Income (voucher receipts that are general, not customer/supplier payments)
@@ -445,10 +449,11 @@ export function registerReportsHandlers() {
 
     // 4. Service Sales Cost — excludes `Amount` (the pass-through principal),
     // which is now netted out of serviceRevenue above. Only our real costs
-    // (provider fee + transfer commission) remain.
+    // (provider fee + transfer commission) remain — and only for services
+    // that were not returned (their reversal carries no cost of goods).
     const serviceCost = db.prepare(`
       SELECT COALESCE(SUM(COALESCE(ServiceCost,0) + COALESCE(TransferCost,0)),0) as total
-      FROM service_sales WHERE 1=1 ${dateFilter}
+      FROM service_sales WHERE Status <> 'returned' AND 1=1 ${dateFilter}
     `).get(...params) as any;
 
     // 4b. Card-machine / wallet commission charged on direct sales.
@@ -527,9 +532,18 @@ export function registerReportsHandlers() {
     // they settled already appears in the rent figure. MEASURED: a 1,500
     // voucher paying rent charged 3,000 to profit — the instalment AND the
     // voucher — while the drawer moved once.
+    //
+    // COMMISSION-linked vouchers are INCLUDED even when they name the employee
+    // as their party: a commission paid out of a drawer (whether through the
+    // immediate-pay route or a general payment voucher) books its expense from
+    // THIS document — the cash left here and the commission was closed against
+    // this voucher — not from `commissions` below, which deliberately excludes
+    // `PaidVoucherID`. Leaning on PartyType alone would drop an employee-party
+    // commission voucher from every line and the whole expense would vanish.
     const generalExpenses = db.prepare(`
       SELECT COALESCE(SUM(Amount),0) as total FROM vouchers
-      WHERE VoucherType = 'payment' AND (PartyType = 'general' OR PartyType IS NULL)
+      WHERE VoucherType = 'payment'
+        AND ((PartyType = 'general' OR PartyType IS NULL) OR ReferenceType = 'commission')
         AND (ReferenceType IS NULL OR ReferenceType <> 'rent')
       ${dateFilter}
     `).get(...params) as any;
@@ -564,17 +578,20 @@ export function registerReportsHandlers() {
     `).get(...(filters.fromDate ? [filters.fromDate] : []), ...(filters.toDate ? [filters.toDate] : [])) as any;
 
     // 4. Commissions earned by technicians on delivered repairs. Accrued when
-    // earned (`IsPaid = 0`), exactly like salaries: the labour of a delivered
-    // job is a real cost whether or not the cash has gone out yet. A commission
-    // that a salary has already absorbed (`IsPaid = 1` with a PaidInSalaryID)
-    // lives inside that salary's NetSalary — charging it again in a second line
-    // deducted the same pound twice. The balance sheet holds the unpaid part as
-    // a liability on the same condition, so the two reports must both read
-    // `IsPaid = 0` or they disagree with each other and with the books.
+    // earned, exactly like salaries: the labour of a delivered job is a real
+    // cost whether or not the cash has gone out yet. A commission that a salary
+    // has already absorbed (`PaidInSalaryID` set) lives inside that salary's
+    // NetSalary — charging it again in a second line deducted the same pound
+    // twice. A commission closed against a payment voucher (`PaidVoucherID`
+    // set) is booked from THAT voucher (see generalExpenses above) so it is
+    // EXCLUDED here — the two lines together report every commission exactly
+    // once, whether paid by voucher, salary, or not at all. The balance sheet
+    // holds the unpaid part as a liability on `IsPaid = 0`, so the two reports
+    // agree with each other and with the books.
     const commissionsExpense = db.prepare(`
       SELECT COALESCE(SUM(Amount),0) as total
       FROM commissions
-      WHERE IsPaid = 0
+      WHERE PaidInSalaryID IS NULL AND PaidVoucherID IS NULL
         ${filters.fromDate ? "AND Date >= ?" : ''} ${filters.toDate ? "AND Date <= ?" : ''}
     `).get(...(filters.fromDate ? [filters.fromDate] : []), ...(filters.toDate ? [filters.toDate] : [])) as any;
 
@@ -726,6 +743,11 @@ export function registerReportsHandlers() {
     // liability, exactly like an issued-but-unpaid salary. The P&L charges them
     // as an expense on the same accrual basis; a balance sheet that left them
     // out said `assets = liabilities + equity` held when it did not.
+    //
+    // `IsPaid = 0` is the LIABILITY's condition, deliberately NOT
+    // `PaidInSalaryID IS NULL`: a commission paid immediately is still an
+    // expense (the P&L's condition) but is no longer OWED, so it must leave
+    // this liability — the cash went out, and holding it here would double it.
     const unpaidCommissions = db.prepare('SELECT COALESCE(SUM(Amount),0) as total FROM commissions WHERE IsPaid = 0').get() as any;
 
     const totalLiabilities = totalSuppliers + totalEmployees + totalCustomerCredits + unpaidCommissions.total + rentAdvancesCollected.total;
@@ -749,7 +771,7 @@ export function registerReportsHandlers() {
     const salesReturns = db.prepare('SELECT COALESCE(SUM(r.TotalAmount),0) as total FROM sale_returns r JOIN sales s ON r.SaleID = s.SaleID WHERE s.IsVoided = 0').get() as any;
     const maintenanceRevenue = db.prepare('SELECT COALESCE(SUM(TotalCost),0) as total FROM maintenance_deliveries WHERE VoidedSaleID IS NULL').get() as any;
     const maintenanceReturns = db.prepare('SELECT COALESCE(SUM(TotalRefund),0) as total FROM maintenance_returns').get() as any;
-    const serviceRevenue = db.prepare('SELECT COALESCE(SUM(ChargeAmount - COALESCE(Amount,0)),0) as total FROM service_sales').get() as any;
+    const serviceRevenue = db.prepare('SELECT COALESCE(SUM(ChargeAmount - COALESCE(Amount,0)),0) as total FROM service_sales WHERE Status <> \'returned\'').get() as any;
     const otherIncome = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='receipt' AND (PartyType='general' OR PartyType IS NULL)").get() as any;
     const rentIncomeAll = db.prepare(`
       SELECT COALESCE(SUM(CASE WHEN rp.Status = 'paid' THEN rp.Amount
@@ -773,8 +795,9 @@ export function registerReportsHandlers() {
       AND t.Status NOT IN ('cancelled', 'returned')
     `).get() as any;
     // `Amount` excluded — it is the pass-through principal, already netted out
-    // of serviceRevenue above (agent vs principal).
-    const serviceCost = db.prepare("SELECT COALESCE(SUM(COALESCE(ServiceCost,0)+COALESCE(TransferCost,0)),0) as total FROM service_sales").get() as any;
+    // of serviceRevenue above (agent vs principal). Returned services are
+    // excluded: their revenue line vanished, so their cost must too.
+    const serviceCost = db.prepare("SELECT COALESCE(SUM(COALESCE(ServiceCost,0)+COALESCE(TransferCost,0)),0) as total FROM service_sales WHERE Status <> 'returned'").get() as any;
 
     // The cost of goods that came BACK.
     //
@@ -812,7 +835,9 @@ export function registerReportsHandlers() {
     // PartyType='rent' excluded here — rent comes from rent_payments below.
     // Rent-linked vouchers (`ReferenceType='rent'`) carry the same exclusion:
     // they settled an instalment that the rent figure already counts.
-    const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND (PartyType='general' OR PartyType IS NULL) AND (ReferenceType IS NULL OR ReferenceType <> 'rent')").get() as any;
+    // Commission-linked vouchers are INCLUDED (the P&L charges them as the
+    // expense) — see the note in reports:profitLoss.
+    const generalExpenses = db.prepare("SELECT COALESCE(SUM(Amount),0) as total FROM vouchers WHERE VoucherType='payment' AND ((PartyType='general' OR PartyType IS NULL) OR ReferenceType = 'commission') AND (ReferenceType IS NULL OR ReferenceType <> 'rent')").get() as any;
     // Gross entitlement — see the note in reports:profitLoss.
     const salariesExpense = db.prepare('SELECT COALESCE(SUM(NetSalary + COALESCE(AdvancesTotal,0)),0) as total FROM salaries').get() as any;
     const rentExpenses = db.prepare(`
@@ -821,10 +846,14 @@ export function registerReportsHandlers() {
              ELSE 0 END),0) as total
       FROM rent_payments rp JOIN rents r ON rp.RentID=r.RentID WHERE r.RentType='expense'`).get() as any;
 
-    // Only commissions NOT yet absorbed by a salary are a separate expense here —
+    // Only commissions NOT absorbed by a salary are a separate expense here —
     // a settled one lives inside its salary's NetSalary, and charging both
-    // deducted the same pound twice. Mirrors the balance-sheet liability.
-    const commissionsAll = db.prepare('SELECT COALESCE(SUM(Amount),0) as total FROM commissions WHERE IsPaid = 0').get() as any;
+    // deducted the same pound twice. A commission closed against a payment
+    // voucher (`PaidVoucherID` set) is booked from THAT voucher — its cash has
+    // left the drawer, its liability is gone, and it is EXCLUDED here so the
+    // voucher expense and this one never double-charge. Mirrors the balance-
+    // sheet liability, which reads `IsPaid = 0` for what is still owed.
+    const commissionsAll = db.prepare('SELECT COALESCE(SUM(Amount),0) as total FROM commissions WHERE PaidInSalaryID IS NULL AND PaidVoucherID IS NULL').get() as any;
 
     const netRevenue = salesRevenue.total - salesReturns.total + maintenanceRevenue.total - maintenanceReturns.total
       + serviceRevenue.total + otherIncome.total + rentIncomeAll.total;
@@ -1014,7 +1043,19 @@ export function registerReportsHandlers() {
       run(`
         SELECT Date, ServiceNumber as RefNum, CustomerName as Party, ChargeAmount as Amount,
           'خدمة' as OpType, 'service_sale' as OpKey, ServiceSaleID as RefID
-        FROM service_sales ${f.sql}
+        FROM service_sales WHERE Status <> 'returned' ${f.sql}
+      `, f.vals);
+    }
+
+    // Service returns — the reversal legs, shown as the cash that went back
+    // to the customer (negative) so the daily activity reflects the drawer.
+    {
+      const f = df('Date');
+      run(`
+        SELECT Date, ReturnNumber as RefNum, CustomerName as Party, -PaidAmount as Amount,
+          'مرتجع خدمة' as OpType, 'service_return' as OpKey, ReturnID as RefID
+        FROM service_returns
+        WHERE PaidAmount > 0 ${f.sql}
       `, f.vals);
     }
 

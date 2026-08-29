@@ -46,6 +46,8 @@ import { spawn, execSync } from 'node:child_process';import { createHash } from 
 import fs from 'node:fs';
 import path from 'node:path';
 import { getDeviceId } from './security/deviceId';
+import { getDb } from './database/connection';
+import { snapshotBeforeUpdate } from './database/schemaVersion';
 
 const API_BASE = (process.env.MOBILESHOP_API_BASE || '').replace(/\/$/, '');
 const CLIENT_KEY = process.env.MOBILESHOP_CLIENT_KEY || '';
@@ -318,6 +320,19 @@ export function applyStagedCode(): boolean {
   const exe = app.getPath('exe');
   const resources = resourcesDir();
   const currentPid = process.pid;
+
+  // Belt-and-braces before the swap, exactly like the NSIS lane: the new code
+  // will run its schema migrations at first launch, so snapshot the database
+  // (outside the install dir — the swap leaves it untouched) while the OLD
+  // build that understands it is still alive. Best-effort; a failed snapshot
+  // must not block the update, and `migrateWithSafetyNet` adds its own
+  // `pre_upgrade_v*` copy when the schema actually changes.
+  try {
+    const snap = snapshotBeforeUpdate(getDb(), app.getPath('userData'), realCodeVersion());
+    if (snap) console.log('[CodeUpdater] pre-update database snapshot:', snap);
+  } catch (err) {
+    console.log('[CodeUpdater] pre-update snapshot skipped:', (err as Error).message);
+  }
 
   // Single-quoted PS literal; a ' inside a path becomes '' (PS escaping).
   const psQuote = (s: string) => `'${String(s).replace(/'/g, "''")}'`;

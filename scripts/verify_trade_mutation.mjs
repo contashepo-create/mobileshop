@@ -273,8 +273,8 @@ const MUTANTS = [
   {
     name: 'a cash-funded transfer never sends the principal out',
     file: SVC,
-    find: "        if (data.Amount > 0) {\n          if (data.PaymentMethodID) {",
-    replace: "        if (data.Amount > 0) {\n          if (false) {",
+    find: "    if (fund.kind === 'cash_account') {\n      db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(c.Amount, fund.id);\n    } else {\n      db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(c.Amount, fund.id);\n    }",
+    replace: "    if (fund.kind === 'cash_account') {\n      db.prepare('UPDATE cash_accounts SET Balance = Balance - ? WHERE CashAccountID = ?').run(c.Amount, fund.id);\n    } else if (false) {\n      db.prepare('UPDATE payment_methods SET Balance = Balance - ? WHERE PaymentMethodID = ?').run(c.Amount, fund.id);\n    }",
     why: 'the shop booked a 1,020 gain on a 1,000 transfer, inventing 1,000 per operation',
   },
   {
@@ -287,8 +287,8 @@ const MUTANTS = [
   {
     name: 'a salary can go negative when advances exceed the pay',
     file: PAY,
-    find: '    const advancesApplied = Math.min(advancesTotal, payAfterDeductions);',
-    replace: '    const advancesApplied = advancesTotal;',
+    find: '    advancesApplied = Math.min(advancesTotal, payAfterDeductions);',
+    replace: '    advancesApplied = advancesTotal;',
     why: 'paying a negative salary ran the whole transaction backwards',
   },
   {
@@ -464,10 +464,17 @@ const MUTANTS = [
     why: 'a receipt of -9999 took money out of the till and called it income',
   },
   {
-    name: 'cancelling a service keeps the provider fee',
+    // RETARGETED. The fee refund this used to zero is no longer reachable:
+    // `serviceSales:create` hard-codes `commission = 0` and `transferCost = 0`,
+    // so ServiceCost/TransferCost are always 0 and the refund block never
+    // fires — the mutant survived by being impossible rather than by being
+    // undetected. The rule worth protecting is the delete's neutrality for the
+    // figure that actually moves: the transferred principal must go back to
+    // the asset that funded it.
+    name: 'cancelling a service keeps the principal out of the drawer',
     file: DEL,
-    find: '        const feesPaid = (sale.ServiceCost || 0) + (sale.TransferCost || 0);',
-    replace: '        const feesPaid = 0;',
+    find: "        if (sale.Amount > 0) {\n          if (sale.PaymentMethodID) {\n            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(sale.Amount, sale.PaymentMethodID);\n          } else if (sale.CashAccountID) {\n            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(sale.Amount, sale.CashAccountID);\n          }\n        }",
+    replace: "        if (sale.Amount > 0) {\n          if (false) {\n            db.prepare('UPDATE payment_methods SET Balance = Balance + ? WHERE PaymentMethodID = ?').run(sale.Amount, sale.PaymentMethodID);\n          } else if (sale.CashAccountID) {\n            db.prepare('UPDATE cash_accounts SET Balance = Balance + ? WHERE CashAccountID = ?').run(sale.Amount, sale.CashAccountID);\n          }\n        }",
     why: 'a neutral operation destroyed value in one direction and invented it in the other',
   },
   {
@@ -487,7 +494,7 @@ const MUTANTS = [
   {
     name: 'a negative service is stored again',
     file: SVC,
-    find: '    if (badMoney) return { success: false, message: badMoney };',
+    find: '    if (badMoney) return { ok: false, message: badMoney };',
     replace: '',
     why: 'a negative transfer reported phantom profit in the income statement',
   },

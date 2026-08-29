@@ -88,9 +88,11 @@ export async function notifyDeveloperOfReset(
  * Reports a new registration to the developer.
  *
  * PRIVACY — this one carries PERSONAL DATA, unlike every other call here.
- * It runs ONLY when the owner ticked the consent box in the wizard. There is
- * no silent default and no way to switch it on remotely: the caller checks the
- * flag, and this function is simply never invoked otherwise.
+ * There is no consent checkbox any more: the wizard no longer asks, and a new
+ * shop is always reported (profile only — name, phone, email, address; never a
+ * customer, a balance or an invoice). The registry is used to know which shops
+ * exist so support can help; it is fire-and-forget and time-limited, so an
+ * offline or unreachable server never affects the shop.
  *
  * Best-effort and unawaited by design. The shop is already set up by the time
  * this runs, so an unreachable server must never delay the wizard or make a

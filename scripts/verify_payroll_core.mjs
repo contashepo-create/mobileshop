@@ -575,6 +575,67 @@ try {
       'invariant');
   }
 
+  // ---------------------------------------------------------------- 8
+  console.log('\n[8] The monthly advance-deduction ledger records every partial cut');
+  {
+    const zayneb = await call('employees:create', { Name: 'زينب عمر', BaseSalary: 1000 });
+    const zid = zayneb.id;
+    const adv = await call('advances:create', { EmployeeID: zid, Amount: 2500, CashAccountID: 1, userId: 1, fiscalYearId: 1 });
+    t('zayneb\'s 2500 advance leaves the drawer', adv?.success === true && cash() === cashL - 2500, JSON.stringify(adv));
+    cashL -= 2500;
+    const aid = advRow(zid, 2500).AdvanceID;
+
+    const sAug = await call('salaries:issue', { EmployeeID: zid, Month: '2026-08', userId: 1, fiscalYearId: 1 });
+    t('august absorbs what the month covers', sAug?.success === true && sAug?.details?.netSalary === 0 && sAug?.details?.advancesApplied === 1000, JSON.stringify(sAug?.details));
+    const dAug = q('SELECT * FROM advance_deductions WHERE AdvanceID = ? AND Month = ?', aid, '2026-08');
+    t('august wrote one ledger row', dAug?.Amount === 1000 && dAug?.RemainingAfter === 1500 && dAug?.SalaryID === payId(zid, '2026-08'), JSON.stringify(dAug));
+    t('the advance still owes the rest',
+      q('SELECT Amount v FROM employee_advances WHERE AdvanceID = ?', aid).v === 1500
+      && q('SELECT IsDeducted d FROM employee_advances WHERE AdvanceID = ?', aid).d === 0, 'advance row');
+
+    const sSep = await call('salaries:issue', { EmployeeID: zid, Month: '2026-09', userId: 1, fiscalYearId: 1 });
+    t('september absorbs the next thousand', sSep?.success === true && sSep?.details?.netSalary === 0 && sSep?.details?.advancesApplied === 1000, JSON.stringify(sSep?.details));
+    const dSep = q('SELECT * FROM advance_deductions WHERE AdvanceID = ? AND Month = ?', aid, '2026-09');
+    t('september wrote its own row', dSep?.Amount === 1000 && dSep?.RemainingAfter === 500 && dSep?.SalaryID === payId(zid, '2026-09'), JSON.stringify(dSep));
+    t('the advance still owes the rest', q('SELECT Amount v FROM employee_advances WHERE AdvanceID = ?', aid).v === 500, 'advance row');
+
+    const sumDed = q('SELECT COALESCE(SUM(Amount),0) v FROM advance_deductions WHERE AdvanceID = ?', aid).v;
+    const openAmt = q('SELECT Amount v FROM employee_advances WHERE AdvanceID = ?', aid).v;
+    t('the ledger foots to the original', near(sumDed + openAmt, 2500), `sum ${sumDed} + open ${openAmt}`);
+
+    const list = await call('advances:list', zid);
+    t('advances:list attaches the payback schedule', list?.length === 1 && list[0]?.history?.length === 2
+      && list[0]?.history.every(h => h.SalaryMonth === '2026-08' || h.SalaryMonth === '2026-09')
+      && list[0]?.history[0]?.RemainingAfter === 1500 && list[0]?.history[1]?.RemainingAfter === 500,
+      JSON.stringify(list?.[0]?.history));
+
+    const st = await call('employeeStatement:get', zid);
+    const dOps = st?.operations?.filter(o => o.OpType === 'advance_deduction');
+    t('the statement shows both monthly cuts', Array.isArray(dOps) && dOps.length === 2
+      && near(dOps.reduce((s, o) => s + (o.Credit || 0), 0), 2000)
+      && dOps[0]?.Description === 'خصم سلفة من راتب شهر 2026-08' && dOps[1]?.RemainingAfter === 500,
+      JSON.stringify(dOps));
+    // totalAdvances = the advances' CURRENT balances (the live 500) plus the
+    // 2000 already clawed back = the original 2500 — same invariant as khaled's
+    // rows above, where fully-settled amounts stay on the advance op while the
+    // OPEN balance shrinks.
+    t('the statement foots the outstanding advance',
+      st?.totals?.totalAdvances === 500 && st?.totals?.totalAdvanceRecovered === 2000 && st?.totals?.pendingAdvances === 500
+      && near(st?.totals?.totalAdvances + st?.totals?.totalAdvanceRecovered, 2500),
+      JSON.stringify(st?.totals));
+
+    // A partially-recovered advance is still OPEN, so it must be deletable as a
+    // perfect round-trip: cash back for the LIVE balance and the ledger erased.
+    // (The advance_deductions foreign key used to make this hard-fail.)
+    const undo = await call('delete:advance', aid);
+    t('a partially-recovered advance can be reversed as a round-trip',
+      undo?.success === true && cash() === cashL + 500, JSON.stringify(undo));
+    cashL += 500;
+    t('the reversal erased the ledger too',
+      q('SELECT COUNT(*) v FROM advance_deductions WHERE AdvanceID = ?', aid).v === 0
+      && !q('SELECT 1 v FROM employee_advances WHERE AdvanceID = ?', aid), 'ledger + row');
+  }
+
   console.log(`\nSECTION 5 RESULT: ${PASS.length} passed, ${FAIL.length} failed`);
   if (FAIL.length) {
     console.log('\nFAILED:');

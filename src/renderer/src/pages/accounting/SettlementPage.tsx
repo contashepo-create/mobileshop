@@ -6,6 +6,8 @@ import { DataTable } from '../../components/shared/DataTable';
 import { Modal } from '../../components/ui/Modal';
 import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
+import { localToday } from '../../lib/businessDay';
+import { Input } from '../../components/ui/Input';
 import { isFailure, failureMessage, asRows } from '../../lib/ipc';
 
 export function SettlementPage() {
@@ -16,6 +18,7 @@ export function SettlementPage() {
   const [adjustments, setAdjustments] = useState<Record<number, string>>({});
   const [settlements, setSettlements] = useState<any[]>([]);
   const [detailsModal, setDetailsModal] = useState<any>(null);
+  const [settlementDate, setSettlementDate] = useState(localToday());
 
   const sectionLabels: Record<string, string> = {
     cash: 'الخزائن والبنوك',
@@ -88,6 +91,7 @@ export function SettlementPage() {
     const result = await window.api.invoke('settlements:apply', {
       section,
       items,
+      Date: settlementDate,
       userId: currentUserId(),
       fiscalYearId: activeFy.FiscalYearID,
     });
@@ -121,7 +125,16 @@ export function SettlementPage() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-800 dark:text-white">التسوية الجردية</h1>
-        {tab === 'adjust' && <Button onClick={handleSave} icon={<ClipboardCheck size={16} />}>حفظ وتطبيق التسوية</Button>}
+        {tab === 'adjust' && (
+          <div className="flex items-end gap-3">
+            <div className="w-48">
+              <Input label="تاريخ التسوية" type="date" value={settlementDate}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSettlementDate(e.target.value)}
+                hint="قابل للتعديل - تُقيَّد التسوية في سنتها المالية" />
+            </div>
+            <Button onClick={handleSave} icon={<ClipboardCheck size={16} />}>حفظ وتطبيق التسوية</Button>
+          </div>
+        )}
       </div>
 
       <div className="flex gap-2">

@@ -316,8 +316,8 @@ console.log('\n[3] The default layout is the one asked for — and it DRAWS');
     menu.filter((x) => x.children).map((x) => [x.label, x.children.map((c) => c.path)]),
   );
   const expect = {
-    'المبيعات': ['/accounting/sales', '/accounting/services', '/accounting/maintenance'],
-    'المشتريات': ['/accounting/purchases'],
+    'المبيعات': ['/accounting/sales', '/accounting/sale-returns', '/accounting/services', '/accounting/maintenance'],
+    'المشتريات': ['/accounting/purchases', '/accounting/purchase-returns'],
     'السندات والرواتب والإيجارات': ['/accounting/vouchers-receipt', '/accounting/vouchers-payment',
       '/accounting/payroll', '/accounting/rents', '/accounting/rent-parties'],
     'السنة المالية والأرصدة الافتتاحية': ['/accounting/fiscal-year', '/accounting/opening-balances'],

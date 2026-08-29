@@ -2,7 +2,9 @@ import { ipcMain, app, dialog } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { getDb } from '../database/connection';
+import { getDb, closeDb, getDbPath } from '../database/connection';
+import { migrateWithSafetyNet, SchemaTooNewError } from '../database/schemaVersion';
+import { runMigrations } from '../database/migrations';
 import { safeFailure } from '../security/errorResponse';
 import bcrypt from 'bcryptjs';
 import { devLogin, revokeDevToken, createDevChallenge, devLoginSigned } from '../security/devAuth';
@@ -17,6 +19,53 @@ import { notifyDatabaseReset, notifyDeveloperOfReset } from '../security/resetNo
 import { recordSecurityEvent } from '../security/securityLog';
 import { checkAttemptAllowed, recordAttemptFailure, recordAttemptSuccess, lockoutMessage } from '../security/loginThrottle';
 import { stripControlChars, LIMITS } from '../../shared/validate';
+
+/**
+ * Verifies a candidate file can safely become the shop's books, in the same
+ * order `backup:restore` verifies a backup: SQLite header, full integrity
+ * walk, then "is it THIS application's database". The file is opened read-only
+ * and never written, so checking cannot damage it.
+ */
+async function verifyImportableDatabase(file: string): Promise<{ ok: boolean; reason: string }> {
+  interface Probe {
+    pragma: (s: string) => unknown;
+    prepare: (s: string) => { get: (...a: unknown[]) => unknown };
+    close: () => void;
+  }
+  let probe: Probe | null = null;
+  try {
+    const header = Buffer.alloc(16);
+    const fd = fs.openSync(file, 'r');
+    fs.readSync(fd, header, 0, 16, 0);
+    fs.closeSync(fd);
+    if (header.toString('utf-8', 0, 15) !== 'SQLite format 3') {
+      return { ok: false, reason: 'الملف ليس قاعدة بيانات SQLite' };
+    }
+
+    const { default: Database } = await import('better-sqlite3');
+    probe = new Database(file, { readonly: true, fileMustExist: true }) as unknown as Probe;
+    const result = probe.pragma('integrity_check');
+    const rows = Array.isArray(result) ? result : [result];
+    const first = rows[0] as { integrity_check?: string } | string | undefined;
+    const verdict = typeof first === 'string' ? first : first?.integrity_check;
+    if (verdict !== 'ok') {
+      return { ok: false, reason: String(verdict ?? 'فحص السلامة فشل').slice(0, 120) };
+    }
+
+    const row = probe.prepare(
+      "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('sales','purchases','customers','items')",
+    ).get() as { n?: number } | undefined;
+    if ((row?.n ?? 0) < 4) {
+      return { ok: false, reason: 'قاعدة بيانات سليمة لكنها ليست قاعدة بيانات هذا البرنامج' };
+    }
+    return { ok: true, reason: '' };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: message.slice(0, 120) };
+  } finally {
+    try { probe?.close(); } catch { /* already closed */ }
+  }
+}
 
 export function registerSettingsHandlers() {
   // The real installed version. The About page used to read the `app_version`
@@ -369,9 +418,7 @@ export function registerSettingsHandlers() {
       companyName: string; ownerName: string; phone: string; email: string;
       address: string; taxNumber: string;
       governorate?: string; city?: string; birthDate?: string;
-      shareWithDeveloper?: boolean;
     };
-    customer: { name: string; phone: string; email: string; address: string };
     admin: { username: string; password: string; employeeName: string; position: string; phone: string };
   }) => {
     const db = getDb();
@@ -387,7 +434,6 @@ export function registerSettingsHandlers() {
     }
 
     const company = data.company;
-    const customer = data.customer;
     const admin = data.admin;
 
     if (!admin?.username?.trim() || typeof admin.password !== 'string' || admin.password.length < 6) {
@@ -426,7 +472,10 @@ export function registerSettingsHandlers() {
         'city': company.city || '',
         'owner_birth_date': company.birthDate || '',
         'registered_at': new Date().toISOString(),
-        'registration_consent': company.shareWithDeveloper ? '1' : '0',
+        // No consent flag anymore: the owner is always told — but only after
+        // they finish setup, best-effort and unreachable-offline. The key is
+        // kept for the settings privacy list + devices screen.
+        'registration_consent': '1',
       };
       for (const [key, value] of Object.entries(settings)) {
         db.prepare('INSERT OR REPLACE INTO settings (Key, Value) VALUES (?, ?)').run(key, value);
@@ -468,38 +517,133 @@ export function registerSettingsHandlers() {
       }
 
       // Create initial customer if name provided
-      if (customer.name.trim()) {
-        db.prepare(`
-          INSERT INTO customers (Name, Phone, Email, Address, Status)
-          VALUES (?, ?, ?, ?, 'active')
-        `).run(customer.name.trim(), customer.phone?.trim() || null, customer.email?.trim() || null, customer.address?.trim() || null);
-      }
+      // (REMOVED: the first-run wizard no longer asks for a customer. A shop
+      //  that already has customers creates them from the Customers screen when
+      //  it needs them — the wizard must not invent a trading history.)
 
       // Mark setup complete
       db.prepare("INSERT OR REPLACE INTO settings (Key, Value) VALUES ('setup_completed', '1')").run();
     });
     tx();
 
-    // Tell the developer who registered — only with explicit consent.
+    // Tell the developer who registered. There is no consent checkbox for this
+    // anymore — training a new shop is easier when one can see it exists. The
+    // message is deliberately small (profile only, never books), best-effort
+    // and time-limited, so an offline shop is simply not registered until a
+    // later launch and never sees an error.
     //
     // Deliberately AFTER the transaction commits and deliberately not awaited:
     // the shop is now set up, and a slow or unreachable server must not delay
-    // or fail the wizard. Personal data is involved, so silence is the default
-    // and the checkbox is the only thing that turns it on.
-    if (company.shareWithDeveloper) {
-      void notifyDeveloperOfRegistration({
-        companyName: company.companyName,
-        ownerName: company.ownerName,
-        phone: company.phone,
-        email: company.email,
-        governorate: company.governorate || '',
-        city: company.city || '',
-        address: company.address,
-        birthDate: company.birthDate || '',
-      });
-    }
+    // or fail the wizard.
+    void notifyDeveloperOfRegistration({
+      companyName: company.companyName,
+      ownerName: company.ownerName,
+      phone: company.phone,
+      email: company.email,
+      governorate: company.governorate || '',
+      city: company.city || '',
+      address: company.address,
+      birthDate: company.birthDate || '',
+    });
 
     return { success: true };
+  });
+
+  // ===== FIRST-RUN: IMPORT AN EXISTING DATABASE =====
+  //
+  // For the shop that reinstalled Windows (or moved to a new machine) with an
+  // old copy of `mobile_shop.db`: instead of filling the setup wizard from
+  // scratch, the owner can point at the database that already holds their
+  // customers, invoices and balances. The file is verified, the fresh empty
+  // database is replaced by it, and the schema is brought up to the current
+  // version the same way a normal upgrade would.
+  //
+  // PUBLIC on purpose — it runs before the first login, inside the wizard.
+  ipcMain.handle('setup:importDatabase', async () => {
+    const db = getDb();
+
+    // Only reachable while setup has not completed. A shop that is already
+    // running must not silently swap its live books from here.
+    const done = db.prepare("SELECT Value FROM settings WHERE Key = 'setup_completed'").get() as any;
+    if (done?.Value === '1') {
+      // The shop already has live books on this machine. Importing would swap
+      // them without a second thought — the proper tool there is `backup:restore`
+      // from behind the login, which takes the same path deliberately.
+      return { success: false, message: 'هذا الجهاز مُعدّ بالفعل - استخدم استعادة النسخة الاحتياطية من داخل البرنامج' };
+    }
+
+    const result = await dialog.showOpenDialog({
+      title: 'استيراد قاعدة البيانات من نسخة سابقة',
+      filters: [{ name: 'Database', extensions: ['db', 'sqlite', 'sqlite3'] }],
+      properties: ['openFile'],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, message: 'تم الإلغاء' };
+    }
+    const importPath = result.filePaths[0];
+    const livePath = getDbPath();
+    if (path.resolve(importPath) === path.resolve(livePath)) {
+      return { success: false, message: 'اختر ملف نسخة احتياطية منفصلاً عن قاعدة البيانات الحالية' };
+    }
+
+    // Verify the file is a real, intact MobileShopERP database. Same order as
+    // `backup:restore`: header, integrity, ownership. A file that passes all
+    // three is safe to adopt as the shop's books.
+    const probe = await verifyImportableDatabase(importPath);
+    if (!probe.ok) {
+      return { success: false, message: `الملف غير صالح للاستيراد (${probe.reason})` };
+    }
+
+    // The fresh database created for this install is a deployment artifact,
+    // not data — but keep a copy anyway, in the same backups folder the app
+    // already watches, on the off chance the import is regretted.
+    let freshBackup = '';
+    try {
+      const dir = path.join(app.getPath('userData'), 'backups');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '');
+      freshBackup = path.join(dir, `pre_import_${stamp}.db`);
+      db.exec(`VACUUM INTO '${freshBackup.replace(/'/g, "''")}'`);
+    } catch { /* best effort — a fresh empty database has nothing of value */ }
+
+    closeDb();
+
+    try {
+      // Adopt the imported file as the live database, then drop any stale
+      // WAL/SHM that belonged to the fresh file — SQLite would otherwise try
+      // to replay them on top of the imported rows.
+      fs.copyFileSync(importPath, livePath);
+      for (const suffix of ['-wal', '-shm']) {
+        const p = `${livePath}${suffix}`;
+        if (fs.existsSync(p)) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+      }
+
+      // Bring the imported schema up to the current version. An imported file
+      // almost always came from an older build; the safety net takes a
+      // `pre_upgrade_v*` snapshot first and restores it if the migration blows
+      // up, exactly as it would on a normal launch.
+      const reopened = getDb();
+      const upgrade = migrateWithSafetyNet(reopened, app.getPath('userData'), runMigrations);
+      if (upgrade.error) {
+        // The detail is logged for diagnostics, never shown to the user: this
+        // channel is reachable before login, and raw errors leak paths and SQL.
+        console.error('[Import] migration failed:', upgrade.error);
+        return {
+          success: false,
+          message: 'تعذر ترقية قاعدة البيانات المستوردة إلى الإصدار الحالي - ستحتفظ بنسختك القديمة، أعد المحاولة بنسخة أحدث من البرنامج',
+        };
+      }
+
+      const importedDone = reopened.prepare(
+        "SELECT Value FROM settings WHERE Key = 'setup_completed'").get() as any;
+      return {
+        success: true,
+        message: 'تم استيراد قاعدة البيانات بنجاح - سيُعاد التشغيل الآن',
+        setupComplete: importedDone?.Value === '1',
+      };
+    } catch (err: any) {
+      return safeFailure('setup:importDatabase', err, 'تعذر استيراد قاعدة البيانات');
+    }
   });
 
   // ===== RESET DATABASE (WIPE ALL DATA) =====

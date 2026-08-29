@@ -281,6 +281,9 @@ console.log('\n[7] No unguarded field dereference is left on nullable state');
     'src/renderer/src/pages/assets/PaymentMethodsPage.tsx',
     // `{stats?.monthlySales?.length > 0 ? …}` wraps the map
     'src/renderer/src/pages/dashboard/Dashboard.tsx',
+    // `{Array.isArray(activeFy.openingBalances) && activeFy.openingBalances.length > 0 && (…)}`
+    // — the array check before `.length` is a real guard the regex cannot see.
+    'src/renderer/src/pages/accounting/FiscalYearPage.tsx',
   ]);
   const unexpected = offenders.filter(o => !ALLOWED.has(o.file));
   check('no NEW unguarded dereference has been introduced',

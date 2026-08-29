@@ -7,6 +7,7 @@ import { Badge } from '../../components/ui/Badge';
 import { DataTable } from '../../components/shared/DataTable';
 import { useToastStore } from '../../components/ui/Toast';
 import { currentUserId } from '../../stores/auth.store';
+import { localToday } from '../../lib/businessDay';
 
 export function TransfersPage() {
   const { showToast } = useToastStore();
@@ -19,7 +20,7 @@ export function TransfersPage() {
     FromType: 'cash_account', FromID: '',
     ToType: 'cash_account', ToID: '',
     Amount: '', TransferCost: '', TransferCostSource: 'from_amount',
-    Notes: '',
+    TransferDate: localToday(), Notes: '',
   });
 
   const fetchData = async () => {
@@ -63,6 +64,7 @@ export function TransfersPage() {
         ToType: form.ToType,
         ToID: parseInt(form.ToID),
         Amount: amount,
+        Date: form.TransferDate,
         TransferCost: cost,
         TransferCostSource: form.TransferCostSource,
         Notes: form.Notes,
@@ -76,7 +78,7 @@ export function TransfersPage() {
         if (result.transferCost > 0) msg += ` | تكلفة التحويل: ${result.transferCost.toFixed(2)}`;
         showToast('success', msg);
         setShowModal(false);
-        setForm({ FromType: 'cash_account', FromID: '', ToType: 'cash_account', ToID: '', Amount: '', TransferCost: '', TransferCostSource: 'from_amount', Notes: '' });
+        setForm({ FromType: 'cash_account', FromID: '', ToType: 'cash_account', ToID: '', Amount: '', TransferCost: '', TransferCostSource: 'from_amount', TransferDate: localToday(), Notes: '' });
         fetchData();
       } else {
         showToast('error', result.message);
@@ -163,7 +165,12 @@ export function TransfersPage() {
             </div>
           )}
 
-          <Textarea label="ملاحظات" value={form.Notes} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setForm({ ...form, Notes: e.target.value })} rows={2} />
+          <div className="grid grid-cols-2 gap-4">
+            <Input label="تاريخ التحويل" type="date" value={form.TransferDate}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, TransferDate: e.target.value })}
+              hint="قابل للتعديل - يُقيَّد التحويل في سنته المالية" />
+            <Textarea label="ملاحظات" value={form.Notes} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setForm({ ...form, Notes: e.target.value })} rows={2} />
+          </div>
         </div>
       </Modal>
     </div>

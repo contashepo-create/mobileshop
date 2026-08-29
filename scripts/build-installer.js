@@ -82,6 +82,45 @@ const updaterYaml = `provider: generic\n`
 fs.writeFileSync(path.join(resourcesDir, 'app-update.yml'), updaterYaml, 'utf-8');
 console.log('[installer] injected resources/app-update.yml into the packaged app');
 
+// Step 1.6: Ensure better-sqlite3 is compiled for Electron ABI.
+//
+// `electron-rebuild` silently fails on paths with spaces (node-gyp breaks), so
+// the packaged app ships a Node-ABI binary that crashes on launch:
+//   "compiled against NODE_MODULE_VERSION 137 ... requires NODE_MODULE_VERSION 148"
+//
+// Fix: after packaging, replace the bundled .node file with a fresh
+// Electron-ABI build. This must run AFTER electron-forge copies the native
+// module into the output, but BEFORE electron-builder creates the NSIS
+// installer.
+const sqliteNodeSrc = path.join(root, 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
+const sqliteNodeDst = path.join(pkgDir, 'resources', 'app.asar.unpacked', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
+if (fs.existsSync(sqliteNodeDst)) {
+  const electronVersion = pkgJson.devDependencies?.electron || pkgJson.dependencies?.electron || '43.3.0';
+  console.log(`[installer] rebuilding better-sqlite3 for Electron ${electronVersion} ABI...`);
+  try {
+    // Build directly with node-gyp targeting Electron, using a temp dir to
+    // avoid the space-in-path issue that breaks electron-rebuild.
+    const tmpDir = path.join('C:\\', '_msrebuild');
+    const srcDir = path.join(root, 'node_modules', 'better-sqlite3');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    // Copy source to temp dir (no spaces)
+    execSync(`xcopy "${srcDir}" "${tmpDir}\\better-sqlite3\\" /E /I /Q /Y`, { stdio: 'inherit' });
+    execSync(
+      `node-gyp rebuild --release --target=${electronVersion} --arch=x64 --dist-url=https://electronjs.org/headers --runtime=electron`,
+      { stdio: 'inherit', cwd: path.join(tmpDir, 'better-sqlite3') }
+    );
+    const rebuiltBinary = path.join(tmpDir, 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
+    if (fs.existsSync(rebuiltBinary)) {
+      fs.copyFileSync(rebuiltBinary, sqliteNodeDst);
+      console.log('[installer] ✓ replaced better_sqlite3.node with Electron-ABI build');
+    }
+  } catch (err) {
+    console.error('[installer] ⚠ electron rebuild failed, using packaged binary:', err.message?.slice(0, 120));
+  } finally {
+    try { execSync(`rmdir /s /q C:\\_msrebuild`, { stdio: 'ignore' }); } catch {}
+  }
+}
+
 // Step 2: Build NSIS installer from the prepackaged app.
 // The artifact name is pinned so the publish script can find it without
 // globbing and so latest.yml's `path` field matches the served filename.
@@ -101,9 +140,21 @@ execSync(
   },
 );
 
-// Step 3: Report the produced artifacts.
+// Step 3: Restore Node-ABI binary in node_modules so that dev/test scripts
+// (which run under Node.js, not Electron) can still load better-sqlite3.
+// electron-forge package internally runs electron-rebuild, which replaces the
+// dev binary with an Electron-ABI build — breaking require() under Node.
+console.log('[installer] Restoring better-sqlite3 for Node ABI...');
+try {
+  execSync('npm rebuild better-sqlite3', { stdio: 'inherit' });
+  console.log('[installer] ✓ node_modules/better-sqlite3 restored for Node');
+} catch {
+  console.warn('[installer] ⚠ could not restore Node-ABI binary — run "npm rebuild better-sqlite3" manually');
+}
+
+// Step 4: Report the produced artifacts.
 console.log('\n[installer] Done!');
-for (const f of fs.readdirSync(outDir).filter(f => /\.(exe|yml|blockmap)$/.test(f))) {
-  const size = (fs.statSync(path.join(outDir, f)).size / 1048576).toFixed(1);
+for (const f of readdirSync(outDir).filter(f => /\.(exe|yml|blockmap)$/.test(f))) {
+  const size = (statSync(join(outDir, f)).size / 1048576).toFixed(1);
   console.log(`  ${f}  (${size} MB)`);
 }

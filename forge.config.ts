@@ -88,7 +88,9 @@ const config: ForgeConfig = {
     },
   },
   rebuildConfig: {
-    onlyModules: ['better-sqlite3'],
+    // Disabled: electron-rebuild silently fails on paths with spaces and
+    // produces a Node-ABI binary instead of Electron-ABI. The binary is
+    // pre-compiled via `node-gyp rebuild --runtime=electron` before packaging.
   },
   makers: [
     new MakerSquirrel({
